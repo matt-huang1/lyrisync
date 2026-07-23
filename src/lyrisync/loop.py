@@ -18,7 +18,7 @@ EXIT_GRACE = 1.0
 
 # Dispatch the wrap seek this early: the osascript write takes ~150-200ms,
 # so firing at the end bound exactly would bleed the next line through.
-SEEK_LEAD_SECONDS = 0.15
+SEEK_LEAD_SECONDS = 0.46
 
 
 class LineLoop:
