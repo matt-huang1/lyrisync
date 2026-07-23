@@ -4,7 +4,9 @@ Run with ``lyrisync``. Spotify polling runs on a worker QThread that emits
 snapshots to the UI through queued signals, and LRCLIB fetches run on the
 global QThreadPool — the UI thread never runs a subprocess and never blocks
 on the network. All display decisions live in ``view_model.LyricsViewModel``;
-this module only renders them.
+this module renders them, plus the anticipatory line fade: using the next
+line's known timestamp, the current line fades out shortly before it and the
+new line fades in so it is fully legible exactly on time.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from typing import Optional
 
 from PySide6.QtCore import (
     QObject,
-    QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
     QRect,
@@ -37,23 +38,22 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QLabel,
     QMenu,
-    QStackedLayout,
     QVBoxLayout,
     QWidget,
 )
 
+from lyrisync.geometry import clamped_position
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
-from lyrisync.player_monitor import PlayerMonitor, PlayerSnapshot
+from lyrisync.macspaces import STATUS_WINDOW_LEVEL, all_desktops_behavior
+from lyrisync.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
 from lyrisync.view_model import LyricsViewModel, Mode
 
 logger = logging.getLogger(__name__)
 
 _BASE_WIDTH = 460
 _MIN_SIZE = QSize(260, 120)
-_MAX_SIZE = QSize(1400, 900)
 _CORNER_RADIUS = 14
 _RESIZE_MARGIN = 8
-_GRAB_MARGIN = 40  # px of window that must stay on-screen after a drag
 
 _MIN_OPACITY = 0.25
 _MAX_OPACITY = 1.0
@@ -62,7 +62,13 @@ _DEFAULT_OPACITY = 0.92
 _OPACITY_PER_WHEEL_NOTCH = 0.02
 _OPACITY_PER_SCROLL_PIXEL = 0.0008
 
-_FADE_MS = 180
+# Anticipatory line fade: the old line fades out over [ts-200, ts-100],
+# the new line swaps in at ts-100 and its fade-in completes AT ts, so it
+# is fully legible at its timestamp and never late.
+_FADE_OUT_LEAD_MS = 200
+_SWAP_LEAD_MS = 100
+_FADE_MS = 100
+
 _TITLE_CARD_SECONDS = 2.0
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _MAX_PLAIN_LINES = 12
@@ -76,6 +82,14 @@ QLabel#header {{ color: rgba(255, 255, 255, 120); font-size: {round(11 * scale)}
 QLabel#dim {{ color: rgba(255, 255, 255, 115); font-size: {round(14 * scale)}px; }}
 QLabel#current {{ color: rgba(255, 255, 255, 235); font-size: {round(17 * scale)}px; font-weight: 600; }}
 """
+
+
+def _clamped_point(frame: QRect, available: QRect) -> QPoint:
+    x, y = clamped_position(
+        (frame.x(), frame.y(), frame.width(), frame.height()),
+        (available.x(), available.y(), available.width(), available.height()),
+    )
+    return QPoint(x, y)
 
 
 class MonitorThread(QThread):
@@ -131,72 +145,6 @@ class FetchTask(QRunnable):
         self.signals.finished.emit(track_id, lyrics, True)
 
 
-class FadeLabel(QWidget):
-    """Word-wrapping, centred label that cross-fades between texts: the old
-    text fades out while the new fades in over ~180ms. The new text is set
-    at animation start, so a synced line always appears on time."""
-
-    def __init__(self, object_name: str) -> None:
-        super().__init__()
-        self._front = self._make(object_name)
-        self._back = self._make(object_name)
-        stack = QStackedLayout(self)
-        stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
-        stack.addWidget(self._back)
-        stack.addWidget(self._front)
-        self._front_fx = QGraphicsOpacityEffect(self._front)
-        self._back_fx = QGraphicsOpacityEffect(self._back)
-        self._front.setGraphicsEffect(self._front_fx)
-        self._back.setGraphicsEffect(self._back_fx)
-        self._front_fx.setOpacity(1.0)
-        self._back_fx.setOpacity(0.0)
-        self._animation: Optional[QParallelAnimationGroup] = None
-        self._text = ""
-
-    @staticmethod
-    def _make(object_name: str) -> QLabel:
-        label = QLabel()
-        label.setObjectName(object_name)
-        label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        label.setWordWrap(True)
-        return label
-
-    def setText(self, text: str, animate: bool = True) -> None:
-        if text == self._text:
-            return
-        self._text = text
-        if self._animation is not None:
-            self._animation.stop()
-            self._finish_swap()
-        if not animate or not self.isVisible():
-            self._front.setText(text)
-            return
-        self._back.setText(text)
-        group = QParallelAnimationGroup(self)
-        for effect, end in ((self._front_fx, 0.0), (self._back_fx, 1.0)):
-            fade = QPropertyAnimation(effect, b"opacity")
-            fade.setDuration(_FADE_MS)
-            fade.setEndValue(end)
-            group.addAnimation(fade)
-        group.finished.connect(self._on_fade_done)
-        self._animation = group
-        group.start()
-
-    def _on_fade_done(self) -> None:
-        self._animation = None
-        self._finish_swap()
-
-    def _finish_swap(self) -> None:
-        # Back (new text) becomes front; the hidden label is cleared so the
-        # layout's height tracks only the visible text.
-        self._front, self._back = self._back, self._front
-        self._front_fx, self._back_fx = self._back_fx, self._front_fx
-        self._front.setText(self._text)
-        self._front_fx.setOpacity(1.0)
-        self._back.setText("")
-        self._back_fx.setOpacity(0.0)
-
-
 class LyricsWindow(QWidget):
     def __init__(self, provider: Optional[LyricsProvider] = None) -> None:
         super().__init__()
@@ -210,35 +158,47 @@ class LyricsWindow(QWidget):
         self._press_geometry = QRect()
         self._press_global = QPoint()
         self._current_snapshot: Optional[PlayerSnapshot] = None
+        self._last_state = PlaybackState.NOT_RUNNING
         self._title_card_until = 0.0
+        self._card_key: Optional[tuple] = None
         self._dots_frame = 0
         self._scale = 0.0
         self._all_desktops = False
         self._native_applied = False
+        # NSWindow (behavior, level) as Qt configured it, captured before
+        # the first enable so disabling restores Qt's exact defaults.
+        self._saved_native: Optional[tuple[int, int]] = None
+        self._displayed_index: Optional[int] = None
+        self._fade_anim: Optional[QPropertyAnimation] = None
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumSize(_MIN_SIZE)
-        self.setMaximumSize(_MAX_SIZE)
         self.setMouseTracking(True)
 
-        self._header = QLabel()
-        self._header.setObjectName("header")
-        self._header.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self._header.setWordWrap(True)
-        self._previous = FadeLabel("dim")
-        self._current = FadeLabel("current")
-        self._upcoming = FadeLabel("dim")
+        self._header = self._make_label("header")
+        self._previous = self._make_label("dim")
+        self._current = self._make_label("current")
+        self._upcoming = self._make_label("dim")
+        self._current_fx = QGraphicsOpacityEffect(self._current)
+        self._current_fx.setOpacity(1.0)
+        self._current.setGraphicsEffect(self._current_fx)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 14, 20, 16)
-        layout.setSpacing(6)
-        layout.addStretch(1)
-        for widget in (self._header, self._previous, self._current, self._upcoming):
-            layout.addWidget(widget)
-        layout.addStretch(1)
+        self._layout = QVBoxLayout(self)
+        self._layout.addWidget(self._header)
+        self._layout.addStretch(1)
+        for widget in (self._previous, self._current, self._upcoming):
+            self._layout.addWidget(widget)
+        self._layout.addStretch(1)
+
+        self._fadeout_timer = QTimer(self)
+        self._fadeout_timer.setSingleShot(True)
+        self._fadeout_timer.timeout.connect(self._begin_fade_out)
+        self._swap_timer = QTimer(self)
+        self._swap_timer.setSingleShot(True)
+        self._swap_timer.timeout.connect(self._predicted_swap)
 
         self._restore_settings()
         self._apply_scale()
@@ -260,13 +220,25 @@ class LyricsWindow(QWidget):
 
         self._render()
 
+    @staticmethod
+    def _make_label(object_name: str) -> QLabel:
+        label = QLabel()
+        label.setObjectName(object_name)
+        label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        label.setWordWrap(True)
+        return label
+
     # -- monitor slots (UI thread, queued from MonitorThread) --------------
 
     def _on_track_change(self, snapshot: PlayerSnapshot) -> None:
+        self._last_state = snapshot.state
         self._current_snapshot = snapshot if snapshot.is_music_track else None
-        if snapshot.has_track:
+        if snapshot.has_track and snapshot.track_key != self._card_key:
+            self._card_key = snapshot.track_key
             self._title_card_until = time.monotonic() + _TITLE_CARD_SECONDS
             QTimer.singleShot(int(_TITLE_CARD_SECONDS * 1000) + 100, self._render)
+        elif not snapshot.has_track:
+            self._card_key = None
         if self._view_model.track_changed(snapshot):
             self._start_fetch(snapshot)
         self._render()
@@ -278,10 +250,27 @@ class LyricsWindow(QWidget):
             self._render()
 
     def _on_position_update(self, snapshot: PlayerSnapshot) -> None:
-        if self._view_model.position_changed(snapshot.position_seconds):
+        self._last_state = snapshot.state
+        self._view_model.position_changed(snapshot.position_seconds)
+        timeline = self._view_model.timeline()
+        if timeline is None:
+            return
+        lines, index = timeline
+        if self._displayed_index != index:
+            # Seek, pause-drift correction, or a missed prediction: snap.
             self._render()
+        if (
+            snapshot.state is PlaybackState.PLAYING
+            and snapshot.position_seconds is not None
+        ):
+            self._schedule_line_advance(lines, index, snapshot.position_seconds)
+        else:
+            self._cancel_line_schedule()
 
     def _on_state_change(self, snapshot: PlayerSnapshot) -> None:
+        self._last_state = snapshot.state
+        if snapshot.state is not PlaybackState.PLAYING:
+            self._cancel_line_schedule()
         if self._view_model.player_state_changed(snapshot.state):
             self._render()
 
@@ -299,38 +288,111 @@ class LyricsWindow(QWidget):
             self._render()
 
     def _tick_dots(self) -> None:
-        if self._view_model.display().mode is Mode.FETCHING:
+        if self._view_model.display().mode is Mode.FETCHING and not self._card_active():
             self._dots_frame = (self._dots_frame + 1) % len(_DOTS_FRAMES)
-            self._current.setText(_DOTS_FRAMES[self._dots_frame], animate=False)
+            self._current.setText(_DOTS_FRAMES[self._dots_frame])
+
+    # -- anticipatory line fade --------------------------------------------
+
+    def _schedule_line_advance(
+        self, lines: list, index: int, position_seconds: float
+    ) -> None:
+        """(Re)arm the fade-out/swap timers from the next line's timestamp.
+        Rescheduled on every poll, so seeks correct the timing within one
+        poll interval."""
+        upcoming = index + 1
+        if upcoming >= len(lines):
+            self._fadeout_timer.stop()
+            self._swap_timer.stop()
+            return
+        eta_ms = int((lines[upcoming][0] - position_seconds) * 1000)
+        if eta_ms <= 0:
+            return  # the poll loop snaps it on the next update
+        self._fadeout_timer.start(max(0, eta_ms - _FADE_OUT_LEAD_MS))
+        self._swap_timer.start(max(0, eta_ms - _SWAP_LEAD_MS))
+
+    def _begin_fade_out(self) -> None:
+        if self._view_model.timeline() is None or self._card_active():
+            return
+        if self._last_state is PlaybackState.PLAYING:
+            self._animate_current_opacity(0.0)
+
+    def _predicted_swap(self) -> None:
+        timeline = self._view_model.timeline()
+        if timeline is None or self._card_active():
+            return
+        if self._last_state is not PlaybackState.PLAYING:
+            return
+        lines, index = timeline
+        target = index + 1
+        # Only advance one step beyond what's on screen; anything else
+        # means the world moved (seek/track change) and _render owns it.
+        if self._displayed_index != index or target >= len(lines):
+            return
+        self._set_lines(lines, target)
+        self._displayed_index = target
+        self._current_fx.setOpacity(0.0)
+        self._animate_current_opacity(1.0)
+
+    def _animate_current_opacity(self, end: float) -> None:
+        if self._fade_anim is not None:
+            self._fade_anim.stop()
+        animation = QPropertyAnimation(self._current_fx, b"opacity", self)
+        animation.setDuration(_FADE_MS)
+        animation.setEndValue(end)
+        animation.start()
+        self._fade_anim = animation
+
+    def _cancel_line_schedule(self) -> None:
+        self._fadeout_timer.stop()
+        self._swap_timer.stop()
+        if self._fade_anim is not None:
+            self._fade_anim.stop()
+            self._fade_anim = None
+        self._current_fx.setOpacity(1.0)
+
+    def _set_lines(self, lines: list, index: int) -> None:
+        self._previous.setText(lines[index - 1][1] if index >= 1 else "")
+        self._current.setText(lines[index][1] if index >= 0 else "")
+        self._upcoming.setText(lines[index + 1][1] if index + 1 < len(lines) else "")
 
     # -- rendering ---------------------------------------------------------
 
+    def _card_active(self) -> bool:
+        return time.monotonic() < self._title_card_until
+
     def _render(self) -> None:
         display = self._view_model.display()
+        self._cancel_line_schedule()
 
-        if (
-            display.header
-            and display.mode is not Mode.IDLE
-            and time.monotonic() < self._title_card_until
-        ):
+        # Persistent compact header whenever a track is known.
+        self._header.setText(display.header)
+        self._header.setVisible(bool(display.header))
+
+        if display.header and display.mode is not Mode.IDLE and self._card_active():
             # Title card: the song announces itself before lyrics start.
-            self._header.setVisible(False)
-            self._previous.setText("", animate=False)
+            self._displayed_index = None
+            self._previous.setText("")
             self._current.setText(display.header)
-            self._upcoming.setText("", animate=False)
+            self._upcoming.setText("")
             return
 
+        if display.mode is Mode.SYNCED:
+            timeline = self._view_model.timeline()
+            if timeline is not None:
+                lines, index = timeline
+                self._set_lines(lines, index)
+                self._displayed_index = index
+            return
+
+        self._displayed_index = None
         current = display.current
-        animate_current = True
         if display.mode is Mode.PLAIN:
             current = self._cap_plain(display.plain_text)
         elif display.mode is Mode.FETCHING:
             current = _DOTS_FRAMES[self._dots_frame]
-            animate_current = False
-        self._header.setText(display.header)
-        self._header.setVisible(bool(display.header))
         self._previous.setText(display.previous)
-        self._current.setText(current, animate=animate_current)
+        self._current.setText(current)
         self._upcoming.setText(display.upcoming)
 
     @staticmethod
@@ -352,11 +414,20 @@ class LyricsWindow(QWidget):
         self._apply_scale()
 
     def _apply_scale(self) -> None:
-        """Font sizes track window width."""
-        scale = max(0.7, min(2.2, self.width() / _BASE_WIDTH))
+        """Fonts, margins, and spacing track window width near-linearly, so
+        text mass stays visually proportional from min size to max."""
+        scale = max(0.65, self.width() / _BASE_WIDTH)
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
             self.setStyleSheet(_style_for(scale))
+            self._layout.setContentsMargins(
+                round(20 * scale), round(14 * scale), round(20 * scale), round(16 * scale)
+            )
+            self._layout.setSpacing(round(6 * scale))
+
+    def _available_geometry(self) -> QRect:
+        screen = self.screen() or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen else QRect(0, 0, 1440, 900)
 
     # -- interaction: drag, resize, scroll-opacity, menu -------------------
 
@@ -402,8 +473,9 @@ class LyricsWindow(QWidget):
         if self._resize_edges & Qt.Edge.BottomEdge:
             rect.setBottom(rect.bottom() + delta.y())
 
-        width = max(_MIN_SIZE.width(), min(_MAX_SIZE.width(), rect.width()))
-        height = max(_MIN_SIZE.height(), min(_MAX_SIZE.height(), rect.height()))
+        maximum = self._available_geometry().size()
+        width = max(_MIN_SIZE.width(), min(maximum.width(), rect.width()))
+        height = max(_MIN_SIZE.height(), min(maximum.height(), rect.height()))
         # Re-anchor so the edge being dragged is the one that gives.
         if self._resize_edges & Qt.Edge.LeftEdge:
             rect.setLeft(rect.right() - width + 1)
@@ -432,31 +504,20 @@ class LyricsWindow(QWidget):
             self.unsetCursor()
 
     def mouseReleaseEvent(self, event) -> None:
-        if self._drag_offset is not None:
-            self._nudge_onscreen()
+        was_interacting = self._drag_offset is not None or bool(self._resize_edges)
         self._drag_offset = None
         self._resize_edges = Qt.Edges()
-        self._save_settings()
+        if was_interacting:
+            self._nudge_onscreen()
+            # The window system may settle the final geometry after this
+            # event; re-check once the event loop has caught up.
+            QTimer.singleShot(0, self._nudge_onscreen)
+            self._save_settings()
 
     def _nudge_onscreen(self) -> None:
-        """After a drag, keep at least a ~40px grab area visible. Free
-        placement otherwise — no snapping or alignment."""
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        frame = self.frameGeometry()
-        x, y = frame.x(), frame.y()
-        if frame.right() < available.left() + _GRAB_MARGIN:
-            x = available.left() + _GRAB_MARGIN - frame.width()
-        elif frame.left() > available.right() - _GRAB_MARGIN:
-            x = available.right() - _GRAB_MARGIN
-        if frame.bottom() < available.top() + _GRAB_MARGIN:
-            y = available.top() + _GRAB_MARGIN - frame.height()
-        elif frame.top() > available.bottom() - _GRAB_MARGIN:
-            y = available.bottom() - _GRAB_MARGIN
-        if (x, y) != (frame.x(), frame.y()):
-            self.move(x, y)
+        target = _clamped_point(self.frameGeometry(), self._available_geometry())
+        if target != self.frameGeometry().topLeft():
+            self.move(target)
 
     def wheelEvent(self, event) -> None:
         pixel_delta = event.pixelDelta().y()
@@ -490,30 +551,55 @@ class LyricsWindow(QWidget):
         self._apply_all_desktops(enabled)
         self._save_settings()
 
-    def _apply_all_desktops(self, enabled: bool) -> None:
-        """Set NSWindowCollectionBehaviorCanJoinAllSpaces on the native
-        window. Qt has no cross-platform API for Spaces, hence pyobjc."""
+    def _nswindow(self):
+        """The native NSWindow, or None off-cocoa / without pyobjc."""
         if QApplication.platformName() != "cocoa":
             # winId() is only an NSView under the cocoa platform plugin;
             # casting it blindly (e.g. offscreen in tests) would crash.
-            return
+            return None
         try:
             import objc
-            from AppKit import NSWindowCollectionBehaviorCanJoinAllSpaces
         except ImportError:
             logger.warning("pyobjc unavailable — 'show on all desktops' disabled")
-            return
+            return None
         try:
             view = objc.objc_object(c_void_p=int(self.winId()))
-            nswindow = view.window()
-            if nswindow is None:
-                return
-            behavior = int(nswindow.collectionBehavior())
+            return view.window()
+        except Exception:
+            logger.exception("failed to resolve NSWindow")
+            return None
+
+    def _apply_all_desktops(self, enabled: bool) -> None:
+        """All-desktops toggle on the native window: CanJoinAllSpaces +
+        FullScreenAuxiliary with Qt's conflicting FullScreenPrimary bit
+        cleared (Primary wins over Auxiliary and blocks full-screen
+        Spaces), at status window level so the overlay stays above
+        full-screen content. Disabling restores Qt's saved defaults. Qt
+        has no cross-platform API for Spaces, hence pyobjc."""
+        nswindow = self._nswindow()
+        if nswindow is None:
+            return
+        try:
             if enabled:
-                behavior |= int(NSWindowCollectionBehaviorCanJoinAllSpaces)
-            else:
-                behavior &= ~int(NSWindowCollectionBehaviorCanJoinAllSpaces)
-            nswindow.setCollectionBehavior_(behavior)
+                if self._saved_native is None:
+                    self._saved_native = (
+                        int(nswindow.collectionBehavior()),
+                        int(nswindow.level()),
+                    )
+                nswindow.setCollectionBehavior_(
+                    all_desktops_behavior(int(nswindow.collectionBehavior()))
+                )
+                nswindow.setLevel_(STATUS_WINDOW_LEVEL)
+            elif self._saved_native is not None:
+                behavior, level = self._saved_native
+                self._saved_native = None
+                nswindow.setCollectionBehavior_(behavior)
+                nswindow.setLevel_(level)
+            logger.debug(
+                "native state: behavior=0x%x level=%d",
+                int(nswindow.collectionBehavior()),
+                int(nswindow.level()),
+            )
         except Exception:
             logger.exception("failed to set NSWindow collection behavior")
 
@@ -529,14 +615,15 @@ class LyricsWindow(QWidget):
         except (TypeError, ValueError):
             opacity = _DEFAULT_OPACITY
         self._set_opacity(opacity)
+        available = self._available_geometry()
         size = self._settings.value("window/size")
         if isinstance(size, QSize):
-            self.resize(size.expandedTo(_MIN_SIZE).boundedTo(_MAX_SIZE))
+            self.resize(size.expandedTo(_MIN_SIZE).boundedTo(available.size()))
         else:
             self.resize(_BASE_WIDTH, 170)
         position = self._settings.value("window/pos")
         if isinstance(position, QPoint):
-            self.move(position)
+            self.move(_clamped_point(QRect(position, self.size()), available))
         self._all_desktops = self._settings.value(
             "window/all_desktops", False, type=bool
         )

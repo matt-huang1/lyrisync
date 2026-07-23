@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Optional
 
@@ -212,6 +212,7 @@ class PlayerMonitor:
         self.on_position_update = on_position_update
         self.on_state_change = on_state_change
         self._last: Optional[PlayerSnapshot] = None
+        self._track_loss_pending = False
         self._running = False
 
     def poll_once(self) -> Optional[PlayerSnapshot]:
@@ -223,6 +224,22 @@ class PlayerMonitor:
             return None
 
         previous = self._last
+
+        # Debounce one-poll track dropouts: mid item-switch (DJ hand-offs,
+        # queue advances) AppleScript can briefly report no track. A single
+        # such poll keeps the previous track's fields (state still updates);
+        # only a second consecutive trackless poll is a real track loss.
+        if snapshot.track_key is not None:
+            self._track_loss_pending = False
+        elif (
+            previous is not None
+            and previous.track_key is not None
+            and not self._track_loss_pending
+        ):
+            self._track_loss_pending = True
+            # Keep the track's identity/metadata; position is unknown this
+            # poll, so no position event fires from the substitute.
+            snapshot = replace(previous, state=snapshot.state, position_seconds=None)
         self._last = snapshot
 
         if previous is None or snapshot.state != previous.state:

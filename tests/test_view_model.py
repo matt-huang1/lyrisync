@@ -152,7 +152,7 @@ def test_position_ignored_unless_synced():
     assert vm.position_changed(None) is False
 
 
-def test_stop_and_quit_reset_to_idle():
+def test_stop_suspends_and_resume_restores():
     vm = LyricsViewModel()
     vm.track_changed(snapshot())
     vm.fetch_completed("trackA", SYNCED)
@@ -160,9 +160,80 @@ def test_stop_and_quit_reset_to_idle():
     assert vm.display().mode is Mode.IDLE
     # Repeated stop reports no change (no redraw churn while idle).
     assert vm.player_state_changed(PlaybackState.NOT_RUNNING) is False
-    # Playing/paused don't disturb the display by themselves.
-    assert vm.player_state_changed(PlaybackState.PLAYING) is False
+    # Resuming the same track fires no track-change event, so the display
+    # must restore from the suspended state.
+    assert vm.player_state_changed(PlaybackState.PLAYING) is True
+    assert vm.display().mode is Mode.SYNCED
+    # Pause doesn't disturb the display.
     assert vm.player_state_changed(PlaybackState.PAUSED) is False
+
+
+def test_fetch_completing_while_suspended_stays_hidden_until_resume():
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.player_state_changed(PlaybackState.STOPPED)  # suspend mid-fetch
+    assert vm.fetch_completed("trackA", SYNCED) is False  # nothing visible
+    assert vm.display().mode is Mode.IDLE
+    assert vm.player_state_changed(PlaybackState.PLAYING) is True
+    assert vm.display().mode is Mode.SYNCED
+
+
+def test_duplicate_track_event_keeps_display_and_skips_fetch():
+    vm = LyricsViewModel()
+    assert vm.track_changed(snapshot()) is True
+    vm.fetch_completed("trackA", SYNCED)
+    # Same (kind, id) re-announced (metadata settling, monitor blips):
+    # no loading flash, no redundant fetch.
+    assert vm.track_changed(snapshot()) is False
+    assert vm.display().mode is Mode.SYNCED
+
+
+def test_duplicate_track_event_while_fetching_skips_second_fetch():
+    vm = LyricsViewModel()
+    assert vm.track_changed(snapshot()) is True
+    assert vm.track_changed(snapshot()) is False  # first fetch still owns it
+    assert vm.display().mode is Mode.FETCHING
+    vm.fetch_completed("trackA", SYNCED)
+    assert vm.display().mode is Mode.SYNCED
+
+
+def test_duplicate_track_event_in_error_refetches():
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None, ok=False, now=10.0)
+    assert vm.display().mode is Mode.ERROR
+    # Re-announcement may carry corrected metadata — worth a new attempt.
+    assert vm.track_changed(snapshot()) is True
+    assert vm.display().mode is Mode.FETCHING
+
+
+def test_dj_transition_sequence_no_loading_flash():
+    """narration → song (same ID) → lyrics, once; duplicates change nothing."""
+    vm = LyricsViewModel()
+    assert vm.track_changed(dj_narration(track_id="shared123")) is False
+    assert vm.display().mode is Mode.NON_MUSIC
+
+    assert vm.track_changed(snapshot(track_id="shared123", title="Company")) is True
+    vm.fetch_completed("shared123", SYNCED)
+    assert vm.display().mode is Mode.SYNCED
+
+    # Duplicate song announcement (settling metadata / debounced blip
+    # leaking through): display must not flash back to loading.
+    assert vm.track_changed(snapshot(track_id="shared123", title="Company")) is False
+    assert vm.display().mode is Mode.SYNCED
+
+
+def test_timeline_only_in_synced_mode():
+    vm = LyricsViewModel()
+    assert vm.timeline() is None
+    vm.track_changed(snapshot())
+    assert vm.timeline() is None  # fetching
+    vm.fetch_completed("trackA", SYNCED)
+    lines, index = vm.timeline()
+    assert lines == SYNCED.synced
+    assert index == -1
+    vm.position_changed(12.0)
+    assert vm.timeline()[1] == 0
 
 
 def dj_narration(track_id="shared123"):
@@ -178,12 +249,14 @@ def dj_narration(track_id="shared123"):
     )
 
 
-def test_dj_narration_shows_no_lyrics_without_fetch():
+def test_dj_narration_shows_header_with_empty_body():
     vm = LyricsViewModel()
     assert vm.track_changed(dj_narration()) is False  # no fetch requested
     display = vm.display()
-    assert display.mode is Mode.NO_LYRICS
+    assert display.mode is Mode.NON_MUSIC
     assert display.header == "Up next — DJ X"
+    assert display.current == ""  # never "no lyrics found" for narration
+    assert display.previous == "" and display.upcoming == ""
 
 
 def test_dj_narration_into_song_with_same_id_fetches():

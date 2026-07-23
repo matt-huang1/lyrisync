@@ -262,7 +262,7 @@ def test_pause_fires_state_change(monkeypatch):
     assert recorder.events[0][1].state is pm.PlaybackState.PAUSED
 
 
-def test_quit_spotify_fires_state_and_track_change(monkeypatch):
+def test_quit_spotify_fires_state_then_track_change(monkeypatch):
     fake = use_output(monkeypatch, batched_output())
     recorder = Recorder()
     monitor = make_monitor(recorder)
@@ -270,9 +270,62 @@ def test_quit_spotify_fires_state_and_track_change(monkeypatch):
     recorder.events.clear()
 
     fake.output = "not_running"
+    # First trackless poll is debounced (could be a one-poll blip): only
+    # the state change fires, track metadata is retained.
     snapshot = monitor.poll_once()
     assert snapshot.state is pm.PlaybackState.NOT_RUNNING
+    assert snapshot.has_track
+    assert recorder.names() == ["state"]
+
+    # Second consecutive trackless poll confirms the loss.
+    snapshot = monitor.poll_once()
+    assert not snapshot.has_track
     assert recorder.names() == ["state", "track"]
+
+
+def test_single_trackless_blip_is_debounced(monkeypatch):
+    # Mid item-switch AppleScript can report no track for one poll; that
+    # must not fire a track change to nothing and back.
+    fake = use_output(monkeypatch, batched_output())
+    recorder = Recorder()
+    monitor = make_monitor(recorder)
+    monitor.poll_once()
+    recorder.events.clear()
+
+    fake.output = "playing"  # state-only: no track fields this poll
+    monitor.poll_once()
+    fake.output = batched_output()  # track is back, unchanged
+    monitor.poll_once()
+    assert "track" not in recorder.names()
+
+
+def test_state_change_during_blip_still_fires(monkeypatch):
+    fake = use_output(monkeypatch, batched_output())
+    recorder = Recorder()
+    monitor = make_monitor(recorder)
+    monitor.poll_once()
+    recorder.events.clear()
+
+    fake.output = "paused"  # trackless blip AND a state change
+    snapshot = monitor.poll_once()
+    assert recorder.names() == ["state"]
+    assert snapshot.state is pm.PlaybackState.PAUSED
+    assert snapshot.has_track  # metadata retained through the blip
+
+
+def test_blip_then_new_track_fires_change(monkeypatch):
+    fake = use_output(monkeypatch, batched_output())
+    recorder = Recorder()
+    monitor = make_monitor(recorder)
+    monitor.poll_once()
+    recorder.events.clear()
+
+    fake.output = "playing"
+    monitor.poll_once()
+    fake.output = batched_output(track_id="next999", title="Next")
+    monitor.poll_once()
+    assert "track" in recorder.names()
+    assert dict(recorder.events)["track"].track_id == "next999"
 
 
 def test_transient_query_failure_keeps_state(monkeypatch):

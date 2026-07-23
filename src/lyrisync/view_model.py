@@ -23,6 +23,7 @@ class Mode(Enum):
     SYNCED = "synced"      # timed lines advancing with playback
     PLAIN = "plain"        # lyrics exist but carry no timestamps
     NO_LYRICS = "no_lyrics"
+    NON_MUSIC = "non_music"  # DJ narration, ads: header only, empty body
     ERROR = "error"        # fetch failed (network/server); not cached, will retry
 
 
@@ -51,23 +52,39 @@ class LyricsViewModel:
     def __init__(self) -> None:
         self._mode = Mode.IDLE
         self._track_id: Optional[str] = None
+        self._identity: Optional[tuple] = None
         self._header = ""
         self._lyrics: Optional[TrackLyrics] = None
         self._index = -1
         self._error_at = 0.0
+        self._suspended_mode: Optional[Mode] = None
 
     def track_changed(self, snapshot: PlayerSnapshot) -> bool:
         """Returns True when the new track needs a lyrics fetch."""
         if not snapshot.has_track:
             self._reset()
             return False
+        identity = (snapshot.track_kind, snapshot.track_id)
+        if identity == self._identity:
+            # Duplicate announcement of the item already shown (metadata
+            # settling, transient monitor blips): keep the display — never
+            # flash back to loading or dispatch a redundant fetch. ERROR is
+            # the exception: fresh metadata is worth a new attempt.
+            self._suspended_mode = None
+            self._header = f"{snapshot.title} — {snapshot.artist}"
+            if self._mode is Mode.ERROR and snapshot.is_music_track:
+                self._mode = Mode.FETCHING
+                return True
+            return False
+        self._identity = identity
+        self._suspended_mode = None
         self._track_id = snapshot.track_id
         self._header = f"{snapshot.title} — {snapshot.artist}"
         self._lyrics = None
         self._index = -1
         if not snapshot.is_music_track:
-            # DJ narration, ads: nothing to look up.
-            self._mode = Mode.NO_LYRICS
+            # DJ narration, ads: header only, nothing to look up.
+            self._mode = Mode.NON_MUSIC
             return False
         self._mode = Mode.FETCHING
         return True
@@ -86,17 +103,21 @@ class LyricsViewModel:
         if track_id != self._track_id:
             return False
         if not ok:
+            resolved = Mode.ERROR
             self._lyrics = None
-            self._mode = Mode.ERROR
             self._error_at = now
-            return True
-        self._lyrics = lyrics
-        if lyrics is None:
-            self._mode = Mode.NO_LYRICS
-        elif lyrics.synced:
-            self._mode = Mode.SYNCED
+        elif lyrics is None:
+            resolved = Mode.NO_LYRICS
+            self._lyrics = None
         else:
-            self._mode = Mode.PLAIN
+            resolved = Mode.SYNCED if lyrics.synced else Mode.PLAIN
+            self._lyrics = lyrics
+        if self._mode is Mode.IDLE and self._suspended_mode is not None:
+            # Player is stopped right now; remember the outcome for the
+            # resume-restore instead of showing lyrics over the idle state.
+            self._suspended_mode = resolved
+            return False
+        self._mode = resolved
         return True
 
     def retry_due(self, now: float) -> bool:
@@ -123,16 +144,33 @@ class LyricsViewModel:
         if state in (PlaybackState.NOT_RUNNING, PlaybackState.STOPPED):
             if self._mode is Mode.IDLE:
                 return False
-            self._reset()
+            # Suspend rather than reset: a stop can be a one-poll blip mid
+            # item-switch, and resuming the same track fires no track-change
+            # event to rebuild from.
+            self._suspended_mode = self._mode
+            self._mode = Mode.IDLE
+            return True
+        if self._mode is Mode.IDLE and self._suspended_mode is not None:
+            self._mode = self._suspended_mode
+            self._suspended_mode = None
             return True
         return False
+
+    def timeline(self) -> Optional[tuple[list, int]]:
+        """(synced lines, current index) while in SYNCED mode — what the
+        window's anticipatory line-fade scheduler needs."""
+        if self._mode is Mode.SYNCED and self._lyrics is not None:
+            return self._lyrics.synced, self._index
+        return None
 
     def _reset(self) -> None:
         self._mode = Mode.IDLE
         self._track_id = None
+        self._identity = None
         self._header = ""
         self._lyrics = None
         self._index = -1
+        self._suspended_mode = None
 
     def display(self) -> Display:
         mode = self._mode
@@ -144,6 +182,8 @@ class LyricsViewModel:
             return Display(mode=mode, header=self._header)
         if mode is Mode.NO_LYRICS:
             return Display(mode=mode, header=self._header, current="no lyrics found")
+        if mode is Mode.NON_MUSIC:
+            return Display(mode=mode, header=self._header)
         if mode is Mode.ERROR:
             return Display(
                 mode=mode,
