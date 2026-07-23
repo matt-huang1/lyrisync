@@ -11,10 +11,12 @@ from the player position on every poll.
 
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import sys
 
-from lyrisync.lyrics_provider import LyricsProvider, TrackLyrics
+from lyrisync.lyrics_provider import LyricsError, LyricsProvider, TrackLyrics
 from lyrisync.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
 from lyrisync.sync import current_line_index
 
@@ -76,7 +78,11 @@ class LyricsApp:
             self._println("\n(no track loaded)")
             return
         self._println(f"\n♪ {snapshot.artist} — {snapshot.title}")
-        lyrics = self.provider.get_lyrics(snapshot)
+        try:
+            lyrics = self.provider.get_lyrics(snapshot)
+        except LyricsError as exc:
+            self._println(f"  lyrics unavailable ({exc}) — will retry next track")
+            return
         if lyrics is None:
             self._println("  no lyrics found")
         elif lyrics.kind == "synced":
@@ -100,6 +106,9 @@ class LyricsApp:
 
 
 def main() -> int:
+    # WARNING by default so log lines don't garble the in-place display;
+    # LYRISYNC_LOG=INFO shows each LRCLIB request and status.
+    logging.basicConfig(level=os.environ.get("LYRISYNC_LOG", "WARNING"))
     app = LyricsApp(LyricsProvider())
     monitor = PlayerMonitor(
         poll_interval=0.3,

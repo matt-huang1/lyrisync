@@ -3,56 +3,55 @@ import pytest
 from lyrisync import player_monitor as pm
 
 
-class FakeOsascript:
-    """Maps AppleScript expressions to canned responses; a response that is
-    an exception instance gets raised instead."""
-
-    def __init__(self, responses):
-        self.responses = dict(responses)
-
-    def __call__(self, expression):
-        value = self.responses[expression]
-        if isinstance(value, Exception):
-            raise value
-        return value
-
-
-def playing_responses(
+def batched_output(
+    state="playing",
     track_id="4uLU6hMCjMI75M1A2tKUQC",
     title="Song",
     artist="Artist",
     album="Album",
-    state="playing",
     duration="225000",
     position="42.5",
 ):
-    return {
-        pm._SCRIPT_IS_RUNNING: "true",
-        pm._SCRIPT_PLAYER_STATE: state,
-        pm._SCRIPT_TRACK_URL: f"spotify:track:{track_id}",
-        pm._SCRIPT_TRACK_NAME: title,
-        pm._SCRIPT_TRACK_ARTIST: artist,
-        pm._SCRIPT_TRACK_ALBUM: album,
-        pm._SCRIPT_TRACK_DURATION: duration,
-        pm._SCRIPT_PLAYER_POSITION: position,
-    }
+    """What the single osascript call prints for a loaded track."""
+    return "\n".join(
+        [state, f"spotify:track:{track_id}", title, artist, album, duration, position]
+    )
 
 
-def use_responses(monkeypatch, responses):
-    fake = FakeOsascript(responses)
+class FakeOsascript:
+    """Stands in for _osascript: returns .output, or raises it if it is an
+    exception. Asserts the batched snapshot script is what gets run."""
+
+    def __init__(self, output):
+        self.output = output
+        self.calls = 0
+
+    def __call__(self, script):
+        assert script == pm._SNAPSHOT_SCRIPT
+        self.calls += 1
+        if isinstance(self.output, Exception):
+            raise self.output
+        return self.output
+
+
+def use_output(monkeypatch, output):
+    fake = FakeOsascript(output)
     monkeypatch.setattr(pm, "_osascript", fake)
     return fake
 
 
+# -- snapshot parsing ----------------------------------------------------
+
+
 def test_snapshot_not_running(monkeypatch):
-    use_responses(monkeypatch, {pm._SCRIPT_IS_RUNNING: "false"})
+    use_output(monkeypatch, "not_running")
     snapshot = pm.read_snapshot()
     assert snapshot.state is pm.PlaybackState.NOT_RUNNING
     assert not snapshot.has_track
 
 
 def test_snapshot_playing_full_fields(monkeypatch):
-    use_responses(monkeypatch, playing_responses())
+    use_output(monkeypatch, batched_output())
     snapshot = pm.read_snapshot()
     assert snapshot.state is pm.PlaybackState.PLAYING
     assert snapshot.track_id == "4uLU6hMCjMI75M1A2tKUQC"
@@ -63,10 +62,16 @@ def test_snapshot_playing_full_fields(monkeypatch):
     assert snapshot.position_seconds == pytest.approx(42.5)
 
 
+def test_snapshot_single_call_per_poll(monkeypatch):
+    fake = use_output(monkeypatch, batched_output())
+    pm.read_snapshot()
+    assert fake.calls == 1
+
+
 def test_snapshot_no_track_loaded(monkeypatch):
-    responses = playing_responses(state="stopped")
-    responses[pm._SCRIPT_TRACK_URL] = pm.SpotifyQueryError("no current track")
-    use_responses(monkeypatch, responses)
+    # The AppleScript try block leaves only the state line when track
+    # fields error (fresh launch, nothing loaded).
+    use_output(monkeypatch, "stopped")
     snapshot = pm.read_snapshot()
     assert snapshot.state is pm.PlaybackState.STOPPED
     assert not snapshot.has_track
@@ -74,9 +79,31 @@ def test_snapshot_no_track_loaded(monkeypatch):
     assert snapshot.position_seconds is None
 
 
-def test_locale_comma_position(monkeypatch):
-    use_responses(monkeypatch, playing_responses(position="42,5"))
-    assert pm.read_snapshot().position_seconds == pytest.approx(42.5)
+def test_snapshot_unexpected_line_count_degrades_to_stateless(monkeypatch):
+    use_output(monkeypatch, "playing\nspotify:track:abc\nTitle")
+    snapshot = pm.read_snapshot()
+    assert snapshot.state is pm.PlaybackState.PLAYING
+    assert not snapshot.has_track
+
+
+def test_snapshot_bad_number_degrades(monkeypatch):
+    use_output(monkeypatch, batched_output(duration="garbage"))
+    snapshot = pm.read_snapshot()
+    assert snapshot.state is pm.PlaybackState.PLAYING
+    assert not snapshot.has_track
+
+
+def test_locale_comma_numbers(monkeypatch):
+    use_output(monkeypatch, batched_output(position="42,5", duration="225000"))
+    snapshot = pm.read_snapshot()
+    assert snapshot.position_seconds == pytest.approx(42.5)
+    assert snapshot.duration_ms == 225000
+
+
+def test_empty_output_raises(monkeypatch):
+    use_output(monkeypatch, "")
+    with pytest.raises(pm.SpotifyQueryError):
+        pm.read_snapshot()
 
 
 @pytest.mark.parametrize(
@@ -111,6 +138,9 @@ def test_parse_state_unrecognized():
         pm._parse_state("garbage")
 
 
+# -- monitor callbacks ---------------------------------------------------
+
+
 class Recorder:
     def __init__(self):
         self.events = []
@@ -131,75 +161,75 @@ def make_monitor(recorder):
 
 
 def test_first_poll_fires_initial_events(monkeypatch):
-    use_responses(monkeypatch, playing_responses())
+    use_output(monkeypatch, batched_output())
     recorder = Recorder()
     make_monitor(recorder).poll_once()
     assert recorder.names() == ["state", "track", "position"]
 
 
 def test_steady_state_only_fires_position(monkeypatch):
-    fake = use_responses(monkeypatch, playing_responses())
+    fake = use_output(monkeypatch, batched_output())
     recorder = Recorder()
     monitor = make_monitor(recorder)
     monitor.poll_once()
     recorder.events.clear()
 
-    fake.responses[pm._SCRIPT_PLAYER_POSITION] = "43.1"
+    fake.output = batched_output(position="43.1")
     monitor.poll_once()
     assert recorder.names() == ["position"]
 
 
 def test_track_change_fires_callback(monkeypatch):
-    fake = use_responses(monkeypatch, playing_responses())
+    fake = use_output(monkeypatch, batched_output())
     recorder = Recorder()
     monitor = make_monitor(recorder)
     monitor.poll_once()
     recorder.events.clear()
 
-    fake.responses.update(playing_responses(track_id="other999", title="Next Song"))
+    fake.output = batched_output(track_id="other999", title="Next Song")
     monitor.poll_once()
     assert recorder.names() == ["track", "position"]
     assert recorder.events[0][1].track_id == "other999"
 
 
 def test_pause_fires_state_change(monkeypatch):
-    fake = use_responses(monkeypatch, playing_responses())
+    fake = use_output(monkeypatch, batched_output())
     recorder = Recorder()
     monitor = make_monitor(recorder)
     monitor.poll_once()
     recorder.events.clear()
 
-    fake.responses[pm._SCRIPT_PLAYER_STATE] = "paused"
+    fake.output = batched_output(state="paused")
     monitor.poll_once()
     assert recorder.names() == ["state", "position"]
     assert recorder.events[0][1].state is pm.PlaybackState.PAUSED
 
 
 def test_quit_spotify_fires_state_and_track_change(monkeypatch):
-    fake = use_responses(monkeypatch, playing_responses())
+    fake = use_output(monkeypatch, batched_output())
     recorder = Recorder()
     monitor = make_monitor(recorder)
     monitor.poll_once()
     recorder.events.clear()
 
-    fake.responses = {pm._SCRIPT_IS_RUNNING: "false"}
+    fake.output = "not_running"
     snapshot = monitor.poll_once()
     assert snapshot.state is pm.PlaybackState.NOT_RUNNING
     assert recorder.names() == ["state", "track"]
 
 
 def test_transient_query_failure_keeps_state(monkeypatch):
-    fake = use_responses(monkeypatch, playing_responses())
+    fake = use_output(monkeypatch, batched_output())
     recorder = Recorder()
     monitor = make_monitor(recorder)
     monitor.poll_once()
     recorder.events.clear()
 
-    fake.responses[pm._SCRIPT_IS_RUNNING] = pm.SpotifyQueryError("osascript timed out")
+    fake.output = pm.SpotifyQueryError("osascript timed out")
     assert monitor.poll_once() is None
     assert recorder.names() == []
 
     # Recovery: same track again, only position fires (no spurious changes).
-    fake.responses[pm._SCRIPT_IS_RUNNING] = "true"
+    fake.output = batched_output()
     monitor.poll_once()
     assert recorder.names() == ["position"]

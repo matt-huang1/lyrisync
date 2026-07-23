@@ -19,6 +19,18 @@ python3 -m venv .venv
 Requires the Spotify desktop app. First run may trigger a macOS Automation
 permission prompt.
 
+## Lyrics cache
+
+Lyrics are cached in `.lyrics_cache/` (one JSON file per Spotify track ID),
+including "this song has no lyrics" results. To clear it — for example if a
+song wrongly shows "no lyrics found" — delete the folder; it rebuilds itself:
+
+```sh
+rm -rf .lyrics_cache
+```
+
+Set `LYRISYNC_LOG=INFO` to see each LRCLIB request and its status code.
+
 ## Development
 
 ```sh

@@ -3,11 +3,13 @@
 This module knows nothing about lyrics or the UI. It exposes:
 
 - ``PlayerSnapshot`` / ``PlaybackState``: what Spotify is doing right now
-- ``read_snapshot()``: one round of osascript queries
+- ``read_snapshot()``: one osascript query
 - ``PlayerMonitor``: polls on an interval and fires callbacks on changes
 
-Every field is fetched with its own osascript call so values never need to
-be split out of a delimited string.
+All fields are fetched in a single osascript call that returns
+newline-separated values, so every poll is one subprocess and the fields
+are read atomically — a track change can't produce a snapshot mixing old
+and new metadata.
 """
 
 from __future__ import annotations
@@ -20,14 +22,22 @@ from typing import Callable, Optional
 
 _OSASCRIPT_TIMEOUT = 2.0
 
-_SCRIPT_IS_RUNNING = 'application "Spotify" is running'
-_SCRIPT_PLAYER_STATE = 'tell application "Spotify" to player state as string'
-_SCRIPT_TRACK_URL = 'tell application "Spotify" to spotify url of current track'
-_SCRIPT_TRACK_NAME = 'tell application "Spotify" to name of current track'
-_SCRIPT_TRACK_ARTIST = 'tell application "Spotify" to artist of current track'
-_SCRIPT_TRACK_ALBUM = 'tell application "Spotify" to album of current track'
-_SCRIPT_TRACK_DURATION = 'tell application "Spotify" to duration of current track'
-_SCRIPT_PLAYER_POSITION = 'tell application "Spotify" to player position'
+# One call, newline-separated output: either "not_running", or the player
+# state alone (no track loaded — the try block leaves output untouched when
+# any track field errors), or state followed by the six track fields.
+_SNAPSHOT_SCRIPT = '''
+if application "Spotify" is not running then return "not_running"
+tell application "Spotify"
+	set output to (player state as string)
+	try
+		set output to output & linefeed & (spotify url of current track) \
+& linefeed & (name of current track) & linefeed & (artist of current track) \
+& linefeed & (album of current track) & linefeed & (duration of current track) \
+& linefeed & (player position)
+	end try
+	return output
+end tell
+'''
 
 
 class SpotifyQueryError(RuntimeError):
@@ -116,21 +126,24 @@ def _parse_track_id(url: str) -> Optional[str]:
 def read_snapshot() -> PlayerSnapshot:
     """Query Spotify once. Raises SpotifyQueryError only if the state itself
     is unreadable; a missing track degrades to a track-less snapshot."""
-    if _osascript(_SCRIPT_IS_RUNNING) != "true":
+    output = _osascript(_SNAPSHOT_SCRIPT)
+    lines = output.splitlines()
+    if not lines:
+        raise SpotifyQueryError("empty osascript output")
+    if lines[0] == "not_running":
         return PlayerSnapshot(state=PlaybackState.NOT_RUNNING)
 
-    state = _parse_state(_osascript(_SCRIPT_PLAYER_STATE))
-
+    state = _parse_state(lines[0])
+    # Anything but exactly 7 lines means no track loaded, or a track field
+    # itself contained a newline (rare enough to degrade gracefully).
+    if len(lines) != 7:
+        return PlayerSnapshot(state=state)
+    url, title, artist, album, duration_raw, position_raw = lines[1:7]
     try:
-        url = _osascript(_SCRIPT_TRACK_URL)
-        title = _osascript(_SCRIPT_TRACK_NAME)
-        artist = _osascript(_SCRIPT_TRACK_ARTIST)
-        album = _osascript(_SCRIPT_TRACK_ALBUM)
-        duration_ms = int(float(_osascript(_SCRIPT_TRACK_DURATION)))
         # Locale-dependent decimal separator: some systems print "12,34".
-        position_seconds = float(_osascript(_SCRIPT_PLAYER_POSITION).replace(",", "."))
-    except (SpotifyQueryError, ValueError):
-        # No track loaded (fresh launch, or Spotify mid track-switch).
+        duration_ms = int(float(duration_raw.replace(",", ".")))
+        position_seconds = float(position_raw.replace(",", "."))
+    except ValueError:
         return PlayerSnapshot(state=state)
 
     return PlayerSnapshot(
