@@ -14,6 +14,8 @@ dependencies = [
     # Native NSWindow collection behaviour (show-on-all-desktops); Qt has
     # no cross-platform API for macOS Spaces.
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    # Revised Romanization for the Korean pronunciation line.
+    "korean-romanizer>=0.25",
 ]
 
 [project.optional-dependencies]

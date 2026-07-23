@@ -14,6 +14,7 @@ from typing import Optional
 
 from lyrisync.lyrics_provider import TrackLyrics
 from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
+from lyrisync.romanize import contains_hangul, romanize_korean
 from lyrisync.sync import current_line_index
 
 
@@ -30,11 +31,12 @@ class Mode(Enum):
 @dataclass(frozen=True)
 class Display:
     mode: Mode
-    header: str = ""       # "Artist — Title"
+    header: str = ""       # "Song — Artist"
     previous: str = ""
     current: str = ""
     upcoming: str = ""
     plain_text: str = ""   # full text, only in PLAIN mode
+    pronunciation: str = ""  # romanised current line, SYNCED mode only
 
 
 RETRY_INTERVAL_SECONDS = 30.0
@@ -50,6 +52,7 @@ class LyricsViewModel:
     """
 
     def __init__(self) -> None:
+        self.romanisation_enabled = False
         self._mode = Mode.IDLE
         self._track_id: Optional[str] = None
         self._identity: Optional[tuple] = None
@@ -58,6 +61,7 @@ class LyricsViewModel:
         self._index = -1
         self._error_at = 0.0
         self._suspended_mode: Optional[Mode] = None
+        self._has_hangul = False
 
     def track_changed(self, snapshot: PlayerSnapshot) -> bool:
         """Returns True when the new track needs a lyrics fetch."""
@@ -82,6 +86,7 @@ class LyricsViewModel:
         self._header = f"{snapshot.title} — {snapshot.artist}"
         self._lyrics = None
         self._index = -1
+        self._has_hangul = False
         if not snapshot.is_music_track:
             # DJ narration, ads: header only, nothing to look up.
             self._mode = Mode.NON_MUSIC
@@ -112,6 +117,11 @@ class LyricsViewModel:
         else:
             resolved = Mode.SYNCED if lyrics.synced else Mode.PLAIN
             self._lyrics = lyrics
+            self._has_hangul = (
+                any(contains_hangul(text) for _, text in lyrics.synced)
+                if lyrics.synced
+                else contains_hangul(lyrics.plain or "")
+            )
         if self._mode is Mode.IDLE and self._suspended_mode is not None:
             # Player is stopped right now; remember the outcome for the
             # resume-restore instead of showing lyrics over the idle state.
@@ -163,6 +173,20 @@ class LyricsViewModel:
             return self._lyrics.synced, self._index
         return None
 
+    @property
+    def has_korean_lyrics(self) -> bool:
+        """True when the current track's lyrics contain hangul — controls
+        whether the romanisation menu entry is offered."""
+        return self._has_hangul
+
+    def pronunciation_for(self, line: str) -> str:
+        """Romanised form of a lyric line, or "" when romanisation is off
+        or the line has no hangul. Shared by display() and the window's
+        predicted line swap."""
+        if self.romanisation_enabled and contains_hangul(line):
+            return romanize_korean(line)
+        return ""
+
     def _reset(self) -> None:
         self._mode = Mode.IDLE
         self._track_id = None
@@ -171,6 +195,7 @@ class LyricsViewModel:
         self._lyrics = None
         self._index = -1
         self._suspended_mode = None
+        self._has_hangul = False
 
     def display(self) -> Display:
         mode = self._mode
@@ -199,10 +224,12 @@ class LyricsViewModel:
             )
         lines = self._lyrics.synced
         index = self._index
+        current = lines[index][1] if index >= 0 else ""
         return Display(
             mode=mode,
             header=self._header,
             previous=lines[index - 1][1] if index >= 1 else "",
-            current=lines[index][1] if index >= 0 else "",
+            current=current,
             upcoming=lines[index + 1][1] if index + 1 < len(lines) else "",
+            pronunciation=self.pronunciation_for(current),
         )

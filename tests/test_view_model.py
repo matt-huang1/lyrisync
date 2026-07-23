@@ -5,6 +5,10 @@ from lyrisync.view_model import RETRY_INTERVAL_SECONDS, LyricsViewModel, Mode
 
 SYNCED = TrackLyrics(synced=[(10.0, "one"), (20.0, "two"), (30.0, "three")])
 PLAIN = TrackLyrics(plain="line a\nline b")
+KOREAN_SYNCED = TrackLyrics(
+    synced=[(10.0, "안녕하세요"), (20.0, "English line"), (30.0, "잘 가")]
+)
+KOREAN_PLAIN = TrackLyrics(plain="안녕하세요\n잘 가")
 
 
 def snapshot(track_id="trackA", title="Song", artist="Artist"):
@@ -221,6 +225,81 @@ def test_dj_transition_sequence_no_loading_flash():
     # leaking through): display must not flash back to loading.
     assert vm.track_changed(snapshot(track_id="shared123", title="Company")) is False
     assert vm.display().mode is Mode.SYNCED
+
+
+def korean_vm(romanisation=True):
+    vm = LyricsViewModel()
+    vm.romanisation_enabled = romanisation
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", KOREAN_SYNCED)
+    return vm
+
+
+def test_pronunciation_for_current_korean_line():
+    vm = korean_vm()
+    vm.position_changed(12.0)  # current: 안녕하세요
+    display = vm.display()
+    assert display.pronunciation == "annyeonghaseyo"
+    assert display.current == "안녕하세요"
+
+
+def test_no_pronunciation_when_toggle_off():
+    vm = korean_vm(romanisation=False)
+    vm.position_changed(12.0)
+    assert vm.display().pronunciation == ""
+
+
+def test_no_pronunciation_for_english_line_of_korean_track():
+    vm = korean_vm()
+    vm.position_changed(22.0)  # current: "English line"
+    assert vm.display().pronunciation == ""
+
+
+def test_no_pronunciation_before_first_line():
+    vm = korean_vm()
+    vm.position_changed(5.0)  # index -1, current empty
+    assert vm.display().pronunciation == ""
+
+
+def test_no_pronunciation_for_non_korean_track():
+    vm = LyricsViewModel()
+    vm.romanisation_enabled = True
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", SYNCED)
+    vm.position_changed(12.0)
+    display = vm.display()
+    assert display.pronunciation == ""
+    assert vm.has_korean_lyrics is False
+
+
+def test_no_pronunciation_for_plain_lyrics():
+    vm = LyricsViewModel()
+    vm.romanisation_enabled = True
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", KOREAN_PLAIN)
+    display = vm.display()
+    assert display.mode is Mode.PLAIN
+    assert display.pronunciation == ""
+    assert vm.has_korean_lyrics is True  # menu entry still offered
+
+
+def test_has_korean_lyrics_lifecycle():
+    vm = korean_vm()
+    assert vm.has_korean_lyrics is True
+    # New (English) track clears it immediately — no stale menu entry
+    # while the next fetch is in flight.
+    vm.track_changed(snapshot(track_id="trackB", title="English Song"))
+    assert vm.has_korean_lyrics is False
+    vm.fetch_completed("trackB", SYNCED)
+    assert vm.has_korean_lyrics is False
+
+
+def test_pronunciation_for_helper_matches_display():
+    vm = korean_vm()
+    assert vm.pronunciation_for("잘 가") == "jal ga"
+    assert vm.pronunciation_for("plain english") == ""
+    vm.romanisation_enabled = False
+    assert vm.pronunciation_for("잘 가") == ""
 
 
 def test_timeline_only_in_synced_mode():

@@ -85,6 +85,7 @@ QLabel {{ background: transparent; }}
 QLabel#header {{ color: rgba(255, 255, 255, 120); font-size: {round(11 * scale)}px; }}
 QLabel#dim {{ color: rgba(255, 255, 255, 115); font-size: {round(14 * scale)}px; }}
 QLabel#current {{ color: rgba(255, 255, 255, 235); font-size: {round(17 * scale)}px; font-weight: 600; }}
+QLabel#pron {{ color: rgba(255, 255, 255, 165); font-size: {round(12 * scale)}px; }}
 """
 
 
@@ -192,15 +193,26 @@ class LyricsWindow(QWidget):
         self._header = self._make_label("header")
         self._previous = self._make_label("dim")
         self._current = self._make_label("current")
+        self._pron = self._make_label("pron")
+        self._pron.setVisible(False)
         self._upcoming = self._make_label("dim")
-        self._current_fx = QGraphicsOpacityEffect(self._current)
+
+        # Current line + its pronunciation share one container so the
+        # anticipatory fade covers both with a single opacity effect.
+        self._current_box = QWidget()
+        current_layout = QVBoxLayout(self._current_box)
+        current_layout.setContentsMargins(0, 0, 0, 0)
+        current_layout.setSpacing(2)
+        current_layout.addWidget(self._current)
+        current_layout.addWidget(self._pron)
+        self._current_fx = QGraphicsOpacityEffect(self._current_box)
         self._current_fx.setOpacity(1.0)
-        self._current.setGraphicsEffect(self._current_fx)
+        self._current_box.setGraphicsEffect(self._current_fx)
 
         self._layout = QVBoxLayout(self)
         self._layout.addWidget(self._header)
         self._layout.addStretch(1)
-        for widget in (self._previous, self._current, self._upcoming):
+        for widget in (self._previous, self._current_box, self._upcoming):
             self._layout.addWidget(widget)
         self._layout.addStretch(1)
 
@@ -368,9 +380,15 @@ class LyricsWindow(QWidget):
         self._current_fx.setOpacity(1.0)
 
     def _set_lines(self, lines: list, index: int) -> None:
+        current = lines[index][1] if index >= 0 else ""
         self._previous.setText(lines[index - 1][1] if index >= 1 else "")
-        self._current.setText(lines[index][1] if index >= 0 else "")
+        self._current.setText(current)
+        self._set_pronunciation(self._view_model.pronunciation_for(current))
         self._upcoming.setText(lines[index + 1][1] if index + 1 < len(lines) else "")
+
+    def _set_pronunciation(self, text: str) -> None:
+        self._pron.setText(text)
+        self._pron.setVisible(bool(text))
 
     # -- rendering ---------------------------------------------------------
 
@@ -390,6 +408,7 @@ class LyricsWindow(QWidget):
             self._displayed_index = None
             self._previous.setText("")
             self._current.setText(display.header)
+            self._set_pronunciation("")
             self._upcoming.setText("")
             return
 
@@ -409,6 +428,7 @@ class LyricsWindow(QWidget):
             current = _DOTS_FRAMES[self._dots_frame]
         self._previous.setText(display.previous)
         self._current.setText(current)
+        self._set_pronunciation(display.pronunciation)
         self._upcoming.setText(display.upcoming)
 
     @staticmethod
@@ -550,9 +570,19 @@ class LyricsWindow(QWidget):
         all_desktops.setCheckable(True)
         all_desktops.setChecked(self._all_desktops)
         all_desktops.toggled.connect(self._set_all_desktops)
+        if self._view_model.has_korean_lyrics:
+            romanisation = menu.addAction("Romanisation")
+            romanisation.setCheckable(True)
+            romanisation.setChecked(self._view_model.romanisation_enabled)
+            romanisation.toggled.connect(self._set_romanisation)
         menu.addSeparator()
         menu.addAction("Quit", QApplication.instance().quit)
         menu.exec(event.globalPos())
+
+    def _set_romanisation(self, enabled: bool) -> None:
+        self._view_model.romanisation_enabled = enabled
+        self._settings.setValue("lyrics/romanisation", enabled)
+        self._render()
 
     # -- all-desktops (native NSWindow collection behaviour) ---------------
 
@@ -668,6 +698,9 @@ class LyricsWindow(QWidget):
             self.move(_clamped_point(QRect(position, self.size()), available))
         self._all_desktops = self._settings.value(
             "window/all_desktops", False, type=bool
+        )
+        self._view_model.romanisation_enabled = self._settings.value(
+            "lyrics/romanisation", False, type=bool
         )
 
     def _save_settings(self) -> None:
