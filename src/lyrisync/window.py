@@ -44,7 +44,11 @@ from PySide6.QtWidgets import (
 
 from lyrisync.geometry import clamped_position
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
-from lyrisync.macspaces import STATUS_WINDOW_LEVEL, all_desktops_behavior
+from lyrisync.macspaces import (
+    STATUS_WINDOW_LEVEL,
+    activation_policy_for,
+    all_desktops_behavior,
+)
 from lyrisync.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
 from lyrisync.view_model import LyricsViewModel, Mode
 
@@ -132,17 +136,18 @@ class FetchTask(QRunnable):
 
     def run(self) -> None:
         track_id = self._snapshot.track_id
+        lyrics, ok = None, False
         try:
             lyrics = self._provider.get_lyrics(self._snapshot)
+            ok = True
         except LyricsError:
             logger.exception("lyrics fetch failed for %s", track_id)
-            self.signals.finished.emit(track_id, None, False)
-            return
         except Exception:
             logger.exception("unexpected error fetching lyrics for %s", track_id)
-            self.signals.finished.emit(track_id, None, False)
-            return
-        self.signals.finished.emit(track_id, lyrics, True)
+        try:
+            self.signals.finished.emit(track_id, lyrics, ok)
+        except RuntimeError:
+            pass  # app tore down the signal object while we were fetching
 
 
 class LyricsWindow(QWidget):
@@ -171,10 +176,16 @@ class LyricsWindow(QWidget):
         self._displayed_index: Optional[int] = None
         self._fade_anim: Optional[QPropertyAnimation] = None
 
+        # WindowDoesNotAcceptFocus + WA_ShowWithoutActivating: an overlay
+        # must never activate the app or steal focus — all interaction here
+        # (drag, resize, wheel, context menu) is mouse-only.
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMinimumSize(_MIN_SIZE)
         self.setMouseTracking(True)
 
@@ -202,6 +213,11 @@ class LyricsWindow(QWidget):
 
         self._restore_settings()
         self._apply_scale()
+        if self._all_desktops:
+            # Persisted-on startup: accessory policy must be in force
+            # before the window first shows, or macOS may still treat the
+            # first show as a regular-app activation.
+            self._apply_activation_policy(True)
         QApplication.instance().aboutToQuit.connect(self._shutdown)
 
         self._monitor_thread = MonitorThread(self)
@@ -569,13 +585,39 @@ class LyricsWindow(QWidget):
             logger.exception("failed to resolve NSWindow")
             return None
 
+    def _apply_activation_policy(self, enabled: bool) -> None:
+        """Accessory policy while the toggle is on: a regular app owns a
+        Space, so any activation from inside a full-screen Space makes
+        macOS switch there instead of overlaying. Accessory removes the
+        Dock icon and Cmd-Tab entry; Quit stays in the context menu and
+        SIGINT. Needs no native window, so it can run before first show."""
+        if QApplication.platformName() != "cocoa":
+            return
+        try:
+            from AppKit import NSApplication
+        except ImportError:
+            logger.warning("pyobjc unavailable — activation policy unchanged")
+            return
+        try:
+            shared = NSApplication.sharedApplication()
+            shared.setActivationPolicy_(activation_policy_for(enabled))
+            logger.debug(
+                "activation policy -> %s (readback=%d)",
+                "accessory" if enabled else "regular",
+                int(shared.activationPolicy()),
+            )
+        except Exception:
+            logger.exception("failed to set activation policy")
+
     def _apply_all_desktops(self, enabled: bool) -> None:
-        """All-desktops toggle on the native window: CanJoinAllSpaces +
-        FullScreenAuxiliary with Qt's conflicting FullScreenPrimary bit
-        cleared (Primary wins over Auxiliary and blocks full-screen
-        Spaces), at status window level so the overlay stays above
-        full-screen content. Disabling restores Qt's saved defaults. Qt
-        has no cross-platform API for Spaces, hence pyobjc."""
+        """All-desktops toggle: accessory activation policy plus native
+        window flags — CanJoinAllSpaces + FullScreenAuxiliary with Qt's
+        conflicting FullScreenPrimary bit cleared (Primary wins over
+        Auxiliary and blocks full-screen Spaces), at status window level
+        so the overlay stays above full-screen content. Disabling restores
+        Qt's saved defaults. Qt has no cross-platform API for Spaces,
+        hence pyobjc."""
+        self._apply_activation_policy(enabled)
         nswindow = self._nswindow()
         if nswindow is None:
             return

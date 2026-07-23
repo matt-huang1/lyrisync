@@ -12,3 +12,4 @@ Decision log so far
 - Prefer no lyrics over mismatched-duration lyrics
 - Track identity includes URI kind (media vs track share IDs)
 - Non-music items never touch the lyrics cache or network
+- Qt defaults windows to FullScreenPrimary; Primary and Auxiliary are mutually exclusive, so the all-desktops toggle must clear Primary. Native state is verified by readback, not assumed.

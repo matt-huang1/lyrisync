@@ -22,3 +22,8 @@ def test_unrelated_bits_are_preserved():
     behavior = ms.all_desktops_behavior(current)
     assert behavior & stationary
     assert behavior & ignores_cycle
+
+
+def test_activation_policy_follows_toggle():
+    assert ms.activation_policy_for(True) == ms.ACTIVATION_POLICY_ACCESSORY
+    assert ms.activation_policy_for(False) == ms.ACTIVATION_POLICY_REGULAR
