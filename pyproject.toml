@@ -9,7 +9,12 @@ description = "Synced lyrics for the Spotify desktop app on macOS"
 requires-python = ">=3.12"
 # PySide6 is only imported by the window; monitor, provider, and sync
 # stay stdlib-only.
-dependencies = ["PySide6>=6.8"]
+dependencies = [
+    "PySide6>=6.8",
+    # Native NSWindow collection behaviour (show-on-all-desktops); Qt has
+    # no cross-platform API for macOS Spaces.
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

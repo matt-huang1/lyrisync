@@ -8,3 +8,7 @@ Decision log so far
 - Architecture: three separated components (player monitor, lyrics provider, UI); monitor and provider know nothing about the UI
 - Milestone order: monitor script → terminal-synced lyrics → floating window → polish
 - v1 excludes: menu bar, shortcuts, focus mode, learning/translation modes, Web API, database
+- Only genuine 404s are cached negatively, errors are never cached
+- Prefer no lyrics over mismatched-duration lyrics
+- Track identity includes URI kind (media vs track share IDs)
+- Non-music items never touch the lyrics cache or network

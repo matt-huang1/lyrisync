@@ -261,6 +261,30 @@ def test_missing_metadata_returns_none_without_fetch(provider, monkeypatch):
     assert fake.calls == []
 
 
+def test_non_music_item_never_touches_network_or_cache(provider, monkeypatch):
+    # DJ narration reuses the upcoming song's ID under spotify:media:.
+    # It must not be fetched, must not be cached, and must not READ the
+    # song's cache entry either.
+    fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
+    song = snapshot(track_id="shared123")
+    assert provider.get_lyrics(song) is not None  # song cached normally
+
+    narration = PlayerSnapshot(
+        state=PlaybackState.PLAYING,
+        track_id="shared123",
+        track_kind="media",
+        title="Up next",
+        artist="DJ X",
+        album="DJ",
+        duration_ms=0,
+        position_seconds=1.0,
+    )
+    assert provider.get_lyrics(narration) is None  # not the song's lyrics
+    assert len(fake.calls) == 1  # no second network call
+    entry = json.loads(provider._cache_path("shared123").read_text(encoding="utf-8"))
+    assert entry["found"] is True  # song's entry untouched
+
+
 def test_negative_cache_file_shape(provider, monkeypatch):
     use_fetcher(
         monkeypatch,

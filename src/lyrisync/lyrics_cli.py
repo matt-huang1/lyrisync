@@ -77,7 +77,7 @@ class LyricsApp:
         if not snapshot.has_track:
             self._println("\n(no track loaded)")
             return
-        self._println(f"\n♪ {snapshot.artist} — {snapshot.title}")
+        self._println(f"\n♪ {snapshot.title} — {snapshot.artist}")
         try:
             lyrics = self.provider.get_lyrics(snapshot)
         except LyricsError as exc:

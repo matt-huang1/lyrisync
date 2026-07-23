@@ -1,6 +1,6 @@
 from lyrisync.lyrics_provider import TrackLyrics
 from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
-from lyrisync.view_model import LyricsViewModel, Mode
+from lyrisync.view_model import RETRY_INTERVAL_SECONDS, LyricsViewModel, Mode
 
 
 SYNCED = TrackLyrics(synced=[(10.0, "one"), (20.0, "two"), (30.0, "three")])
@@ -31,8 +31,8 @@ def test_track_change_requests_fetch_and_shows_fetching():
     assert vm.track_changed(snapshot()) is True
     display = vm.display()
     assert display.mode is Mode.FETCHING
-    assert display.header == "Artist — Song"
-    assert display.current == "fetching…"
+    assert display.header == "Song — Artist"
+    assert display.current == ""  # window renders the loading indicator
 
 
 def test_trackless_snapshot_goes_idle_without_fetch():
@@ -59,7 +59,7 @@ def test_stale_fetch_result_is_ignored():
     assert vm.fetch_completed("trackA", SYNCED) is False
     display = vm.display()
     assert display.mode is Mode.FETCHING  # still waiting on trackB
-    assert display.header == "Artist — Other"
+    assert display.header == "Other — Artist"
 
     assert vm.fetch_completed("trackB", PLAIN) is True
     assert vm.display().mode is Mode.PLAIN
@@ -163,6 +163,70 @@ def test_stop_and_quit_reset_to_idle():
     # Playing/paused don't disturb the display by themselves.
     assert vm.player_state_changed(PlaybackState.PLAYING) is False
     assert vm.player_state_changed(PlaybackState.PAUSED) is False
+
+
+def dj_narration(track_id="shared123"):
+    return PlayerSnapshot(
+        state=PlaybackState.PLAYING,
+        track_id=track_id,
+        track_kind="media",
+        title="Up next",
+        artist="DJ X",
+        album="DJ",
+        duration_ms=0,
+        position_seconds=1.0,
+    )
+
+
+def test_dj_narration_shows_no_lyrics_without_fetch():
+    vm = LyricsViewModel()
+    assert vm.track_changed(dj_narration()) is False  # no fetch requested
+    display = vm.display()
+    assert display.mode is Mode.NO_LYRICS
+    assert display.header == "Up next — DJ X"
+
+
+def test_dj_narration_into_song_with_same_id_fetches():
+    vm = LyricsViewModel()
+    vm.track_changed(dj_narration(track_id="shared123"))
+    # The announced song arrives with the SAME id, different kind.
+    assert vm.track_changed(snapshot(track_id="shared123", title="Company")) is True
+    assert vm.display().mode is Mode.FETCHING
+    vm.fetch_completed("shared123", SYNCED)
+    assert vm.display().mode is Mode.SYNCED
+
+
+def test_error_retries_after_interval():
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None, ok=False, now=100.0)
+    assert vm.display().mode is Mode.ERROR
+
+    assert vm.retry_due(100.0 + RETRY_INTERVAL_SECONDS - 1) is False
+    assert vm.display().mode is Mode.ERROR
+
+    assert vm.retry_due(100.0 + RETRY_INTERVAL_SECONDS) is True
+    assert vm.display().mode is Mode.FETCHING  # retry in flight
+    assert vm.retry_due(100.0 + RETRY_INTERVAL_SECONDS + 1) is False  # no double-fire
+
+    # Second failure re-arms the clock from the new failure time.
+    vm.fetch_completed("trackA", None, ok=False, now=140.0)
+    assert vm.retry_due(140.0 + RETRY_INTERVAL_SECONDS - 1) is False
+    assert vm.retry_due(140.0 + RETRY_INTERVAL_SECONDS) is True
+
+    # Success ends the retry loop.
+    vm.fetch_completed("trackA", SYNCED)
+    assert vm.display().mode is Mode.SYNCED
+    assert vm.retry_due(1000.0) is False
+
+
+def test_retry_not_due_in_other_modes():
+    vm = LyricsViewModel()
+    assert vm.retry_due(1e9) is False  # idle
+    vm.track_changed(snapshot())
+    assert vm.retry_due(1e9) is False  # fetching
+    vm.fetch_completed("trackA", SYNCED)
+    assert vm.retry_due(1e9) is False  # synced
 
 
 def test_new_track_after_lyrics_resets_lines():

@@ -14,11 +14,14 @@ and new metadata.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 _OSASCRIPT_TIMEOUT = 2.0
 
@@ -64,6 +67,10 @@ _RAW_STATE_CODES = {
 class PlayerSnapshot:
     state: PlaybackState
     track_id: Optional[str] = None
+    # URI scheme kind: "track" for music, "media" for DJ narration, "ad",
+    # "episode", ... Spotify's DJ narration reuses the UPCOMING song's ID
+    # under the spotify:media: scheme, so the kind is part of identity.
+    track_kind: str = "track"
     title: Optional[str] = None
     artist: Optional[str] = None
     album: Optional[str] = None
@@ -75,10 +82,17 @@ class PlayerSnapshot:
         return self.track_id is not None
 
     @property
+    def is_music_track(self) -> bool:
+        """True for real songs — the only items worth a lyrics lookup."""
+        return self.track_id is not None and self.track_kind == "track"
+
+    @property
     def track_key(self) -> Optional[tuple]:
-        """Identity used to detect track changes."""
+        """Identity used to detect track changes. Includes the kind so a
+        DJ-narration item turning into the song it announced (same ID,
+        different scheme) still registers as a change."""
         if self.track_id is not None:
-            return (self.track_id,)
+            return (self.track_kind, self.track_id)
         if self.title is not None or self.artist is not None:
             return (self.title, self.artist)
         return None
@@ -123,6 +137,13 @@ def _parse_track_id(url: str) -> Optional[str]:
     return url.rsplit(":", 1)[-1] or None
 
 
+def _parse_track_kind(url: str) -> str:
+    """The URI scheme kind: "track", "media" (DJ narration), "ad", ..."""
+    url = url.strip().split("?", 1)[0].rstrip("/")
+    parts = url.split("/") if url.startswith("http") else url.split(":")
+    return parts[-2] if len(parts) >= 2 and parts[-2] else "track"
+
+
 def read_snapshot() -> PlayerSnapshot:
     """Query Spotify once. Raises SpotifyQueryError only if the state itself
     is unreadable; a missing track degrades to a track-less snapshot."""
@@ -137,8 +158,13 @@ def read_snapshot() -> PlayerSnapshot:
     # Anything but exactly 7 lines means no track loaded, or a track field
     # itself contained a newline (rare enough to degrade gracefully).
     if len(lines) != 7:
+        logger.debug("snapshot (no track): state=%r lines=%r", lines[0], lines[1:])
         return PlayerSnapshot(state=state)
     url, title, artist, album, duration_raw, position_raw = lines[1:7]
+    logger.debug(
+        "snapshot: state=%r url=%r title=%r artist=%r album=%r dur=%r pos=%r",
+        lines[0], url, title, artist, album, duration_raw, position_raw,
+    )
     try:
         # Locale-dependent decimal separator: some systems print "12,34".
         duration_ms = int(float(duration_raw.replace(",", ".")))
@@ -149,6 +175,7 @@ def read_snapshot() -> PlayerSnapshot:
     return PlayerSnapshot(
         state=state,
         track_id=_parse_track_id(url),
+        track_kind=_parse_track_kind(url),
         title=title,
         artist=artist,
         album=album,

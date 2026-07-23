@@ -11,11 +11,11 @@ def batched_output(
     album="Album",
     duration="225000",
     position="42.5",
+    uri=None,
 ):
     """What the single osascript call prints for a loaded track."""
-    return "\n".join(
-        [state, f"spotify:track:{track_id}", title, artist, album, duration, position]
-    )
+    url = uri if uri is not None else f"spotify:track:{track_id}"
+    return "\n".join([state, url, title, artist, album, duration, position])
 
 
 class FakeOsascript:
@@ -138,6 +138,36 @@ def test_parse_state_unrecognized():
         pm._parse_state("garbage")
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("spotify:track:abc123", "track"),
+        ("spotify:media:abc123", "media"),
+        ("spotify:ad:abc123", "ad"),
+        ("https://open.spotify.com/track/abc123?si=x", "track"),
+        ("", "track"),
+    ],
+)
+def test_parse_track_kind(url, expected):
+    assert pm._parse_track_kind(url) == expected
+
+
+def test_dj_narration_snapshot_is_not_music(monkeypatch):
+    # Spotify's DJ reports the upcoming song's ID under spotify:media:.
+    use_output(
+        monkeypatch,
+        batched_output(
+            uri="spotify:media:61uyGDPJ06MkxJtHgPmuyO",
+            title="Up next", artist="DJ X", album="DJ", duration="0", position="1.0",
+        ),
+    )
+    snapshot = pm.read_snapshot()
+    assert snapshot.track_id == "61uyGDPJ06MkxJtHgPmuyO"
+    assert snapshot.track_kind == "media"
+    assert snapshot.has_track
+    assert not snapshot.is_music_track
+
+
 # -- monitor callbacks ---------------------------------------------------
 
 
@@ -190,6 +220,33 @@ def test_track_change_fires_callback(monkeypatch):
     monitor.poll_once()
     assert recorder.names() == ["track", "position"]
     assert recorder.events[0][1].track_id == "other999"
+
+
+def test_dj_to_song_transition_fires_track_change(monkeypatch):
+    # Same ID, different URI scheme: must register as a track change,
+    # or the app stays stuck on the DJ state for the whole song.
+    fake = use_output(
+        monkeypatch,
+        batched_output(
+            uri="spotify:media:61uyGDPJ06MkxJtHgPmuyO",
+            title="Up next", artist="DJ X", album="DJ", duration="0",
+        ),
+    )
+    recorder = Recorder()
+    monitor = make_monitor(recorder)
+    monitor.poll_once()
+    recorder.events.clear()
+
+    fake.output = batched_output(
+        uri="spotify:track:61uyGDPJ06MkxJtHgPmuyO",
+        title="Company", artist="Justin Bieber", album="Purpose (Deluxe)",
+        duration="198195",
+    )
+    monitor.poll_once()
+    assert "track" in recorder.names()
+    changed = dict(recorder.events)["track"]
+    assert changed.title == "Company"
+    assert changed.is_music_track
 
 
 def test_pause_fires_state_change(monkeypatch):

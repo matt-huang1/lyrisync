@@ -36,6 +36,9 @@ class Display:
     plain_text: str = ""   # full text, only in PLAIN mode
 
 
+RETRY_INTERVAL_SECONDS = 30.0
+
+
 class LyricsViewModel:
     """State machine behind the window.
 
@@ -51,6 +54,7 @@ class LyricsViewModel:
         self._header = ""
         self._lyrics: Optional[TrackLyrics] = None
         self._index = -1
+        self._error_at = 0.0
 
     def track_changed(self, snapshot: PlayerSnapshot) -> bool:
         """Returns True when the new track needs a lyrics fetch."""
@@ -58,23 +62,33 @@ class LyricsViewModel:
             self._reset()
             return False
         self._track_id = snapshot.track_id
-        self._header = f"{snapshot.artist} — {snapshot.title}"
+        self._header = f"{snapshot.title} — {snapshot.artist}"
         self._lyrics = None
         self._index = -1
+        if not snapshot.is_music_track:
+            # DJ narration, ads: nothing to look up.
+            self._mode = Mode.NO_LYRICS
+            return False
         self._mode = Mode.FETCHING
         return True
 
     def fetch_completed(
-        self, track_id: str, lyrics: Optional[TrackLyrics], ok: bool = True
+        self,
+        track_id: str,
+        lyrics: Optional[TrackLyrics],
+        ok: bool = True,
+        now: float = 0.0,
     ) -> bool:
         """Returns False for stale results, which must not be displayed.
         ``ok=False`` means the fetch errored: show the retryable
-        "unavailable" state rather than claiming there are no lyrics."""
+        "unavailable" state rather than claiming there are no lyrics;
+        ``now`` timestamps the failure for the retry schedule."""
         if track_id != self._track_id:
             return False
         if not ok:
             self._lyrics = None
             self._mode = Mode.ERROR
+            self._error_at = now
             return True
         self._lyrics = lyrics
         if lyrics is None:
@@ -83,6 +97,17 @@ class LyricsViewModel:
             self._mode = Mode.SYNCED
         else:
             self._mode = Mode.PLAIN
+        return True
+
+    def retry_due(self, now: float) -> bool:
+        """True when a failed fetch should be re-attempted (every
+        RETRY_INTERVAL_SECONDS while in ERROR). Flips the mode back to
+        FETCHING, so a True return means: dispatch a fetch now."""
+        if self._mode is not Mode.ERROR:
+            return False
+        if now - self._error_at < RETRY_INTERVAL_SECONDS:
+            return False
+        self._mode = Mode.FETCHING
         return True
 
     def position_changed(self, position_seconds: Optional[float]) -> bool:
@@ -114,7 +139,9 @@ class LyricsViewModel:
         if mode is Mode.IDLE:
             return Display(mode=mode, current="Spotify is not playing")
         if mode is Mode.FETCHING:
-            return Display(mode=mode, header=self._header, current="fetching…")
+            # current stays empty: the window renders its animated
+            # loading indicator for this mode.
+            return Display(mode=mode, header=self._header)
         if mode is Mode.NO_LYRICS:
             return Display(mode=mode, header=self._header, current="no lyrics found")
         if mode is Mode.ERROR:

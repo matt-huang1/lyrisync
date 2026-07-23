@@ -111,7 +111,11 @@ class LyricsProvider:
         LRCLIB can't be reached or errors — that outcome is never cached,
         so the track is retried next time.
         """
-        if snapshot.track_id is None:
+        # Non-music items (DJ narration, ads) must not touch the cache at
+        # all: DJ narration reuses the upcoming song's ID, so even a cache
+        # READ here would show the song's lyrics during the narration —
+        # and a write would poison the song's entry with narration metadata.
+        if not snapshot.is_music_track:
             return None
 
         cached = self._read_cache(snapshot.track_id)
