@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lyrisync"
+version = "0.1.0"
+description = "Synced lyrics for the Spotify desktop app on macOS"
+requires-python = ">=3.12"
+# PySide6 gets added at the floating-window milestone; the monitor and
+# lyrics provider stay stdlib-only.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+lyrisync-monitor = "lyrisync.monitor_cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lyrisync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
