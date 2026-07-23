@@ -280,7 +280,21 @@ def test_no_pronunciation_for_plain_lyrics():
     display = vm.display()
     assert display.mode is Mode.PLAIN
     assert display.pronunciation == ""
-    assert vm.has_korean_lyrics is True  # menu entry still offered
+    # Milestone 6 review fix: no menu entry for plain Korean lyrics —
+    # the toggle would do nothing without synced timestamps.
+    assert vm.has_korean_lyrics is False
+
+
+def test_menu_gating_requires_korean_AND_synced():
+    korean_synced = LyricsViewModel()
+    korean_synced.track_changed(snapshot())
+    korean_synced.fetch_completed("trackA", KOREAN_SYNCED)
+    assert korean_synced.has_korean_lyrics is True
+
+    english_synced = LyricsViewModel()
+    english_synced.track_changed(snapshot())
+    english_synced.fetch_completed("trackA", SYNCED)
+    assert english_synced.has_korean_lyrics is False
 
 
 def test_has_korean_lyrics_lifecycle():

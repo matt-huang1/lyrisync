@@ -144,6 +144,14 @@ def _parse_track_kind(url: str) -> str:
     return parts[-2] if len(parts) >= 2 and parts[-2] else "track"
 
 
+def set_position(seconds: float) -> None:
+    """Seek Spotify to ``seconds``. A subprocess call — never invoke on a
+    UI thread. Raises SpotifyQueryError on failure."""
+    _osascript(
+        f'tell application "Spotify" to set player position to {seconds:.3f}'
+    )
+
+
 def read_snapshot() -> PlayerSnapshot:
     """Query Spotify once. Raises SpotifyQueryError only if the state itself
     is unreadable; a missing track degrades to a track-less snapshot."""

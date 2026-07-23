@@ -38,18 +38,26 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QLabel,
     QMenu,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from lyrisync.geometry import clamped_position
+from lyrisync.loop import LineLoop
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
 from lyrisync.macspaces import (
     STATUS_WINDOW_LEVEL,
     activation_policy_for,
     all_desktops_behavior,
 )
-from lyrisync.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
+from lyrisync.player_monitor import (
+    PlaybackState,
+    PlayerMonitor,
+    PlayerSnapshot,
+    SpotifyQueryError,
+    set_position,
+)
 from lyrisync.view_model import LyricsViewModel, Mode
 
 logger = logging.getLogger(__name__)
@@ -86,6 +94,12 @@ QLabel#header {{ color: rgba(255, 255, 255, 120); font-size: {round(11 * scale)}
 QLabel#dim {{ color: rgba(255, 255, 255, 115); font-size: {round(14 * scale)}px; }}
 QLabel#current {{ color: rgba(255, 255, 255, 235); font-size: {round(17 * scale)}px; font-weight: 600; }}
 QLabel#pron {{ color: rgba(255, 255, 255, 165); font-size: {round(12 * scale)}px; }}
+QPushButton#loop {{
+    color: rgba(255, 255, 255, 90); background: transparent; border: none;
+    font-size: {round(15 * scale)}px;
+}}
+QPushButton#loop:hover {{ color: rgba(255, 255, 255, 190); }}
+QPushButton#loop:checked {{ color: rgba(130, 200, 255, 235); }}
 """
 
 
@@ -119,6 +133,22 @@ class MonitorThread(QThread):
 
     def stop(self) -> None:
         self._monitor.stop()
+
+
+class SeekTask(QRunnable):
+    """One position write to Spotify, off the UI thread. Fire-and-forget:
+    a failed seek surfaces as the loop's position drifting out of bounds,
+    which cancels the loop on its own."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__()
+        self._seconds = seconds
+
+    def run(self) -> None:
+        try:
+            set_position(self._seconds)
+        except SpotifyQueryError as exc:
+            logger.warning("seek to %.2fs failed: %s", self._seconds, exc)
 
 
 class _FetchSignals(QObject):
@@ -223,6 +253,20 @@ class LyricsWindow(QWidget):
         self._swap_timer.setSingleShot(True)
         self._swap_timer.timeout.connect(self._predicted_swap)
 
+        self._loop = LineLoop()
+        self._loop_timer = QTimer(self)
+        self._loop_timer.setSingleShot(True)
+        self._loop_timer.timeout.connect(self._do_loop_wrap)
+        self._loop_button = QPushButton("↻", self)
+        self._loop_button.setObjectName("loop")
+        self._loop_button.setCheckable(True)
+        self._loop_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._loop_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._loop_button.setFixedSize(26, 26)
+        self._loop_button.setToolTip("Loop this line")
+        self._loop_button.clicked.connect(self._toggle_loop)
+        self._loop_button.setVisible(False)
+
         self._restore_settings()
         self._apply_scale()
         if self._all_desktops:
@@ -261,6 +305,7 @@ class LyricsWindow(QWidget):
     def _on_track_change(self, snapshot: PlayerSnapshot) -> None:
         self._last_state = snapshot.state
         self._current_snapshot = snapshot if snapshot.is_music_track else None
+        self._release_loop()
         if snapshot.has_track and snapshot.track_key != self._card_key:
             self._card_key = snapshot.track_key
             self._title_card_until = time.monotonic() + _TITLE_CARD_SECONDS
@@ -275,6 +320,7 @@ class LyricsWindow(QWidget):
         # Stale results (track changed while the fetch was in flight) are
         # rejected by the view model; the provider already cached them.
         if self._view_model.fetch_completed(track_id, lyrics, ok, now=time.monotonic()):
+            self._release_loop()  # lyrics changed under the loop
             self._render()
 
     def _on_position_update(self, snapshot: PlayerSnapshot) -> None:
@@ -287,11 +333,27 @@ class LyricsWindow(QWidget):
         if self._displayed_index != index:
             # Seek, pause-drift correction, or a missed prediction: snap.
             self._render()
-        if (
-            snapshot.state is PlaybackState.PLAYING
-            and snapshot.position_seconds is not None
-        ):
-            self._schedule_line_advance(lines, index, snapshot.position_seconds)
+
+        position = snapshot.position_seconds
+        playing = snapshot.state is PlaybackState.PLAYING
+        if self._loop.engaged:
+            if not self._loop.still_valid(position):
+                self._release_loop()  # user seeked outside the line
+                self._render()
+                return
+            # The looped line never advances: suppress the fade scheduler
+            # so no swap fires at the end bound, and arm the wrap seek from
+            # the known end timestamp instead (dormant while paused).
+            self._fadeout_timer.stop()
+            self._swap_timer.stop()
+            eta = self._loop.wrap_eta(position, playing) if position is not None else None
+            if eta is None:
+                self._loop_timer.stop()
+            else:
+                self._loop_timer.start(int(eta * 1000))
+            return
+        if playing and position is not None:
+            self._schedule_line_advance(lines, index, position)
         else:
             self._cancel_line_schedule()
 
@@ -299,8 +361,41 @@ class LyricsWindow(QWidget):
         self._last_state = snapshot.state
         if snapshot.state is not PlaybackState.PLAYING:
             self._cancel_line_schedule()
+            self._loop_timer.stop()  # loop (if any) lies dormant, not cancelled
+        if snapshot.state in (PlaybackState.STOPPED, PlaybackState.NOT_RUNNING):
+            self._release_loop()
         if self._view_model.player_state_changed(snapshot.state):
             self._render()
+
+    # -- line loop ---------------------------------------------------------
+
+    def _toggle_loop(self, checked: bool) -> None:
+        if not checked:
+            self._release_loop()
+            self._render()
+            return
+        timeline = self._view_model.timeline()
+        snapshot = self._current_snapshot
+        duration = (
+            snapshot.duration_ms / 1000
+            if snapshot is not None and snapshot.duration_ms is not None
+            else None
+        )
+        if timeline is None or not self._loop.engage(*timeline, duration):
+            self._loop_button.setChecked(False)  # no current line to loop
+            return
+        self._render()
+
+    def _release_loop(self) -> None:
+        if not self._loop.engaged and not self._loop_button.isChecked():
+            return
+        self._loop.release()
+        self._loop_timer.stop()
+        self._loop_button.setChecked(False)
+
+    def _do_loop_wrap(self) -> None:
+        if self._loop.engaged and self._last_state is PlaybackState.PLAYING:
+            self._pool.start(SeekTask(self._loop.start))
 
     def _start_fetch(self, snapshot: PlayerSnapshot) -> None:
         task = FetchTask(self._provider, snapshot)
@@ -381,8 +476,11 @@ class LyricsWindow(QWidget):
 
     def _set_lines(self, lines: list, index: int) -> None:
         current = lines[index][1] if index >= 0 else ""
+        # The ↻ marker is display-only: pronunciation is looked up on the
+        # unprefixed line text.
+        shown = f"↻ {current}" if self._loop.engaged else current
         self._previous.setText(lines[index - 1][1] if index >= 1 else "")
-        self._current.setText(current)
+        self._current.setText(shown)
         self._set_pronunciation(self._view_model.pronunciation_for(current))
         self._upcoming.setText(lines[index + 1][1] if index + 1 < len(lines) else "")
 
@@ -398,6 +496,9 @@ class LyricsWindow(QWidget):
     def _render(self) -> None:
         display = self._view_model.display()
         self._cancel_line_schedule()
+
+        # Loop button only where looping is possible (synced timestamps).
+        self._loop_button.setVisible(display.mode is Mode.SYNCED)
 
         # Persistent compact header whenever a track is known.
         self._header.setText(display.header)
@@ -448,6 +549,8 @@ class LyricsWindow(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_scale()
+        self._loop_button.move(self.width() - self._loop_button.width() - 10, 8)
+        self._loop_button.raise_()
 
     def _apply_scale(self) -> None:
         """Fonts, margins, and spacing track window width near-linearly, so

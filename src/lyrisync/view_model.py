@@ -117,10 +117,10 @@ class LyricsViewModel:
         else:
             resolved = Mode.SYNCED if lyrics.synced else Mode.PLAIN
             self._lyrics = lyrics
-            self._has_hangul = (
-                any(contains_hangul(text) for _, text in lyrics.synced)
-                if lyrics.synced
-                else contains_hangul(lyrics.plain or "")
+            # Synced only: romanisation renders under the synced current
+            # line, so a toggle for plain Korean lyrics would do nothing.
+            self._has_hangul = bool(lyrics.synced) and any(
+                contains_hangul(text) for _, text in lyrics.synced
             )
         if self._mode is Mode.IDLE and self._suspended_mode is not None:
             # Player is stopped right now; remember the outcome for the
@@ -175,8 +175,8 @@ class LyricsViewModel:
 
     @property
     def has_korean_lyrics(self) -> bool:
-        """True when the current track's lyrics contain hangul — controls
-        whether the romanisation menu entry is offered."""
+        """True when the current track's lyrics are synced AND contain
+        hangul — controls whether the romanisation menu entry is offered."""
         return self._has_hangul
 
     def pronunciation_for(self, line: str) -> str:
