@@ -152,6 +152,16 @@ def set_position(seconds: float) -> None:
     )
 
 
+def pause_playback() -> None:
+    """Pause Spotify. Subprocess call — worker threads only."""
+    _osascript('tell application "Spotify" to pause')
+
+
+def resume_playback() -> None:
+    """Resume Spotify. Subprocess call — worker threads only."""
+    _osascript('tell application "Spotify" to play')
+
+
 def read_snapshot() -> PlayerSnapshot:
     """Query Spotify once. Raises SpotifyQueryError only if the state itself
     is unreadable; a missing track degrades to a track-less snapshot."""

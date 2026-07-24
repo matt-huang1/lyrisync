@@ -56,8 +56,11 @@ from lyrisync.player_monitor import (
     PlayerMonitor,
     PlayerSnapshot,
     SpotifyQueryError,
+    pause_playback,
+    resume_playback,
     set_position,
 )
+from lyrisync.speech import SpeechSession, button_visible, detect_voice, speak_korean
 from lyrisync.view_model import LyricsViewModel, Mode
 
 logger = logging.getLogger(__name__)
@@ -94,12 +97,13 @@ QLabel#header {{ color: rgba(255, 255, 255, 120); font-size: {round(11 * scale)}
 QLabel#dim {{ color: rgba(255, 255, 255, 115); font-size: {round(14 * scale)}px; }}
 QLabel#current {{ color: rgba(255, 255, 255, 235); font-size: {round(17 * scale)}px; font-weight: 600; }}
 QLabel#pron {{ color: rgba(255, 255, 255, 165); font-size: {round(12 * scale)}px; }}
-QPushButton#loop {{
+QPushButton#loop, QPushButton#speak {{
     color: rgba(255, 255, 255, 90); background: transparent; border: none;
     font-size: {round(15 * scale)}px;
 }}
-QPushButton#loop:hover {{ color: rgba(255, 255, 255, 190); }}
+QPushButton#loop:hover, QPushButton#speak:hover {{ color: rgba(255, 255, 255, 190); }}
 QPushButton#loop:checked {{ color: rgba(130, 200, 255, 235); }}
+QPushButton#speak:disabled {{ color: rgba(130, 200, 255, 235); }}
 """
 
 
@@ -149,6 +153,36 @@ class SeekTask(QRunnable):
             set_position(self._seconds)
         except SpotifyQueryError as exc:
             logger.warning("seek to %.2fs failed: %s", self._seconds, exc)
+
+
+class _SpeakSignals(QObject):
+    finished = Signal()
+
+
+class SpeakTask(QRunnable):
+    """Pause (maybe) → speak the line → resume (maybe), all in one worker
+    so the ordering is guaranteed and the UI thread never blocks."""
+
+    def __init__(self, text: str, pause_first: bool, resume_after: bool) -> None:
+        super().__init__()
+        self.signals = _SpeakSignals()
+        self._text = text
+        self._pause_first = pause_first
+        self._resume_after = resume_after
+
+    def run(self) -> None:
+        try:
+            if self._pause_first:
+                pause_playback()
+            speak_korean(self._text)
+            if self._resume_after:
+                resume_playback()
+        except Exception:
+            logger.exception("spoken reference failed")
+        try:
+            self.signals.finished.emit()
+        except RuntimeError:
+            pass  # app tore down the signal object mid-speech
 
 
 class _FetchSignals(QObject):
@@ -257,15 +291,17 @@ class LyricsWindow(QWidget):
         self._loop_timer = QTimer(self)
         self._loop_timer.setSingleShot(True)
         self._loop_timer.timeout.connect(self._do_loop_wrap)
-        self._loop_button = QPushButton("↻", self)
-        self._loop_button.setObjectName("loop")
+        self._loop_button = self._make_overlay_button("loop", "↻", "Loop this line")
         self._loop_button.setCheckable(True)
-        self._loop_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._loop_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._loop_button.setFixedSize(26, 26)
-        self._loop_button.setToolTip("Loop this line")
         self._loop_button.clicked.connect(self._toggle_loop)
-        self._loop_button.setVisible(False)
+
+        self._speech = SpeechSession()
+        self._speech_available = detect_voice()
+        self._spoken_enabled = True  # restored from settings below
+        self._speak_button = self._make_overlay_button(
+            "speak", "🔊", "Speak this line"
+        )
+        self._speak_button.clicked.connect(self._on_speak_clicked)
 
         self._restore_settings()
         self._apply_scale()
@@ -299,6 +335,15 @@ class LyricsWindow(QWidget):
         label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         label.setWordWrap(True)
         return label
+
+    def _make_overlay_button(self, object_name: str, glyph: str, tip: str) -> QPushButton:
+        button = QPushButton(glyph, self)
+        button.setObjectName(object_name)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(tip)
+        button.setVisible(False)
+        return button
 
     # -- monitor slots (UI thread, queued from MonitorThread) --------------
 
@@ -397,6 +442,43 @@ class LyricsWindow(QWidget):
         if self._loop.engaged and self._last_state is PlaybackState.PLAYING:
             self._pool.start(SeekTask(self._loop.start))
 
+    # -- spoken reference ----------------------------------------------------
+
+    def _current_line_text(self) -> str:
+        timeline = self._view_model.timeline()
+        if timeline is None:
+            return ""
+        lines, index = timeline
+        return lines[index][1] if 0 <= index < len(lines) else ""
+
+    def _on_speak_clicked(self) -> None:
+        line = self._current_line_text()
+        if not line:
+            return
+        playing = self._last_state is PlaybackState.PLAYING
+        if not self._speech.begin(playing):
+            return  # already speaking: rapid clicks never stack
+        self._speak_button.setEnabled(False)  # doubles as the busy indicator
+        task = SpeakTask(line, pause_first=playing, resume_after=playing)
+        task.signals.finished.connect(self._on_speech_finished)
+        self._pool.start(task)
+
+    def _on_speech_finished(self) -> None:
+        self._speech.finish()  # resume already handled inside the worker
+        self._speak_button.setEnabled(True)
+
+    def _update_speak_button(self, line_text: Optional[str] = None) -> None:
+        if line_text is None:
+            line_text = self._current_line_text()
+        self._speak_button.setVisible(
+            button_visible(
+                synced=self._view_model.display().mode is Mode.SYNCED,
+                line_text=line_text,
+                feature_enabled=self._spoken_enabled,
+                voice_ok=self._speech_available,
+            )
+        )
+
     def _start_fetch(self, snapshot: PlayerSnapshot) -> None:
         task = FetchTask(self._provider, snapshot)
         task.signals.finished.connect(self._on_fetch_finished)
@@ -483,6 +565,7 @@ class LyricsWindow(QWidget):
         self._current.setText(shown)
         self._set_pronunciation(self._view_model.pronunciation_for(current))
         self._upcoming.setText(lines[index + 1][1] if index + 1 < len(lines) else "")
+        self._update_speak_button(current)
 
     def _set_pronunciation(self, text: str) -> None:
         self._pron.setText(text)
@@ -499,6 +582,8 @@ class LyricsWindow(QWidget):
 
         # Loop button only where looping is possible (synced timestamps).
         self._loop_button.setVisible(display.mode is Mode.SYNCED)
+        if display.mode is not Mode.SYNCED:
+            self._speak_button.setVisible(False)  # synced path updates it per line
 
         # Persistent compact header whenever a track is known.
         self._header.setText(display.header)
@@ -549,12 +634,12 @@ class LyricsWindow(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_scale()
-        self._loop_button.move(self.width() - self._loop_button.width() - 10, 8)
-        self._loop_button.raise_()
+        self._place_buttons()
 
     def _apply_scale(self) -> None:
-        """Fonts, margins, and spacing track window width near-linearly, so
-        text mass stays visually proportional from min size to max."""
+        """Fonts, margins, spacing, and button boxes track window width
+        near-linearly, so everything stays visually proportional from min
+        size to max."""
         scale = max(0.65, self.width() / _BASE_WIDTH)
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
@@ -563,6 +648,22 @@ class LyricsWindow(QWidget):
                 round(20 * scale), round(14 * scale), round(20 * scale), round(16 * scale)
             )
             self._layout.setSpacing(round(6 * scale))
+            # Button boxes follow the same scale as their glyph font, with
+            # a floor so they never shrink below a comfortable click target.
+            side = max(22, round(26 * scale))
+            self._loop_button.setFixedSize(side, side)
+            self._speak_button.setFixedSize(side, side)
+            self._place_buttons()
+
+    def _place_buttons(self) -> None:
+        margin = max(6, round(8 * self._scale))
+        side = self._loop_button.width()
+        self._loop_button.move(self.width() - side - margin, margin)
+        self._speak_button.move(
+            self.width() - side - margin, (self.height() - side) // 2
+        )
+        self._loop_button.raise_()
+        self._speak_button.raise_()
 
     def _available_geometry(self) -> QRect:
         screen = self.screen() or QApplication.primaryScreen()
@@ -678,6 +779,11 @@ class LyricsWindow(QWidget):
             romanisation.setCheckable(True)
             romanisation.setChecked(self._view_model.romanisation_enabled)
             romanisation.toggled.connect(self._set_romanisation)
+        if self._speech_available:
+            spoken = menu.addAction("Spoken reference")
+            spoken.setCheckable(True)
+            spoken.setChecked(self._spoken_enabled)
+            spoken.toggled.connect(self._set_spoken_reference)
         menu.addSeparator()
         menu.addAction("Quit", QApplication.instance().quit)
         menu.exec(event.globalPos())
@@ -686,6 +792,11 @@ class LyricsWindow(QWidget):
         self._view_model.romanisation_enabled = enabled
         self._settings.setValue("lyrics/romanisation", enabled)
         self._render()
+
+    def _set_spoken_reference(self, enabled: bool) -> None:
+        self._spoken_enabled = enabled
+        self._settings.setValue("lyrics/spoken_reference", enabled)
+        self._update_speak_button()
 
     # -- all-desktops (native NSWindow collection behaviour) ---------------
 
@@ -804,6 +915,9 @@ class LyricsWindow(QWidget):
         )
         self._view_model.romanisation_enabled = self._settings.value(
             "lyrics/romanisation", False, type=bool
+        )
+        self._spoken_enabled = self._settings.value(
+            "lyrics/spoken_reference", True, type=bool
         )
 
     def _save_settings(self) -> None:
