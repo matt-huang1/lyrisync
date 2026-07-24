@@ -43,7 +43,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from lyrisync.geometry import clamped_position
+from lyrisync.geometry import (
+    button_margin,
+    button_side,
+    clamped_position,
+    min_window_height,
+    text_gutter,
+)
 from lyrisync.loop import LineLoop, LoopPhase
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
 from lyrisync.macspaces import (
@@ -730,19 +736,22 @@ class LyricsWindow(QWidget):
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
             self.setStyleSheet(_style_for(scale))
+            # Side margins reserve the button gutters (geometry.py owns the
+            # shared math), so wrapped text can never run under a button.
+            gutter = text_gutter(scale)
             self._layout.setContentsMargins(
-                round(20 * scale), round(14 * scale), round(20 * scale), round(16 * scale)
+                gutter, round(14 * scale), gutter, round(16 * scale)
             )
             self._layout.setSpacing(round(6 * scale))
-            # Button boxes follow the same scale as their glyph font, with
-            # a floor so they never shrink below a comfortable click target.
-            side = max(22, round(26 * scale))
+            side = button_side(scale)
             for button in (self._loop_button, self._speak_button, self._attempt_button):
                 button.setFixedSize(side, side)
+            # No window shape may hide the lyrics: height floor follows scale.
+            self.setMinimumHeight(min_window_height(scale))
             self._place_buttons()
 
     def _place_buttons(self) -> None:
-        margin = max(6, round(8 * self._scale))
+        margin = button_margin(self._scale)
         side = self._loop_button.width()
         self._loop_button.move(self.width() - side - margin, margin)
         self._speak_button.move(
@@ -803,7 +812,10 @@ class LyricsWindow(QWidget):
 
         maximum = self._available_geometry().size()
         width = max(_MIN_SIZE.width(), min(maximum.width(), rect.width()))
-        height = max(_MIN_SIZE.height(), min(maximum.height(), rect.height()))
+        # Height floor depends on the width the resize will land on (fonts
+        # scale with width), so compute it from the clamped width.
+        scale = max(0.65, width / _BASE_WIDTH)
+        height = max(min_window_height(scale), min(maximum.height(), rect.height()))
         # Re-anchor so the edge being dragged is the one that gives.
         if self._resize_edges & Qt.Edge.LeftEdge:
             rect.setLeft(rect.right() - width + 1)
