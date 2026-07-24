@@ -356,13 +356,25 @@ class LyricsWindow(QWidget):
         # events the scroll area would otherwise consume.
         self._plain_scroll.viewport().installEventFilter(self)
 
+        # Synced-mode rows live in one container so PLAIN mode can hide
+        # them — stretches included — as a unit, leaving no ghost space.
+        self._synced_box = QWidget()
+        self._synced_layout = QVBoxLayout(self._synced_box)
+        self._synced_layout.setContentsMargins(0, 0, 0, 0)
+        self._synced_layout.addStretch(1)
+        for widget in (self._previous, self._current_box, self._upcoming):
+            self._synced_layout.addWidget(widget)
+        self._synced_layout.addStretch(1)
+
+        # Fixed note above the scrolling plain body.
+        self._plain_note = self._make_label("dim")
+        self._plain_note.setVisible(False)
+
         self._layout = QVBoxLayout(self)
         self._layout.addWidget(self._header)
-        self._layout.addStretch(1)
-        for widget in (self._previous, self._current_box, self._upcoming):
-            self._layout.addWidget(widget)
-        self._layout.addWidget(self._plain_scroll, 10)  # wins the free space
-        self._layout.addStretch(1)
+        self._layout.addWidget(self._plain_note)
+        self._layout.addWidget(self._plain_scroll, 1)
+        self._layout.addWidget(self._synced_box, 1)
 
         self._fadeout_timer = QTimer(self)
         self._fadeout_timer.setSingleShot(True)
@@ -720,7 +732,7 @@ class LyricsWindow(QWidget):
         if display.header and display.mode is not Mode.IDLE and self._card_active():
             # Title card: the song announces itself before lyrics start.
             self._displayed_index = None
-            self._plain_scroll.setVisible(False)
+            self._show_plain_view(False)
             self._previous.setText("")
             self._current.setText(display.header)
             self._set_pronunciation("")
@@ -728,7 +740,7 @@ class LyricsWindow(QWidget):
             return
 
         if display.mode is Mode.SYNCED:
-            self._plain_scroll.setVisible(False)
+            self._show_plain_view(False)
             timeline = self._view_model.timeline()
             if timeline is not None:
                 lines, index = timeline
@@ -738,17 +750,25 @@ class LyricsWindow(QWidget):
 
         self._displayed_index = None
         plain = display.mode is Mode.PLAIN
-        self._plain_scroll.setVisible(plain)
-        current = display.current
+        self._show_plain_view(plain)
         if plain:
+            self._plain_note.setText(display.previous)  # "plain lyrics — not synced"
             self._plain_label.setText(display.plain_text)  # full, uncapped
-            current = ""  # the body lives in the scroll area
-        elif display.mode is Mode.FETCHING:
+            return
+        current = display.current
+        if display.mode is Mode.FETCHING:
             current = _DOTS_FRAMES[self._dots_frame]
         self._previous.setText(display.previous)
         self._current.setText(current)
         self._set_pronunciation(display.pronunciation)
         self._upcoming.setText(display.upcoming)
+
+    def _show_plain_view(self, plain: bool) -> None:
+        """Swap between the scrolling plain body and the synced rows; the
+        hidden side gives up ALL its layout space, stretches included."""
+        self._plain_note.setVisible(plain)
+        self._plain_scroll.setVisible(plain)
+        self._synced_box.setVisible(not plain)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -777,6 +797,7 @@ class LyricsWindow(QWidget):
                 gutter, round(14 * scale), gutter, round(16 * scale)
             )
             self._layout.setSpacing(round(6 * scale))
+            self._synced_layout.setSpacing(round(6 * scale))
             side = button_side(scale)
             for button in (self._loop_button, self._speak_button, self._attempt_button):
                 button.setFixedSize(side, side)
