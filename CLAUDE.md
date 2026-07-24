@@ -25,5 +25,6 @@ Parked
 - Japanese romanisation
 - Global shortcut
 - Focus fade
+- Tap-to-sync creation, possible LRCLIB contribution
 
 - End every session by committing the work with a descriptive message and pushing.

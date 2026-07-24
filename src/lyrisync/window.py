@@ -19,6 +19,7 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import (
+    QEvent,
     QObject,
     QPoint,
     QPropertyAnimation,
@@ -35,10 +36,12 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QActionGroup, QColor, QPainter
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QGraphicsOpacityEffect,
     QLabel,
     QMenu,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -50,6 +53,7 @@ from lyrisync.geometry import (
     min_window_height,
     text_gutter,
 )
+from lyrisync.gestures import opacity_step, scroll_step, wheel_action
 from lyrisync.loop import LineLoop, LoopPhase
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
 from lyrisync.macspaces import (
@@ -86,9 +90,6 @@ _RESIZE_MARGIN = 8
 _MIN_OPACITY = 0.25
 _MAX_OPACITY = 1.0
 _DEFAULT_OPACITY = 0.92
-# Full min→max travel: ~37 wheel notches or ~940 trackpad pixels.
-_OPACITY_PER_WHEEL_NOTCH = 0.02
-_OPACITY_PER_SCROLL_PIXEL = 0.0008
 
 # Anticipatory line fade: the old line fades out over [ts-200, ts-100],
 # the new line swaps in at ts-100 and its fade-in completes AT ts, so it
@@ -99,7 +100,6 @@ _FADE_MS = 100
 
 _TITLE_CARD_SECONDS = 2.0
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
-_MAX_PLAIN_LINES = 12
 _RETRY_TICK_MS = 1000
 
 
@@ -110,6 +110,19 @@ QLabel#header {{ color: rgba(255, 255, 255, 120); font-size: {round(11 * scale)}
 QLabel#dim {{ color: rgba(255, 255, 255, 115); font-size: {round(14 * scale)}px; }}
 QLabel#current {{ color: rgba(255, 255, 255, 235); font-size: {round(17 * scale)}px; font-weight: 600; }}
 QLabel#pron {{ color: rgba(255, 255, 255, 165); font-size: {round(12 * scale)}px; }}
+QLabel#plain {{ color: rgba(255, 255, 255, 200); font-size: {round(14 * scale)}px; }}
+QScrollArea#plainScroll, QScrollArea#plainScroll QWidget {{ background: transparent; border: none; }}
+QScrollArea#plainScroll QScrollBar:vertical {{
+    background: transparent; width: {max(3, round(4 * scale))}px; margin: 0;
+}}
+QScrollArea#plainScroll QScrollBar::handle:vertical {{
+    background: rgba(255, 255, 255, 70); border-radius: {max(1, round(2 * scale))}px;
+    min-height: 24px;
+}}
+QScrollArea#plainScroll QScrollBar::add-line:vertical,
+QScrollArea#plainScroll QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollArea#plainScroll QScrollBar::add-page:vertical,
+QScrollArea#plainScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
 QPushButton#loop, QPushButton#speak {{
     color: rgba(255, 255, 255, 90); background: transparent; border: none;
     font-size: {round(15 * scale)}px;
@@ -322,11 +335,33 @@ class LyricsWindow(QWidget):
         self._current_fx.setOpacity(1.0)
         self._current_box.setGraphicsEffect(self._current_fx)
 
+        # Scrollable full-lyrics view for PLAIN mode. The label lives inside
+        # a transparent, frameless scroll area; the note stays fixed above.
+        self._plain_label = self._make_label("plain")
+        self._plain_label.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
+        self._plain_scroll = QScrollArea()
+        self._plain_scroll.setObjectName("plainScroll")
+        self._plain_scroll.setWidgetResizable(True)
+        self._plain_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._plain_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._plain_scroll.setWidget(self._plain_label)
+        self._plain_scroll.viewport().setAutoFillBackground(False)
+        self._plain_label.setAutoFillBackground(False)
+        self._plain_scroll.setVisible(False)
+        # Wheel routing (Option+scroll = opacity) needs first look at wheel
+        # events the scroll area would otherwise consume.
+        self._plain_scroll.viewport().installEventFilter(self)
+
         self._layout = QVBoxLayout(self)
         self._layout.addWidget(self._header)
         self._layout.addStretch(1)
         for widget in (self._previous, self._current_box, self._upcoming):
             self._layout.addWidget(widget)
+        self._layout.addWidget(self._plain_scroll, 10)  # wins the free space
         self._layout.addStretch(1)
 
         self._fadeout_timer = QTimer(self)
@@ -406,6 +441,7 @@ class LyricsWindow(QWidget):
         self._last_state = snapshot.state
         self._current_snapshot = snapshot if snapshot.is_music_track else None
         self._release_loop()
+        self._plain_scroll.verticalScrollBar().setValue(0)  # fresh track, top
         if snapshot.has_track and snapshot.track_key != self._card_key:
             self._card_key = snapshot.track_key
             self._title_card_until = time.monotonic() + _TITLE_CARD_SECONDS
@@ -684,6 +720,7 @@ class LyricsWindow(QWidget):
         if display.header and display.mode is not Mode.IDLE and self._card_active():
             # Title card: the song announces itself before lyrics start.
             self._displayed_index = None
+            self._plain_scroll.setVisible(False)
             self._previous.setText("")
             self._current.setText(display.header)
             self._set_pronunciation("")
@@ -691,6 +728,7 @@ class LyricsWindow(QWidget):
             return
 
         if display.mode is Mode.SYNCED:
+            self._plain_scroll.setVisible(False)
             timeline = self._view_model.timeline()
             if timeline is not None:
                 lines, index = timeline
@@ -699,22 +737,18 @@ class LyricsWindow(QWidget):
             return
 
         self._displayed_index = None
+        plain = display.mode is Mode.PLAIN
+        self._plain_scroll.setVisible(plain)
         current = display.current
-        if display.mode is Mode.PLAIN:
-            current = self._cap_plain(display.plain_text)
+        if plain:
+            self._plain_label.setText(display.plain_text)  # full, uncapped
+            current = ""  # the body lives in the scroll area
         elif display.mode is Mode.FETCHING:
             current = _DOTS_FRAMES[self._dots_frame]
         self._previous.setText(display.previous)
         self._current.setText(current)
         self._set_pronunciation(display.pronunciation)
         self._upcoming.setText(display.upcoming)
-
-    @staticmethod
-    def _cap_plain(text: str) -> str:
-        lines = text.splitlines()
-        if len(lines) > _MAX_PLAIN_LINES:
-            return "\n".join(lines[:_MAX_PLAIN_LINES]) + "\n…"
-        return text
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -860,13 +894,35 @@ class LyricsWindow(QWidget):
             self.move(target)
 
     def wheelEvent(self, event) -> None:
-        pixel_delta = event.pixelDelta().y()
-        if pixel_delta:  # trackpad: fine-grained pixel scrolling
-            step = pixel_delta * _OPACITY_PER_SCROLL_PIXEL
-        else:  # mouse wheel: 120 units per notch
-            step = (event.angleDelta().y() / 120.0) * _OPACITY_PER_WHEEL_NOTCH
-        if step:
-            self._set_opacity(self._opacity + step)
+        """Wheel over the window chrome (margins, header, synced lines).
+        Modifiers ride on the event itself, so Option detection works even
+        though the window never takes focus."""
+        option = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+        plain = self._view_model.display().mode is Mode.PLAIN
+        if wheel_action(plain, option) == "opacity":
+            step = opacity_step(event.pixelDelta().y(), event.angleDelta().y())
+            if step:
+                self._set_opacity(self._opacity + step)
+        else:
+            # Plain mode, wheel outside the scroll area: forward to it.
+            bar = self._plain_scroll.verticalScrollBar()
+            bar.setValue(
+                bar.value() - scroll_step(event.pixelDelta().y(), event.angleDelta().y())
+            )
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            watched is self._plain_scroll.viewport()
+            and event.type() == QEvent.Type.Wheel
+        ):
+            option = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+            if wheel_action(True, option) == "opacity":
+                step = opacity_step(event.pixelDelta().y(), event.angleDelta().y())
+                if step:
+                    self._set_opacity(self._opacity + step)
+                return True  # don't let the scroll area also scroll
+            return False  # native (kinetic) scrolling handles it
+        return super().eventFilter(watched, event)
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
