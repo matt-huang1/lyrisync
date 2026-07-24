@@ -77,6 +77,25 @@ def test_session_reusable_after_finish():
     assert session.finish() is False  # new session's own decision, not stale
 
 
+# -- speech rate plumbing --------------------------------------------------
+
+
+def test_say_command_carries_rate():
+    command = sp.say_command("안녕", rate=160)
+    assert command[:5] == ["say", "-v", sp.VOICE, "-r", "160"]
+    assert command[-2:] == ["--", "안녕"]  # option terminator protects any line
+
+
+def test_say_command_default_rate_is_module_default():
+    assert sp.say_command("안녕")[4] == str(sp.SPEECH_RATE_WPM)
+    assert sp.SPEECH_RATE_WPM == 120
+
+
+def test_rate_presets_include_default():
+    assert sp.SPEECH_RATE_WPM in sp.SPEECH_RATE_PRESETS
+    assert sp.SPEECH_RATE_PRESETS == (100, 120, 140, 160)
+
+
 # -- button visibility gating ----------------------------------------------
 
 

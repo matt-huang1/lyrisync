@@ -67,13 +67,17 @@ def detect_voice() -> bool:
     return False
 
 
+SPEECH_RATE_PRESETS = (100, 120, 140, 160)  # wpm choices in the menu
+
+
+def say_command(text: str, rate: int = SPEECH_RATE_WPM) -> list[str]:
+    """The `say` invocation for a line — pure, for testing the plumbing."""
+    return ["say", "-v", VOICE, "-r", str(rate), "--", text]
+
+
 def speak_korean(text: str, rate: int = SPEECH_RATE_WPM) -> None:
     """Speak ``text`` aloud, blocking until done — worker threads only."""
-    subprocess.run(
-        ["say", "-v", VOICE, "-r", str(rate), "--", text],
-        check=False,
-        timeout=_SAY_TIMEOUT,
-    )
+    subprocess.run(say_command(text, rate), check=False, timeout=_SAY_TIMEOUT)
 
 
 class SpeechSession:

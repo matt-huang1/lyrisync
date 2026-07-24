@@ -25,3 +25,5 @@ Parked
 - Japanese romanisation
 - Global shortcut
 - Focus fade
+
+- End every session by committing the work with a descriptive message and pushing.

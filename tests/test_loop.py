@@ -1,6 +1,12 @@
 import pytest
 
-from lyrisync.loop import ENTRY_GRACE, EXIT_GRACE, SEEK_LEAD_SECONDS, LineLoop
+from lyrisync.loop import (
+    ENTRY_GRACE,
+    EXIT_GRACE,
+    SEEK_LEAD_SECONDS,
+    LineLoop,
+    LoopPhase,
+)
 
 LINES = [(10.0, "one"), (20.0, "two"), (30.0, "three")]
 DURATION = 200.0
@@ -113,3 +119,111 @@ def test_seek_backward_out_of_line_cancels():
 def test_unknown_position_does_not_cancel():
     loop = engaged_loop(1)
     assert loop.still_valid(None)  # e.g. debounced blip poll
+
+
+# -- echo practice phase machine -----------------------------------------
+
+
+def echo_loop(index=1):
+    loop = engaged_loop(index)
+    loop.echo = True
+    return loop
+
+
+def test_echo_off_end_reached_seeks_as_today():
+    loop = engaged_loop(1)
+    assert loop.on_end_reached() == "seek"
+    assert loop.phase is LoopPhase.LISTEN
+
+
+def test_echo_on_end_reached_enters_attempt():
+    loop = echo_loop(1)
+    assert loop.phase is LoopPhase.LISTEN  # engage starts listening
+    assert loop.on_end_reached() == "attempt"
+    assert loop.phase is LoopPhase.ATTEMPT
+
+
+def test_attempt_persists_until_user_finishes():
+    loop = echo_loop(1)
+    loop.on_end_reached()
+    # No timeout: any number of state observations later, still ATTEMPT.
+    for _ in range(10):
+        loop.observe_state(playing=False)
+    assert loop.phase is LoopPhase.ATTEMPT
+    loop.finish_attempt()  # only the user's click ends it
+    assert loop.phase is LoopPhase.LISTEN
+
+
+def test_listen_attempt_listen_cycles():
+    loop = echo_loop(1)
+    for _ in range(3):
+        assert loop.on_end_reached() == "attempt"
+        assert loop.phase is LoopPhase.ATTEMPT
+        loop.finish_attempt()
+        assert loop.phase is LoopPhase.LISTEN
+
+
+def test_wrap_eta_suspended_during_attempt():
+    loop = echo_loop(1)
+    loop.on_end_reached()
+    # Even if a stray PLAYING poll arrives before our pause lands, the
+    # wrap scheduler must stay quiet — the user's click owns this phase.
+    assert loop.wrap_eta(29.9, playing=True) is None
+    loop.finish_attempt()
+    assert loop.wrap_eta(20.0, playing=True) is not None
+
+
+def test_release_during_attempt_resets_phase():
+    loop = echo_loop(1)
+    loop.on_end_reached()
+    loop.release()
+    assert not loop.engaged
+    assert loop.phase is LoopPhase.LISTEN
+    # Fresh engage starts a clean LISTEN with no stale pause bookkeeping.
+    assert loop.engage(LINES, 1, DURATION)
+    assert loop.phase is LoopPhase.LISTEN
+    assert loop.observe_state(playing=True) == "ok"
+
+
+def test_release_during_listen_is_plain_release():
+    loop = echo_loop(1)
+    loop.release()
+    assert not loop.engaged
+
+
+def test_requested_pause_is_not_external():
+    loop = echo_loop(1)
+    loop.on_end_reached()
+    # Poll lag: PLAYING may still be observed before our pause lands.
+    assert loop.observe_state(playing=True) == "ok"
+    # Our requested pause arrives: confirmed, still fine.
+    assert loop.observe_state(playing=False) == "ok"
+    assert loop.observe_state(playing=False) == "ok"
+
+
+def test_external_play_mid_attempt_cancels():
+    loop = echo_loop(1)
+    loop.on_end_reached()
+    loop.observe_state(playing=False)  # our pause confirmed
+    assert loop.observe_state(playing=True) == "external_play"
+
+
+def test_observe_state_quiet_outside_attempt():
+    loop = echo_loop(1)  # LISTEN
+    assert loop.observe_state(playing=False) == "ok"  # user pause: dormancy
+    assert loop.observe_state(playing=True) == "ok"
+    assert LineLoop().observe_state(playing=True) == "ok"  # not engaged
+
+
+def test_attempt_position_stays_within_bounds():
+    loop = echo_loop(1)
+    loop.on_end_reached()
+    # Paused position freezes around the end bound (pause lands with some
+    # latency): must not read as a user seek-away.
+    assert loop.still_valid(30.2)
+
+
+def test_auto_cancel_rules_unchanged_in_echo_mode():
+    loop = echo_loop(1)
+    assert loop.still_valid(30.0 + EXIT_GRACE + 0.5) is False
+    assert loop.still_valid(20.0 - ENTRY_GRACE - 0.5) is False

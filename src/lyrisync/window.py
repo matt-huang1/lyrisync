@@ -32,7 +32,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QActionGroup, QColor, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QGraphicsOpacityEffect,
@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 )
 
 from lyrisync.geometry import clamped_position
-from lyrisync.loop import LineLoop
+from lyrisync.loop import LineLoop, LoopPhase
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
 from lyrisync.macspaces import (
     STATUS_WINDOW_LEVEL,
@@ -60,7 +60,14 @@ from lyrisync.player_monitor import (
     resume_playback,
     set_position,
 )
-from lyrisync.speech import SpeechSession, button_visible, detect_voice, speak_korean
+from lyrisync.speech import (
+    SPEECH_RATE_PRESETS,
+    SPEECH_RATE_WPM,
+    SpeechSession,
+    button_visible,
+    detect_voice,
+    speak_korean,
+)
 from lyrisync.view_model import LyricsViewModel, Mode
 
 logger = logging.getLogger(__name__)
@@ -104,6 +111,12 @@ QPushButton#loop, QPushButton#speak {{
 QPushButton#loop:hover, QPushButton#speak:hover {{ color: rgba(255, 255, 255, 190); }}
 QPushButton#loop:checked {{ color: rgba(130, 200, 255, 235); }}
 QPushButton#speak:disabled {{ color: rgba(130, 200, 255, 235); }}
+QPushButton#attempt {{
+    color: rgba(255, 214, 120, 240); border: none;
+    background: rgba(255, 214, 120, 28); border-radius: {round(6 * scale)}px;
+    font-size: {round(15 * scale)}px;
+}}
+QPushButton#attempt:hover {{ background: rgba(255, 214, 120, 60); }}
 """
 
 
@@ -155,6 +168,33 @@ class SeekTask(QRunnable):
             logger.warning("seek to %.2fs failed: %s", self._seconds, exc)
 
 
+class PlayerCommandTask(QRunnable):
+    """One player command sequence off the UI thread: optionally seek,
+    then pause or resume."""
+
+    def __init__(
+        self,
+        seek_to: Optional[float] = None,
+        pause: bool = False,
+        resume: bool = False,
+    ) -> None:
+        super().__init__()
+        self._seek_to = seek_to
+        self._pause = pause
+        self._resume = resume
+
+    def run(self) -> None:
+        try:
+            if self._seek_to is not None:
+                set_position(self._seek_to)
+            if self._pause:
+                pause_playback()
+            if self._resume:
+                resume_playback()
+        except SpotifyQueryError as exc:
+            logger.warning("player command failed: %s", exc)
+
+
 class _SpeakSignals(QObject):
     finished = Signal()
 
@@ -163,18 +203,21 @@ class SpeakTask(QRunnable):
     """Pause (maybe) → speak the line → resume (maybe), all in one worker
     so the ordering is guaranteed and the UI thread never blocks."""
 
-    def __init__(self, text: str, pause_first: bool, resume_after: bool) -> None:
+    def __init__(
+        self, text: str, pause_first: bool, resume_after: bool, rate: int
+    ) -> None:
         super().__init__()
         self.signals = _SpeakSignals()
         self._text = text
         self._pause_first = pause_first
         self._resume_after = resume_after
+        self._rate = rate
 
     def run(self) -> None:
         try:
             if self._pause_first:
                 pause_playback()
-            speak_korean(self._text)
+            speak_korean(self._text, self._rate)
             if self._resume_after:
                 resume_playback()
         except Exception:
@@ -291,6 +334,11 @@ class LyricsWindow(QWidget):
         self._loop_timer = QTimer(self)
         self._loop_timer.setSingleShot(True)
         self._loop_timer.timeout.connect(self._do_loop_wrap)
+        self._echo_enabled = False  # restored from settings below
+        self._attempt_button = self._make_overlay_button(
+            "attempt", "🎤", "Done — play the line again"
+        )
+        self._attempt_button.clicked.connect(self._on_attempt_done_clicked)
         self._loop_button = self._make_overlay_button("loop", "↻", "Loop this line")
         self._loop_button.setCheckable(True)
         self._loop_button.clicked.connect(self._toggle_loop)
@@ -298,6 +346,7 @@ class LyricsWindow(QWidget):
         self._speech = SpeechSession()
         self._speech_available = detect_voice()
         self._spoken_enabled = True  # restored from settings below
+        self._speech_rate = SPEECH_RATE_WPM
         self._speak_button = self._make_overlay_button(
             "speak", "🔊", "Speak this line"
         )
@@ -407,8 +456,13 @@ class LyricsWindow(QWidget):
         if snapshot.state is not PlaybackState.PLAYING:
             self._cancel_line_schedule()
             self._loop_timer.stop()  # loop (if any) lies dormant, not cancelled
+        if self._loop.observe_state(snapshot.state is PlaybackState.PLAYING) == "external_play":
+            # The user un-paused mid-ATTEMPT: they've taken over — cancel
+            # (already playing, so nothing to resume).
+            self._release_loop(resume_if_attempt=False)
+            self._render()
         if snapshot.state in (PlaybackState.STOPPED, PlaybackState.NOT_RUNNING):
-            self._release_loop()
+            self._release_loop(resume_if_attempt=False)
         if self._view_model.player_state_changed(snapshot.state):
             self._render()
 
@@ -431,16 +485,37 @@ class LyricsWindow(QWidget):
             return
         self._render()
 
-    def _release_loop(self) -> None:
+    def _release_loop(self, resume_if_attempt: bool = True) -> None:
         if not self._loop.engaged and not self._loop_button.isChecked():
             return
+        was_attempt = self._loop.engaged and self._loop.phase is LoopPhase.ATTEMPT
         self._loop.release()
         self._loop_timer.stop()
         self._loop_button.setChecked(False)
+        self._attempt_button.setVisible(False)
+        if was_attempt and resume_if_attempt:
+            # Released during the silent attempt: let the song continue
+            # naturally from where the pause left it.
+            self._pool.start(PlayerCommandTask(resume=True))
 
     def _do_loop_wrap(self) -> None:
-        if self._loop.engaged and self._last_state is PlaybackState.PLAYING:
+        if not self._loop.engaged or self._last_state is not PlaybackState.PLAYING:
+            return
+        action = self._loop.on_end_reached()
+        if action == "seek":
             self._pool.start(SeekTask(self._loop.start))
+        elif action == "attempt":
+            self._pool.start(PlayerCommandTask(pause=True))
+            self._render()  # show the your-turn done-button
+
+    def _on_attempt_done_clicked(self) -> None:
+        """User-paced: the 🎤 click ends the silent attempt — replay the
+        line. No timeout backs this up; silence is a valid resting state."""
+        if not self._loop.engaged or self._loop.phase is not LoopPhase.ATTEMPT:
+            return
+        self._loop.finish_attempt()
+        self._pool.start(PlayerCommandTask(seek_to=self._loop.start, resume=True))
+        self._render()
 
     # -- spoken reference ----------------------------------------------------
 
@@ -459,13 +534,17 @@ class LyricsWindow(QWidget):
         if not self._speech.begin(playing):
             return  # already speaking: rapid clicks never stack
         self._speak_button.setEnabled(False)  # doubles as the busy indicator
-        task = SpeakTask(line, pause_first=playing, resume_after=playing)
+        task = SpeakTask(
+            line, pause_first=playing, resume_after=playing, rate=self._speech_rate
+        )
         task.signals.finished.connect(self._on_speech_finished)
         self._pool.start(task)
 
     def _on_speech_finished(self) -> None:
         self._speech.finish()  # resume already handled inside the worker
         self._speak_button.setEnabled(True)
+        # Speaking during ATTEMPT needs no special handling: we stayed
+        # paused, and the attempt simply continues until the user clicks 🎤.
 
     def _update_speak_button(self, line_text: Optional[str] = None) -> None:
         if line_text is None:
@@ -560,6 +639,8 @@ class LyricsWindow(QWidget):
         current = lines[index][1] if index >= 0 else ""
         # The ↻ marker is display-only: pronunciation is looked up on the
         # unprefixed line text.
+        # ↻ marks the engaged loop through both phases; the 🎤 done-button
+        # (not a text marker) is the your-turn signal during ATTEMPT.
         shown = f"↻ {current}" if self._loop.engaged else current
         self._previous.setText(lines[index - 1][1] if index >= 1 else "")
         self._current.setText(shown)
@@ -582,6 +663,11 @@ class LyricsWindow(QWidget):
 
         # Loop button only where looping is possible (synced timestamps).
         self._loop_button.setVisible(display.mode is Mode.SYNCED)
+        self._attempt_button.setVisible(
+            display.mode is Mode.SYNCED
+            and self._loop.engaged
+            and self._loop.phase is LoopPhase.ATTEMPT
+        )
         if display.mode is not Mode.SYNCED:
             self._speak_button.setVisible(False)  # synced path updates it per line
 
@@ -651,8 +737,8 @@ class LyricsWindow(QWidget):
             # Button boxes follow the same scale as their glyph font, with
             # a floor so they never shrink below a comfortable click target.
             side = max(22, round(26 * scale))
-            self._loop_button.setFixedSize(side, side)
-            self._speak_button.setFixedSize(side, side)
+            for button in (self._loop_button, self._speak_button, self._attempt_button):
+                button.setFixedSize(side, side)
             self._place_buttons()
 
     def _place_buttons(self) -> None:
@@ -662,8 +748,10 @@ class LyricsWindow(QWidget):
         self._speak_button.move(
             self.width() - side - margin, (self.height() - side) // 2
         )
-        self._loop_button.raise_()
-        self._speak_button.raise_()
+        # The done-button mirrors the speaker on the left, beside the line.
+        self._attempt_button.move(margin, (self.height() - side) // 2)
+        for button in (self._loop_button, self._speak_button, self._attempt_button):
+            button.raise_()
 
     def _available_geometry(self) -> QRect:
         screen = self.screen() or QApplication.primaryScreen()
@@ -779,11 +867,27 @@ class LyricsWindow(QWidget):
             romanisation.setCheckable(True)
             romanisation.setChecked(self._view_model.romanisation_enabled)
             romanisation.toggled.connect(self._set_romanisation)
+        if self._view_model.display().mode is Mode.SYNCED:
+            echo = menu.addAction("Echo practice")
+            echo.setCheckable(True)
+            echo.setChecked(self._echo_enabled)
+            echo.toggled.connect(self._set_echo_practice)
         if self._speech_available:
             spoken = menu.addAction("Spoken reference")
             spoken.setCheckable(True)
             spoken.setChecked(self._spoken_enabled)
             spoken.toggled.connect(self._set_spoken_reference)
+            rate_menu = menu.addMenu("Speech rate")
+            rate_group = QActionGroup(rate_menu)
+            rate_group.setExclusive(True)
+            for wpm in SPEECH_RATE_PRESETS:
+                preset = rate_menu.addAction(f"{wpm} wpm")
+                preset.setCheckable(True)
+                preset.setChecked(wpm == self._speech_rate)
+                rate_group.addAction(preset)
+                preset.triggered.connect(
+                    lambda checked=False, rate=wpm: self._set_speech_rate(rate)
+                )
         menu.addSeparator()
         menu.addAction("Quit", QApplication.instance().quit)
         menu.exec(event.globalPos())
@@ -797,6 +901,15 @@ class LyricsWindow(QWidget):
         self._spoken_enabled = enabled
         self._settings.setValue("lyrics/spoken_reference", enabled)
         self._update_speak_button()
+
+    def _set_speech_rate(self, rate: int) -> None:
+        self._speech_rate = rate
+        self._settings.setValue("lyrics/speech_rate", rate)
+
+    def _set_echo_practice(self, enabled: bool) -> None:
+        self._echo_enabled = enabled
+        self._loop.echo = enabled
+        self._settings.setValue("lyrics/echo_practice", enabled)
 
     # -- all-desktops (native NSWindow collection behaviour) ---------------
 
@@ -919,6 +1032,15 @@ class LyricsWindow(QWidget):
         self._spoken_enabled = self._settings.value(
             "lyrics/spoken_reference", True, type=bool
         )
+        self._speech_rate = self._settings.value(
+            "lyrics/speech_rate", SPEECH_RATE_WPM, type=int
+        )
+        if self._speech_rate not in SPEECH_RATE_PRESETS:
+            self._speech_rate = SPEECH_RATE_WPM
+        self._echo_enabled = self._settings.value(
+            "lyrics/echo_practice", False, type=bool
+        )
+        self._loop.echo = self._echo_enabled
 
     def _save_settings(self) -> None:
         self._settings.setValue("window/pos", self.pos())
