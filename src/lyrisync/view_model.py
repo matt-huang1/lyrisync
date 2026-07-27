@@ -16,6 +16,7 @@ from lyrisync.lyrics_provider import TrackLyrics
 from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
 from lyrisync.romanize import contains_hangul, romanize_korean
 from lyrisync.sync import current_line_index
+from lyrisync.sync_session import SyncSession, sync_targets
 
 
 class Mode(Enum):
@@ -23,6 +24,7 @@ class Mode(Enum):
     FETCHING = "fetching"  # lyrics lookup in flight
     SYNCED = "synced"      # timed lines advancing with playback
     PLAIN = "plain"        # lyrics exist but carry no timestamps
+    SYNCING = "syncing"    # tap-to-sync pass in progress over plain lyrics
     NO_LYRICS = "no_lyrics"
     NON_MUSIC = "non_music"  # DJ narration, ads: header only, empty body
     ERROR = "error"        # fetch failed (network/server); not cached, will retry
@@ -36,7 +38,8 @@ class Display:
     current: str = ""
     upcoming: str = ""
     plain_text: str = ""   # full text, only in PLAIN mode
-    pronunciation: str = ""  # romanised current line, SYNCED mode only
+    pronunciation: str = ""  # romanised current line, SYNCED/SYNCING modes
+    progress: str = ""     # "12 / 34 lines", SYNCING mode only
 
 
 RETRY_INTERVAL_SECONDS = 30.0
@@ -61,7 +64,9 @@ class LyricsViewModel:
         self._index = -1
         self._error_at = 0.0
         self._suspended_mode: Optional[Mode] = None
-        self._has_hangul = False
+        self._has_hangul_synced = False
+        self._has_hangul_plain = False
+        self._sync: Optional[SyncSession] = None
 
     def track_changed(self, snapshot: PlayerSnapshot) -> bool:
         """Returns True when the new track needs a lyrics fetch."""
@@ -86,7 +91,9 @@ class LyricsViewModel:
         self._header = f"{snapshot.title} — {snapshot.artist}"
         self._lyrics = None
         self._index = -1
-        self._has_hangul = False
+        self._has_hangul_synced = False
+        self._has_hangul_plain = False
+        self._sync = None  # a sync pass belongs to the song it started on
         if not snapshot.is_music_track:
             # DJ narration, ads: header only, nothing to look up.
             self._mode = Mode.NON_MUSIC
@@ -117,10 +124,14 @@ class LyricsViewModel:
         else:
             resolved = Mode.SYNCED if lyrics.synced else Mode.PLAIN
             self._lyrics = lyrics
-            # Synced only: romanisation renders under the synced current
-            # line, so a toggle for plain Korean lyrics would do nothing.
-            self._has_hangul = bool(lyrics.synced) and any(
+            # Tracked separately because romanisation renders under a single
+            # current line: that exists in SYNCED mode and during a sync
+            # pass, but never in the scrolling PLAIN body.
+            self._has_hangul_synced = bool(lyrics.synced) and any(
                 contains_hangul(text) for _, text in lyrics.synced
+            )
+            self._has_hangul_plain = bool(lyrics.plain) and contains_hangul(
+                lyrics.plain
             )
         if self._mode is Mode.IDLE and self._suspended_mode is not None:
             # Player is stopped right now; remember the outcome for the
@@ -175,9 +186,63 @@ class LyricsViewModel:
 
     @property
     def has_korean_lyrics(self) -> bool:
-        """True when the current track's lyrics are synced AND contain
-        hangul — controls whether the romanisation menu entry is offered."""
-        return self._has_hangul
+        """True when hangul is on screen in a form romanisation can sit
+        under — controls whether the romanisation menu entry is offered.
+        Never in PLAIN mode: the scrolling body has no current line, so the
+        toggle would do nothing there."""
+        if self._mode is Mode.SYNCING:
+            return self._has_hangul_plain
+        return self._has_hangul_synced
+
+    # -- tap-to-sync -------------------------------------------------------
+
+    @property
+    def track_id(self) -> Optional[str]:
+        return self._track_id
+
+    @property
+    def sync_session(self) -> Optional[SyncSession]:
+        """The sync pass in progress, or None."""
+        return self._sync
+
+    def begin_sync(self) -> bool:
+        """Start a tap-to-sync pass over the current plain lyrics. Only
+        possible from PLAIN mode with lines to stamp; returns False (and
+        changes nothing) otherwise."""
+        if self._mode is not Mode.PLAIN or self._lyrics is None:
+            return False
+        targets = sync_targets(self._lyrics.plain or "")
+        if not targets:
+            return False
+        self._sync = SyncSession(targets)
+        self._mode = Mode.SYNCING
+        return True
+
+    def end_sync(self) -> bool:
+        """Leave sync mode, discarding the session, and fall back to the
+        plain lyrics it started from. Returns True when a pass was actually
+        in progress."""
+        if self._sync is None:
+            return False
+        self._sync = None
+        if self._mode is Mode.SYNCING:
+            self._mode = Mode.PLAIN
+        if self._suspended_mode is Mode.SYNCING:
+            # Cancelled while the player was stopped: resuming must restore
+            # the plain lyrics, not a session that no longer exists.
+            self._suspended_mode = Mode.PLAIN
+        return True
+
+    def begin_reload(self, track_id: str) -> bool:
+        """Re-run the lyrics lookup for a track whose stored lyrics just
+        changed underneath us (a sync was saved). Returns False for a track
+        that is no longer current — nothing to reload."""
+        if track_id != self._track_id or self._track_id is None:
+            return False
+        self._lyrics = None
+        self._index = -1
+        self._mode = Mode.FETCHING
+        return True
 
     def pronunciation_for(self, line: str) -> str:
         """Romanised form of a lyric line, or "" when romanisation is off
@@ -195,7 +260,9 @@ class LyricsViewModel:
         self._lyrics = None
         self._index = -1
         self._suspended_mode = None
-        self._has_hangul = False
+        self._has_hangul_synced = False
+        self._has_hangul_plain = False
+        self._sync = None
 
     def display(self) -> Display:
         mode = self._mode
@@ -221,6 +288,20 @@ class LyricsViewModel:
                 header=self._header,
                 previous="plain lyrics — not synced",
                 plain_text=self._lyrics.plain or "",
+            )
+        if mode is Mode.SYNCING:
+            session = self._sync
+            current = session.current
+            return Display(
+                mode=mode,
+                header=self._header,
+                current=current,
+                # The next two lines, so the tapper can see what is coming
+                # rather than reading the current line for the first time
+                # at the moment they need to stamp it.
+                upcoming="\n".join(session.upcoming(2)),
+                pronunciation=self.pronunciation_for(current),
+                progress=f"{session.index} / {session.total} lines",
             )
         lines = self._lyrics.synced
         index = self._index

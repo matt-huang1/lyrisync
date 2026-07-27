@@ -106,6 +106,43 @@ def test_empty_output_raises(monkeypatch):
         pm.read_snapshot()
 
 
+# -- poll freshness (tap-to-sync interpolates from this) -----------------
+
+
+def test_snapshot_records_when_the_query_answered(monkeypatch):
+    import time
+
+    use_output(monkeypatch, batched_output())
+    before = time.monotonic()
+    snapshot = pm.read_snapshot()
+    after = time.monotonic()
+    assert before <= snapshot.polled_at <= after
+
+
+def test_poll_time_is_stamped_after_the_query_not_before(monkeypatch):
+    """The position is only as fresh as the moment the answer came back.
+    Stamping before a slow osascript would claim it was newer than it is,
+    and every interpolated tap would land early."""
+    ticks = iter([100.0, 101.0, 102.0])
+    monkeypatch.setattr(pm.time, "monotonic", lambda: next(ticks))
+
+    def slow(script):
+        next(ticks)  # a second of wall-clock burned inside the query
+        return batched_output()
+
+    monkeypatch.setattr(pm, "_osascript", slow)
+    assert pm.read_snapshot().polled_at == 101.0  # not 100.0
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["not_running", "playing", batched_output(position="nonsense")],
+)
+def test_every_snapshot_shape_carries_a_poll_time(monkeypatch, output):
+    use_output(monkeypatch, output)
+    assert pm.read_snapshot().polled_at is not None
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [

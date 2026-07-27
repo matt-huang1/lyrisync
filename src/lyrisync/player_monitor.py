@@ -76,6 +76,11 @@ class PlayerSnapshot:
     album: Optional[str] = None
     duration_ms: Optional[int] = None
     position_seconds: Optional[float] = None
+    # Monotonic clock reading from the moment this poll's answer came back.
+    # Consumers that need a fresher position than the poll interval (the
+    # tap-to-sync stamper) interpolate forward from here instead of running
+    # their own osascript query.
+    polled_at: Optional[float] = None
 
     @property
     def has_track(self) -> bool:
@@ -166,18 +171,21 @@ def read_snapshot() -> PlayerSnapshot:
     """Query Spotify once. Raises SpotifyQueryError only if the state itself
     is unreadable; a missing track degrades to a track-less snapshot."""
     output = _osascript(_SNAPSHOT_SCRIPT)
+    # Stamped the instant the query returns: this is how fresh the position
+    # below is, and callers extrapolate from it.
+    polled_at = time.monotonic()
     lines = output.splitlines()
     if not lines:
         raise SpotifyQueryError("empty osascript output")
     if lines[0] == "not_running":
-        return PlayerSnapshot(state=PlaybackState.NOT_RUNNING)
+        return PlayerSnapshot(state=PlaybackState.NOT_RUNNING, polled_at=polled_at)
 
     state = _parse_state(lines[0])
     # Anything but exactly 7 lines means no track loaded, or a track field
     # itself contained a newline (rare enough to degrade gracefully).
     if len(lines) != 7:
         logger.debug("snapshot (no track): state=%r lines=%r", lines[0], lines[1:])
-        return PlayerSnapshot(state=state)
+        return PlayerSnapshot(state=state, polled_at=polled_at)
     url, title, artist, album, duration_raw, position_raw = lines[1:7]
     logger.debug(
         "snapshot: state=%r url=%r title=%r artist=%r album=%r dur=%r pos=%r",
@@ -188,7 +196,7 @@ def read_snapshot() -> PlayerSnapshot:
         duration_ms = int(float(duration_raw.replace(",", ".")))
         position_seconds = float(position_raw.replace(",", "."))
     except ValueError:
-        return PlayerSnapshot(state=state)
+        return PlayerSnapshot(state=state, polled_at=polled_at)
 
     return PlayerSnapshot(
         state=state,
@@ -199,6 +207,7 @@ def read_snapshot() -> PlayerSnapshot:
         album=album,
         duration_ms=duration_ms,
         position_seconds=position_seconds,
+        polled_at=polled_at,
     )
 
 

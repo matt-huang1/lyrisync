@@ -22,6 +22,17 @@ _TOP_MARGIN = 14
 _BOTTOM_MARGIN = 16
 _MIN_HEIGHT_FLOOR = 120
 
+# Tap-to-sync bottom row. _RESIZE_MARGIN mirrors the window's edge grab
+# zone: the row must stay clear of it or dragging the bottom edge would
+# land on the tap bar instead.
+_SYNC_BAR_BASE_HEIGHT = 34
+_SYNC_BAR_MIN_HEIGHT = 28
+_SYNC_BAR_GAP = 6
+
+# Width of the window's edge grab zone, in px. Lives here because the tap
+# row's placement has to stay clear of it.
+RESIZE_MARGIN = 8
+
 
 def button_side(scale: float) -> int:
     """Overlay button box edge at this scale, floored at a comfortable
@@ -40,15 +51,43 @@ def text_gutter(scale: float) -> int:
     return button_margin(scale) + button_side(scale) + max(4, round(_GUTTER_PAD * scale))
 
 
-def min_window_height(scale: float) -> int:
+def sync_bar_height(scale: float) -> int:
+    """Height of the tap-to-sync bottom row. Taller than a normal overlay
+    button: it is the primary control of that mode and gets hit repeatedly,
+    in a hurry, without looking."""
+    return max(_SYNC_BAR_MIN_HEIGHT, round(_SYNC_BAR_BASE_HEIGHT * scale))
+
+
+def sync_bar_gap(scale: float) -> int:
+    """Breathing room between the lyric text and the tap row, and between
+    the row's own controls."""
+    return max(4, round(_SYNC_BAR_GAP * scale))
+
+
+def sync_bar_bottom(scale: float) -> int:
+    """Gap under the tap row. Never smaller than the window's resize
+    margin, so the row cannot swallow the bottom-edge resize grip."""
+    return max(button_margin(scale), RESIZE_MARGIN)
+
+
+def sync_bar_reserve(scale: float) -> int:
+    """Vertical space the tap row claims at the window bottom, gaps
+    included. The layout's bottom margin grows by this during a sync pass
+    so lyric text can never slide under the bar."""
+    return sync_bar_height(scale) + sync_bar_gap(scale) + sync_bar_bottom(scale)
+
+
+def min_window_height(scale: float, sync_bar: bool = False) -> int:
     """Smallest window height where all five label rows fit single-line at
-    this scale — no window shape may hide the lyrics entirely."""
+    this scale — no window shape may hide the lyrics entirely. During a
+    sync pass the tap row needs its space on top of that."""
     rows = sum(
         round(font * scale * _LINE_HEIGHT_FACTOR) for font in _ROW_FONTS_PX
     )
     spacing = round(_ROW_SPACING * scale) * 4 + 2  # 4 row gaps + pron gap
     margins = round(_TOP_MARGIN * scale) + round(_BOTTOM_MARGIN * scale)
-    return max(_MIN_HEIGHT_FLOOR, rows + spacing + margins)
+    height = max(_MIN_HEIGHT_FLOOR, rows + spacing + margins)
+    return height + sync_bar_reserve(scale) if sync_bar else height
 
 
 def clamped_position(

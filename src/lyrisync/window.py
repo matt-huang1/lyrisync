@@ -47,10 +47,15 @@ from PySide6.QtWidgets import (
 )
 
 from lyrisync.geometry import (
+    RESIZE_MARGIN,
     button_margin,
     button_side,
     clamped_position,
     min_window_height,
+    sync_bar_bottom,
+    sync_bar_gap,
+    sync_bar_height,
+    sync_bar_reserve,
     text_gutter,
 )
 from lyrisync.gestures import opacity_step, scroll_step, wheel_action
@@ -78,6 +83,7 @@ from lyrisync.speech import (
     detect_voice,
     speak_korean,
 )
+from lyrisync.sync_session import interpolated_position
 from lyrisync.view_model import LyricsViewModel, Mode
 
 logger = logging.getLogger(__name__)
@@ -85,7 +91,7 @@ logger = logging.getLogger(__name__)
 _BASE_WIDTH = 460
 _MIN_SIZE = QSize(260, 120)
 _CORNER_RADIUS = 14
-_RESIZE_MARGIN = 8
+_RESIZE_MARGIN = RESIZE_MARGIN
 
 _MIN_OPACITY = 0.25
 _MAX_OPACITY = 1.0
@@ -99,6 +105,13 @@ _SWAP_LEAD_MS = 100
 _FADE_MS = 100
 
 _TITLE_CARD_SECONDS = 2.0
+# How long the sync exit control stays armed awaiting its second click,
+# and what the progress row says meanwhile.
+_EXIT_CONFIRM_MS = 4000
+_EXIT_CONFIRM_TEXT = (
+    '<span style="color: rgba(255, 170, 170, 235)">'
+    "discard this sync? tap ✕ again</span>"
+)
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
 
@@ -136,6 +149,27 @@ QPushButton#attempt {{
     font-size: {round(15 * scale)}px;
 }}
 QPushButton#attempt:hover {{ background: rgba(255, 214, 120, 60); }}
+QLabel#progress {{ color: rgba(130, 200, 255, 190); font-size: {round(11 * scale)}px; }}
+QPushButton#tap {{
+    color: rgba(16, 18, 26, 245); background: rgba(235, 242, 255, 225);
+    border: none; border-radius: {round(8 * scale)}px;
+    font-size: {round(13 * scale)}px; font-weight: 700;
+}}
+QPushButton#tap:hover {{ background: rgba(255, 255, 255, 245); }}
+QPushButton#tap:pressed {{ background: rgba(130, 200, 255, 245); }}
+QPushButton#tap:disabled {{
+    color: rgba(255, 255, 255, 110); background: rgba(255, 255, 255, 30);
+}}
+QPushButton#syncUndo, QPushButton#syncExit {{
+    color: rgba(255, 255, 255, 150); border: none;
+    background: rgba(255, 255, 255, 22); border-radius: {round(8 * scale)}px;
+    font-size: {round(14 * scale)}px;
+}}
+QPushButton#syncUndo:hover {{ color: rgba(255, 255, 255, 230); }}
+QPushButton#syncUndo:disabled {{ color: rgba(255, 255, 255, 60); }}
+QPushButton#syncExit:hover {{
+    color: rgba(255, 160, 160, 240); background: rgba(255, 120, 120, 45);
+}}
 """
 
 
@@ -247,6 +281,36 @@ class SpeakTask(QRunnable):
             pass  # app tore down the signal object mid-speech
 
 
+class _SaveSyncSignals(QObject):
+    finished = Signal(str, bool)  # track_id, ok
+
+
+class SaveSyncTask(QRunnable):
+    """Writes a finished tap-to-sync to disk off the UI thread, then
+    reports back so the reload happens strictly after the file exists —
+    reloading first would read the old lyrics and show the song as plain
+    again."""
+
+    def __init__(self, provider: LyricsProvider, track_id: str, lrc_text: str) -> None:
+        super().__init__()
+        self.signals = _SaveSyncSignals()
+        self._provider = provider
+        self._track_id = track_id
+        self._lrc_text = lrc_text
+
+    def run(self) -> None:
+        ok = False
+        try:
+            self._provider.save_user_sync(self._track_id, self._lrc_text)
+            ok = True
+        except OSError:
+            logger.exception("failed to save user sync for %s", self._track_id)
+        try:
+            self.signals.finished.emit(self._track_id, ok)
+        except RuntimeError:
+            pass  # app tore down the signal object mid-save
+
+
 class _FetchSignals(QObject):
     finished = Signal(str, object, bool)  # track_id, TrackLyrics | None, ok
 
@@ -291,6 +355,10 @@ class LyricsWindow(QWidget):
         self._press_global = QPoint()
         self._current_snapshot: Optional[PlayerSnapshot] = None
         self._last_state = PlaybackState.NOT_RUNNING
+        # Freshest known position and the monotonic instant it was read, so
+        # a tap can interpolate forward without querying Spotify.
+        self._last_position: Optional[float] = None
+        self._last_polled_at: Optional[float] = None
         self._title_card_until = 0.0
         self._card_key: Optional[tuple] = None
         self._dots_frame = 0
@@ -370,9 +438,15 @@ class LyricsWindow(QWidget):
         self._plain_note = self._make_label("dim")
         self._plain_note.setVisible(False)
 
+        # Fixed status row for a sync pass: line count, or the discard
+        # confirmation once the exit control is armed.
+        self._progress = self._make_label("progress")
+        self._progress.setVisible(False)
+
         self._layout = QVBoxLayout(self)
         self._layout.addWidget(self._header)
         self._layout.addWidget(self._plain_note)
+        self._layout.addWidget(self._progress)
         self._layout.addWidget(self._plain_scroll, 1)
         self._layout.addWidget(self._synced_box, 1)
 
@@ -404,6 +478,31 @@ class LyricsWindow(QWidget):
             "speak", "🔊", "Speak this line"
         )
         self._speak_button.clicked.connect(self._on_speak_clicked)
+
+        # Tap-to-sync. The track key is captured on entry: a same-track
+        # re-announcement (metadata settling) must not cancel the pass,
+        # only a genuinely different song.
+        self._sync_track_key: Optional[tuple] = None
+        self._tap_button = self._make_overlay_button(
+            "tap", "TAP", "Tap as each line begins"
+        )
+        self._tap_button.clicked.connect(self._on_tap)
+        self._undo_button = self._make_overlay_button(
+            "syncUndo", "↩", "Undo the last tap"
+        )
+        self._undo_button.clicked.connect(self._on_sync_undo)
+        self._sync_exit_button = self._make_overlay_button(
+            "syncExit", "✕", "Discard this sync"
+        )
+        self._sync_exit_button.clicked.connect(self._on_sync_exit)
+        # Exit is confirmed in place rather than with a dialog: this window
+        # never takes focus (and runs under the accessory activation
+        # policy), so a modal would either be unreachable or drag the app
+        # into the foreground. First click arms, second discards.
+        self._exit_armed = False
+        self._exit_disarm_timer = QTimer(self)
+        self._exit_disarm_timer.setSingleShot(True)
+        self._exit_disarm_timer.timeout.connect(self._disarm_sync_exit)
 
         self._restore_settings()
         self._apply_scale()
@@ -453,6 +552,10 @@ class LyricsWindow(QWidget):
         self._last_state = snapshot.state
         self._current_snapshot = snapshot if snapshot.is_music_track else None
         self._release_loop()
+        if self._syncing and snapshot.track_key != self._sync_track_key:
+            # A different song: the pass can't be finished, so discard it.
+            # No prompt — the user's action already said they moved on.
+            self._cancel_sync()
         self._plain_scroll.verticalScrollBar().setValue(0)  # fresh track, top
         if snapshot.has_track and snapshot.track_key != self._card_key:
             self._card_key = snapshot.track_key
@@ -473,6 +576,8 @@ class LyricsWindow(QWidget):
 
     def _on_position_update(self, snapshot: PlayerSnapshot) -> None:
         self._last_state = snapshot.state
+        self._last_position = snapshot.position_seconds
+        self._last_polled_at = snapshot.polled_at
         self._view_model.position_changed(snapshot.position_seconds)
         timeline = self._view_model.timeline()
         if timeline is None:
@@ -517,7 +622,15 @@ class LyricsWindow(QWidget):
             self._render()
         if snapshot.state in (PlaybackState.STOPPED, PlaybackState.NOT_RUNNING):
             self._release_loop(resume_if_attempt=False)
+            # Spotify stopped or quit: the pass can't be completed. Cancel
+            # before the view model suspends, so the resume restores the
+            # plain lyrics rather than a dead session.
+            self._cancel_sync()
         if self._view_model.player_state_changed(snapshot.state):
+            self._render()
+        elif self._syncing:
+            # The tap bar is live only while playing; a pause/resume has to
+            # show up on it even though the display text is unchanged.
             self._render()
 
     # -- line loop ---------------------------------------------------------
@@ -570,6 +683,123 @@ class LyricsWindow(QWidget):
         self._loop.finish_attempt()
         self._pool.start(PlayerCommandTask(seek_to=self._loop.start, resume=True))
         self._render()
+
+    # -- tap-to-sync ---------------------------------------------------------
+
+    @property
+    def _syncing(self) -> bool:
+        return self._view_model.sync_session is not None
+
+    def _begin_sync(self) -> None:
+        """Start a sync pass: every pass is a complete run from line one,
+        so the track goes back to 0 and playback is made sure to be
+        running before the first line arrives."""
+        if not self._view_model.begin_sync():
+            return
+        self._release_loop()
+        self._disarm_sync_exit()
+        snapshot = self._current_snapshot
+        self._sync_track_key = snapshot.track_key if snapshot is not None else None
+        self._pool.start(PlayerCommandTask(seek_to=0.0, resume=True))
+        self._apply_layout_margins()
+        self._render()
+
+    def _cancel_sync(self) -> bool:
+        """Discard the pass in progress. Returns True when there was one."""
+        if not self._view_model.end_sync():
+            return False
+        self._sync_track_key = None
+        self._disarm_sync_exit()
+        self._apply_layout_margins()
+        return True
+
+    def _on_tap(self) -> None:
+        """One tap = "this line starts now". Timed from the last poll plus
+        the wall-clock since it landed, minus the reaction offset that
+        SyncSession applies."""
+        session = self._view_model.sync_session
+        if session is None:
+            return
+        if self._last_state is not PlaybackState.PLAYING:
+            return  # paused: the session simply waits for playback
+        position = interpolated_position(
+            self._last_position, self._last_polled_at, time.monotonic()
+        )
+        if position is None or not session.stamp(position):
+            return
+        self._disarm_sync_exit()
+        if session.is_complete:
+            self._finish_sync(session)
+        else:
+            self._render()
+
+    def _on_sync_undo(self) -> None:
+        session = self._view_model.sync_session
+        if session is None or not session.undo():
+            return
+        self._disarm_sync_exit()
+        self._render()
+
+    def _on_sync_exit(self) -> None:
+        """Two-step discard: the first click arms and says so in the
+        progress row, the second throws the pass away. Anything else the
+        user does — a tap, an undo, a few seconds of hesitation — disarms."""
+        if not self._exit_armed:
+            self._exit_armed = True
+            self._exit_disarm_timer.start(_EXIT_CONFIRM_MS)
+            self._render()
+            return
+        self._cancel_sync()
+        self._render()
+
+    def _disarm_sync_exit(self) -> None:
+        self._exit_disarm_timer.stop()
+        if self._exit_armed:
+            self._exit_armed = False
+            if self._syncing:
+                self._render()
+
+    def _finish_sync(self, session) -> None:
+        """Last line stamped: save, leave sync mode, and reload so the song
+        comes straight back as synced and can be checked by ear."""
+        track_id = self._view_model.track_id
+        lrc_text = session.to_lrc()
+        self._cancel_sync()  # the session's work now lives in lrc_text
+        self._render()
+        if not track_id:
+            return
+        task = SaveSyncTask(self._provider, track_id, lrc_text)
+        task.signals.finished.connect(self._on_sync_saved)
+        self._pool.start(task)
+
+    def _on_sync_saved(self, track_id: str, ok: bool) -> None:
+        if not ok:
+            return  # the plain lyrics are still on screen; nothing was lost
+        if self._view_model.begin_reload(track_id):
+            if self._current_snapshot is not None:
+                self._start_fetch(self._current_snapshot)
+            self._render()
+
+    def _place_sync_controls(self) -> None:
+        """Lay the tap row across the window bottom: undo on the left, exit
+        on the right, and everything between belongs to the tap bar. Sits
+        above the bottom resize margin so edge-dragging still works, and
+        being child widgets, none of them start a window drag."""
+        scale = self._scale
+        margin = button_margin(scale)
+        side = button_side(scale)
+        gap = sync_bar_gap(scale)
+        bar_height = sync_bar_height(scale)
+        top = self.height() - bar_height - sync_bar_bottom(scale)
+        for button in (self._undo_button, self._sync_exit_button):
+            button.setFixedSize(side, bar_height)
+        self._undo_button.move(margin, top)
+        self._sync_exit_button.move(self.width() - side - margin, top)
+        tap_left = margin + side + gap
+        self._tap_button.setFixedSize(
+            max(1, self.width() - 2 * tap_left), bar_height
+        )
+        self._tap_button.move(tap_left, top)
 
     # -- spoken reference ----------------------------------------------------
 
@@ -724,10 +954,20 @@ class LyricsWindow(QWidget):
         )
         if display.mode is not Mode.SYNCED:
             self._speak_button.setVisible(False)  # synced path updates it per line
+        self._render_sync_controls(display)
 
         # Persistent compact header whenever a track is known.
         self._header.setText(display.header)
         self._header.setVisible(bool(display.header))
+
+        if display.mode is Mode.SYNCING:
+            self._displayed_index = None
+            self._show_plain_view(False)
+            self._previous.setText("")
+            self._current.setText(display.current)
+            self._set_pronunciation(display.pronunciation)
+            self._upcoming.setText(display.upcoming)
+            return
 
         if display.header and display.mode is not Mode.IDLE and self._card_active():
             # Title card: the song announces itself before lyrics start.
@@ -763,6 +1003,31 @@ class LyricsWindow(QWidget):
         self._set_pronunciation(display.pronunciation)
         self._upcoming.setText(display.upcoming)
 
+    def _render_sync_controls(self, display) -> None:
+        """The tap row and its status line. The tap bar goes inert while
+        playback is paused — the session waits rather than stamping a
+        position that isn't moving."""
+        syncing = display.mode is Mode.SYNCING
+        session = self._view_model.sync_session
+        for button in (self._tap_button, self._undo_button, self._sync_exit_button):
+            button.setVisible(syncing)
+        self._progress.setVisible(syncing)
+        # Nothing sits above the line being stamped, and an empty label
+        # would still claim a row and push it off centre.
+        self._previous.setVisible(not syncing)
+        if not syncing:
+            return
+        playing = self._last_state is PlaybackState.PLAYING
+        self._tap_button.setEnabled(playing)
+        self._tap_button.setText("TAP" if playing else "PAUSED")
+        self._undo_button.setEnabled(bool(session and session.index > 0))
+        # The armed prompt is coloured inline rather than by object name:
+        # a stylesheet swap would need a repolish on every render.
+        self._progress.setText(
+            _EXIT_CONFIRM_TEXT if self._exit_armed else display.progress
+        )
+        self._place_sync_controls()
+
     def _show_plain_view(self, plain: bool) -> None:
         """Swap between the scrolling plain body and the synced rows; the
         hidden side gives up ALL its layout space, stretches included."""
@@ -790,20 +1055,26 @@ class LyricsWindow(QWidget):
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
             self.setStyleSheet(_style_for(scale))
-            # Side margins reserve the button gutters (geometry.py owns the
-            # shared math), so wrapped text can never run under a button.
-            gutter = text_gutter(scale)
-            self._layout.setContentsMargins(
-                gutter, round(14 * scale), gutter, round(16 * scale)
-            )
+            self._apply_layout_margins()
             self._layout.setSpacing(round(6 * scale))
             self._synced_layout.setSpacing(round(6 * scale))
             side = button_side(scale)
             for button in (self._loop_button, self._speak_button, self._attempt_button):
                 button.setFixedSize(side, side)
-            # No window shape may hide the lyrics: height floor follows scale.
-            self.setMinimumHeight(min_window_height(scale))
             self._place_buttons()
+
+    def _apply_layout_margins(self) -> None:
+        """Side margins reserve the button gutters (geometry.py owns the
+        shared math) so wrapped text can never run under a button; during a
+        sync pass the bottom margin also reserves the tap row, and the
+        height floor grows with it so no window shape can bury the row."""
+        scale = self._scale
+        gutter = text_gutter(scale)
+        syncing = self._syncing
+        bottom = round(16 * scale) + (sync_bar_reserve(scale) if syncing else 0)
+        self._layout.setContentsMargins(gutter, round(14 * scale), gutter, bottom)
+        # No window shape may hide the lyrics: height floor follows scale.
+        self.setMinimumHeight(min_window_height(scale, sync_bar=syncing))
 
     def _place_buttons(self) -> None:
         margin = button_margin(self._scale)
@@ -814,7 +1085,15 @@ class LyricsWindow(QWidget):
         )
         # The done-button mirrors the speaker on the left, beside the line.
         self._attempt_button.move(margin, (self.height() - side) // 2)
-        for button in (self._loop_button, self._speak_button, self._attempt_button):
+        self._place_sync_controls()
+        for button in (
+            self._loop_button,
+            self._speak_button,
+            self._attempt_button,
+            self._tap_button,
+            self._undo_button,
+            self._sync_exit_button,
+        ):
             button.raise_()
 
     def _available_geometry(self) -> QRect:
@@ -870,7 +1149,8 @@ class LyricsWindow(QWidget):
         # Height floor depends on the width the resize will land on (fonts
         # scale with width), so compute it from the clamped width.
         scale = max(0.65, width / _BASE_WIDTH)
-        height = max(min_window_height(scale), min(maximum.height(), rect.height()))
+        floor = min_window_height(scale, sync_bar=self._syncing)
+        height = max(floor, min(maximum.height(), rect.height()))
         # Re-anchor so the edge being dragged is the one that gives.
         if self._resize_edges & Qt.Edge.LeftEdge:
             rect.setLeft(rect.right() - width + 1)
@@ -947,16 +1227,25 @@ class LyricsWindow(QWidget):
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
+        display = self._view_model.display()
         all_desktops = menu.addAction("Show on all desktops")
         all_desktops.setCheckable(True)
         all_desktops.setChecked(self._all_desktops)
         all_desktops.toggled.connect(self._set_all_desktops)
+        if display.mode is Mode.PLAIN and display.plain_text:
+            # Only offered where it can help: lyrics exist but carry no
+            # timestamps, so there is something to stamp and nothing to lose.
+            existing = self._provider.has_user_sync(self._view_model.track_id)
+            menu.addAction(
+                "Re-sync this song" if existing else "Sync this song",
+                self._begin_sync,
+            )
         if self._view_model.has_korean_lyrics:
             romanisation = menu.addAction("Romanisation")
             romanisation.setCheckable(True)
             romanisation.setChecked(self._view_model.romanisation_enabled)
             romanisation.toggled.connect(self._set_romanisation)
-        if self._view_model.display().mode is Mode.SYNCED:
+        if display.mode is Mode.SYNCED:
             echo = menu.addAction("Echo practice")
             echo.setCheckable(True)
             echo.setChecked(self._echo_enabled)

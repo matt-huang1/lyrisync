@@ -68,7 +68,9 @@ class FakeFetcher:
 
 @pytest.fixture
 def provider(tmp_path):
-    return lp.LyricsProvider(cache_dir=tmp_path / "cache")
+    return lp.LyricsProvider(
+        cache_dir=tmp_path / "cache", user_sync_dir=tmp_path / "user_syncs"
+    )
 
 
 def use_fetcher(monkeypatch, *routes):
@@ -233,7 +235,9 @@ def test_cache_survives_new_provider_instance(provider, monkeypatch):
     use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
     provider.get_lyrics(snapshot())
 
-    fresh = lp.LyricsProvider(cache_dir=provider.cache_dir)
+    fresh = lp.LyricsProvider(
+        cache_dir=provider.cache_dir, user_sync_dir=provider.user_sync_dir
+    )
     use_fetcher(monkeypatch, ("album_name", lp.LyricsError("offline")))
     lyrics = fresh.get_lyrics(snapshot())  # cache hit: no fetch, no error
     assert lyrics.synced == [(12.0, "First line"), (17.5, "Second line")]
@@ -308,6 +312,118 @@ def test_track_id_sanitized_for_filename(provider, monkeypatch):
     path = provider._cache_path("weird/../id")
     assert path.parent == provider.cache_dir
     assert path.exists()
+
+
+# -- user syncs (tap-to-sync) --------------------------------------------
+
+USER_LRC = "[00:01.00] Mine first\n[00:04.25] Mine second\n"
+
+
+def test_user_sync_round_trips(provider):
+    provider.save_user_sync("track123", USER_LRC)
+    lyrics = provider.read_user_sync("track123")
+    assert lyrics.kind == "synced"
+    assert lyrics.synced == [(1.0, "Mine first"), (4.25, "Mine second")]
+
+
+def test_user_sync_beats_the_network(provider, monkeypatch):
+    fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
+    provider.save_user_sync("track123", USER_LRC)
+    lyrics = provider.get_lyrics(snapshot())
+    assert lyrics.synced == [(1.0, "Mine first"), (4.25, "Mine second")]
+    assert fake.calls == []  # never asked LRCLIB
+
+
+def test_user_sync_beats_the_cache(provider, monkeypatch):
+    """The usual reason a sync exists is that the cached answer was plain
+    (or wrong), so a cache hit must not shadow it."""
+    use_fetcher(monkeypatch, ("album_name", PLAIN_ONLY_RESPONSE))
+    assert provider.get_lyrics(snapshot()).kind == "plain"  # populates cache
+
+    provider.save_user_sync("track123", USER_LRC)
+    lyrics = provider.get_lyrics(snapshot())
+    assert lyrics.kind == "synced"
+    assert lyrics.synced == [(1.0, "Mine first"), (4.25, "Mine second")]
+
+
+def test_clearing_the_cache_leaves_user_syncs_intact(provider, monkeypatch):
+    """The documented reset is "delete .lyrics_cache/" — it must not cost
+    the user a sync they tapped out by hand."""
+    use_fetcher(monkeypatch, ("album_name", PLAIN_ONLY_RESPONSE))
+    provider.get_lyrics(snapshot())
+    provider.save_user_sync("track123", USER_LRC)
+
+    for entry in provider.cache_dir.iterdir():
+        entry.unlink()
+    assert provider.get_lyrics(snapshot()).kind == "synced"
+
+
+def test_user_syncs_live_outside_the_cache_directory(provider):
+    path = provider.save_user_sync("track123", USER_LRC)
+    assert path.parent == provider.user_sync_dir
+    assert provider.user_sync_dir != provider.cache_dir
+    assert provider.cache_dir not in path.parents
+
+
+def test_user_sync_survives_a_new_provider_instance(provider, monkeypatch):
+    provider.save_user_sync("track123", USER_LRC)
+    fresh = lp.LyricsProvider(
+        cache_dir=provider.cache_dir, user_sync_dir=provider.user_sync_dir
+    )
+    use_fetcher(monkeypatch, ("album_name", lp.LyricsError("offline")))
+    assert fresh.get_lyrics(snapshot()).kind == "synced"
+
+
+def test_has_user_sync_reports_existence(provider):
+    assert provider.has_user_sync("track123") is False
+    assert provider.has_user_sync(None) is False
+    provider.save_user_sync("track123", USER_LRC)
+    assert provider.has_user_sync("track123") is True
+
+
+def test_unparseable_user_sync_falls_back_to_the_normal_chain(provider, monkeypatch):
+    """A hand-edit that destroys the timestamps shows the real lyrics
+    rather than an empty song."""
+    fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
+    provider.save_user_sync("track123", "no timestamps at all\n")
+    assert provider.get_lyrics(snapshot()).synced == [
+        (12.0, "First line"),
+        (17.5, "Second line"),
+    ]
+    assert len(fake.calls) == 1
+
+
+def test_non_music_item_never_reads_a_user_sync(provider, monkeypatch):
+    # DJ narration reuses the upcoming song's ID, so the ID-keyed user sync
+    # is the wrong answer for it just as the cache entry is.
+    use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
+    provider.save_user_sync("shared123", USER_LRC)
+    narration = PlayerSnapshot(
+        state=PlaybackState.PLAYING,
+        track_id="shared123",
+        track_kind="media",
+        title="Up next",
+        artist="DJ X",
+    )
+    assert provider.get_lyrics(narration) is None
+
+
+def test_user_sync_track_id_sanitized_for_filename(provider):
+    path = provider.save_user_sync("weird/../id", USER_LRC)
+    assert path.parent == provider.user_sync_dir
+    assert path.exists()
+    assert provider.read_user_sync("weird/../id") is not None
+
+
+def test_saving_a_user_sync_reports_failure(provider, monkeypatch):
+    """Unlike the cache, a save is the user's work — a failure must raise
+    so the caller can say so, not vanish."""
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lp.Path, "write_text", boom)
+    with pytest.raises(OSError):
+        provider.save_user_sync("track123", USER_LRC)
 
 
 # -- LRC parsing ---------------------------------------------------------

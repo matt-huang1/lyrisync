@@ -6,6 +6,11 @@ Knows nothing about polling or the UI.
 Fallback chain: synced lyrics → plain lyrics → ``None``. Responses are
 cached on disk as JSON keyed by Spotify track ID, including negative
 results, so a song known to have no lyrics is never re-queried.
+
+Lookups consult ``.user_syncs/`` first: LRC files the user built by hand
+with tap-to-sync. That directory is the user's own work, not a cache — it
+is written only on an explicit save, is never invalidated or expired, and
+nothing in this app deletes from it.
 """
 
 from __future__ import annotations
@@ -28,6 +33,10 @@ LRCLIB_GET_URL = "https://lrclib.net/api/get"
 LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
 USER_AGENT = "lyrisync/0.1.0 (https://github.com/matthewhuang/lyrisync)"
 DEFAULT_CACHE_DIR = Path(".lyrics_cache")
+# Hand-made syncs. Deliberately NOT under the cache directory: clearing the
+# cache is a documented reset, and it must never cost the user a sync they
+# tapped out themselves.
+DEFAULT_USER_SYNC_DIR = Path(".user_syncs")
 
 _REQUEST_TIMEOUT = 10.0
 # /api/get only matches durations within ~2s, so search results this far
@@ -100,11 +109,17 @@ def _fetch_json(url: str):
 
 
 class LyricsProvider:
-    def __init__(self, cache_dir: Path = DEFAULT_CACHE_DIR) -> None:
+    def __init__(
+        self,
+        cache_dir: Path = DEFAULT_CACHE_DIR,
+        user_sync_dir: Path = DEFAULT_USER_SYNC_DIR,
+    ) -> None:
         self.cache_dir = Path(cache_dir)
+        self.user_sync_dir = Path(user_sync_dir)
 
     def get_lyrics(self, snapshot: PlayerSnapshot) -> Optional[TrackLyrics]:
-        """Lyrics for the snapshot's track, from cache or LRCLIB.
+        """Lyrics for the snapshot's track: user sync, then cache, then
+        LRCLIB.
 
         Returns None when the track definitively has no lyrics or the
         snapshot has no usable track metadata. Raises LyricsError when
@@ -117,6 +132,13 @@ class LyricsProvider:
         # and a write would poison the song's entry with narration metadata.
         if not snapshot.is_music_track:
             return None
+
+        # The user's own sync outranks everything: they made it because the
+        # remote answer was plain (or wrong), so neither the cached copy of
+        # that answer nor a fresh fetch may override it.
+        user_sync = self.read_user_sync(snapshot.track_id)
+        if user_sync is not None:
+            return user_sync
 
         cached = self._read_cache(snapshot.track_id)
         if cached is not None:
@@ -200,6 +222,42 @@ class LyricsProvider:
         if synced or plain:
             return TrackLyrics(synced=synced or None, plain=plain)
         return None
+
+    # -- user syncs --------------------------------------------------------
+
+    def user_sync_path(self, track_id: str) -> Path:
+        """Where this track's hand-made sync lives. Plain ``.lrc`` on
+        purpose: readable, editable by hand, and portable to any other
+        player."""
+        return self.user_sync_dir / (_SAFE_FILENAME_RE.sub("_", track_id) + ".lrc")
+
+    def has_user_sync(self, track_id: Optional[str]) -> bool:
+        """Whether a hand-made sync already exists — the difference between
+        offering "Sync this song" and "Re-sync this song"."""
+        return bool(track_id) and self.user_sync_path(track_id).is_file()
+
+    def read_user_sync(self, track_id: Optional[str]) -> Optional[TrackLyrics]:
+        """The user's sync for this track, or None when there isn't one (or
+        it no longer parses as timed lyrics — a hand-edit gone wrong falls
+        back to the normal chain rather than showing an empty song)."""
+        if not track_id:
+            return None
+        try:
+            text = self.user_sync_path(track_id).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+        entries = parse_lrc(text)
+        return TrackLyrics(synced=entries) if entries else None
+
+    def save_user_sync(self, track_id: str, lrc_text: str) -> Path:
+        """Write a completed sync and return its path. Unlike the cache
+        this is NOT best-effort: the user just tapped through a whole song,
+        so a failure must reach them rather than vanish. Raises OSError."""
+        self.user_sync_dir.mkdir(parents=True, exist_ok=True)
+        path = self.user_sync_path(track_id)
+        path.write_text(lrc_text, encoding="utf-8")
+        logger.info("saved user sync for %s -> %s", track_id, path)
+        return path
 
     # -- cache ------------------------------------------------------------
 

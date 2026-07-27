@@ -1,10 +1,15 @@
 import pytest
 
 from lyrisync.geometry import (
+    RESIZE_MARGIN,
     button_margin,
     button_side,
     clamped_position,
     min_window_height,
+    sync_bar_bottom,
+    sync_bar_gap,
+    sync_bar_height,
+    sync_bar_reserve,
     text_gutter,
 )
 
@@ -111,3 +116,42 @@ def test_min_height_monotonic_with_scale():
 def test_min_height_scales_roughly_linearly():
     # Doubling the scale should roughly double the content height.
     assert min_window_height(2.0) == pytest.approx(2 * min_window_height(1.0), rel=0.1)
+
+
+# -- tap-to-sync bottom row ----------------------------------------------
+
+
+def test_sync_bar_is_a_comfortable_target_at_every_scale():
+    for scale in SCALES:
+        # Taller than the small overlay buttons: it is the primary control
+        # of sync mode and gets hit repeatedly, without looking.
+        assert sync_bar_height(scale) > button_side(scale)
+
+
+def test_sync_bar_metrics_grow_with_scale():
+    heights = [sync_bar_height(scale) for scale in SCALES]
+    assert heights == sorted(heights)
+    assert heights[-1] > heights[0]
+
+
+def test_sync_bar_clears_the_resize_grip():
+    """The row sits above the bottom edge zone, so dragging the window's
+    bottom edge never lands on the tap bar instead."""
+    for scale in SCALES:
+        assert sync_bar_bottom(scale) >= RESIZE_MARGIN
+
+
+def test_sync_bar_reserve_covers_the_row_and_both_gaps():
+    for scale in SCALES:
+        assert sync_bar_reserve(scale) == (
+            sync_bar_height(scale) + sync_bar_gap(scale) + sync_bar_bottom(scale)
+        )
+
+
+def test_min_height_makes_room_for_the_sync_bar():
+    """No window shape may bury the tap row: the floor grows by exactly
+    what the row claims."""
+    for scale in SCALES:
+        assert min_window_height(scale, sync_bar=True) == (
+            min_window_height(scale) + sync_bar_reserve(scale)
+        )

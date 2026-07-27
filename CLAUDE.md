@@ -16,6 +16,9 @@ Decision log so far
 - Qt defaults windows to FullScreenPrimary; Primary and Auxiliary are mutually exclusive, so the all-desktops toggle must clear Primary. Native state is verified by readback, not assumed.
 - Full-screen overlay requires accessory activation policy, not just collection-behavior flags; a Regular-policy app triggers a Space switch on activation. Window is unfocusable by design.
 - Learning features are opt-in, toggleable layers. The default experience is always a simple synced-lyrics window; every layer off must equal the original core app.
+- User-made syncs are not cache. They live in .user_syncs/ as plain .lrc, are consulted before cache and network, and nothing in the app or its docs may delete them — clearing .lyrics_cache/ must stay a safe reset.
+- Tap timing = interpolated position (last poll + wall-clock since it landed) minus a reaction offset, clamped to >= 0 and >= the previous stamp. The UI thread never runs a subprocess to get a fresher position; the monitor stamps each poll instead.
+- A sync is saved only when complete. Exiting early discards, and confirmation is inline (two-step control), never a modal — the window must never take focus or activate the app.
 
 Parked
 - Album-art background
@@ -25,6 +28,7 @@ Parked
 - Japanese romanisation
 - Global shortcut
 - Focus fade
-- Tap-to-sync creation, possible LRCLIB contribution
+- Publishing user syncs to LRCLIB
+- Starting a sync mid-song, partial saves, editing an existing sync, per-line nudging
 
 - End every session by committing the work with a descriptive message and pushing.

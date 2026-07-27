@@ -5,3 +5,4 @@ dist/
 .pytest_cache/
 .DS_Store
 .lyrics_cache/
+.user_syncs/
