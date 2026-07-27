@@ -3,7 +3,6 @@
 Synced lyrics for the Spotify desktop app on macOS, in a floating window built for language learners.
 
 ![Demo](docs/demo.gif)
-*(demo GIF placeholder — record with the floating window over a full-screen app)*
 
 ## Features
 
