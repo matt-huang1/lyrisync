@@ -121,6 +121,18 @@ def _no_real_world():
 
     patch.setattr(LyricsProvider, "__init__", guard_init)
 
+    # -- the developer's own login items ----------------------------------
+    # SMAppService registers the app to launch at login for the real user,
+    # and nothing about that is scoped to a test run: a stray call here
+    # would leave a login item behind on the developer's Mac. Every native
+    # call goes through _main_app_service, so blocking it is enough.
+    from lyrisync import login_item
+
+    def guard_service():
+        raise _violation("SMAppService — a test may not register a login item")
+
+    patch.setattr(login_item, "_main_app_service", guard_service)
+
     # -- the developer's own settings -------------------------------------
     # QSettings("lyrisync", "lyrisync") is the real ~/Library/Preferences
     # entry: the user's window position, size, opacity and every toggle.

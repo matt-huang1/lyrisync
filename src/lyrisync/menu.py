@@ -16,6 +16,7 @@ SPOKEN = "spoken"
 SPEECH_RATE = "speech_rate"
 ECHO = "echo"
 ALL_DESKTOPS = "all_desktops"
+OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
 QUIT = "quit"
 
@@ -31,6 +32,7 @@ MENU_ORDER = (
     SPEECH_RATE,
     ECHO,
     ALL_DESKTOPS,
+    OPEN_AT_LOGIN,
     SYNC,
     SEPARATOR_BEFORE_QUIT,
     QUIT,
@@ -48,6 +50,7 @@ def visible_entries(
     speech_available: bool,
     synced: bool,
     sync_offered: bool,
+    login_item_offered: bool = False,
 ) -> tuple[str, ...]:
     """The entries to show, in ``MENU_ORDER``, for this app state.
 
@@ -56,6 +59,11 @@ def visible_entries(
     synced timestamps to loop, spoken reference needs the macOS voice
     installed, and tap-to-sync needs lines to stamp. With every layer
     dormant the menu is just show/hide, Spaces, and quit.
+
+    Open at Login is the one entry gated on how the app was launched
+    rather than on what the song is: there is nothing for macOS to start
+    at login when the app is running from a source checkout, so offering
+    the switch there would be offering something that cannot work.
     """
     shown = set(ALWAYS_VISIBLE)
     if has_korean_lyrics:
@@ -66,6 +74,8 @@ def visible_entries(
         shown.add(ECHO)
     if sync_offered:
         shown.add(SYNC)
+    if login_item_offered:
+        shown.add(OPEN_AT_LOGIN)
     return _with_separators(shown)
 
 

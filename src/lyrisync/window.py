@@ -68,9 +68,11 @@ from lyrisync.macspaces import (
     STATUS_WINDOW_LEVEL,
     all_desktops_behavior,
 )
+from lyrisync import login_item
 from lyrisync.menu import (
     ALL_DESKTOPS,
     ECHO,
+    OPEN_AT_LOGIN,
     QUIT,
     ROMANISATION,
     SEPARATOR_AFTER_SHOW,
@@ -485,6 +487,19 @@ class LyricsWindow(QWidget):
         self._dots_frame = 0
         self._scale = 0.0
         self._all_desktops = False
+        # Open at Login: only meaningful from a bundle, and the status is
+        # the system's to report. Read once here so the menu bar item is
+        # already right the first time it is opened, then re-read on every
+        # opening after that.
+        self._bundled = login_item.running_bundled()
+        self._login_status = (
+            login_item.status() if self._bundled else login_item.LoginItemStatus.UNSUPPORTED
+        )
+        logger.info(
+            "open at login: bundled=%s status=%s",
+            self._bundled,
+            self._login_status.value,
+        )
         self._native_applied = False
         # The NSVisualEffectView once installed; None means the painted
         # background is carrying the window on its own.
@@ -1454,6 +1469,12 @@ class LyricsWindow(QWidget):
         all_desktops.triggered.connect(self._set_all_desktops)
         actions[ALL_DESKTOPS] = all_desktops
 
+        # Label swaps to name the approval case in _refresh_menu.
+        open_at_login = self._menu.addAction(login_item.MENU_LABEL)
+        open_at_login.setCheckable(True)
+        open_at_login.triggered.connect(self._set_open_at_login)
+        actions[OPEN_AT_LOGIN] = open_at_login
+
         # Label swaps between "Sync" and "Re-sync" in _refresh_menu.
         sync = self._menu.addAction("Sync this song")
         sync.triggered.connect(self._begin_sync)
@@ -1465,6 +1486,9 @@ class LyricsWindow(QWidget):
         actions[QUIT] = self._menu.addAction("Quit", QApplication.instance().quit)
 
         self._menu_actions = actions
+        # Order matters: re-read the system's answer first, so the refresh
+        # that follows is drawing the state the system is actually in.
+        self._menu.aboutToShow.connect(self._reread_login_item)
         self._menu.aboutToShow.connect(self._refresh_menu)
 
     def _refresh_menu(self) -> None:
@@ -1480,6 +1504,9 @@ class LyricsWindow(QWidget):
                 speech_available=self._speech_available,
                 synced=self._view_model.display().mode is Mode.SYNCED,
                 sync_offered=sync_label is not None,
+                login_item_offered=login_item.offered(
+                    bundled=self._bundled, status=self._login_status
+                ),
             )
         )
         for key, action in self._menu_actions.items():
@@ -1493,6 +1520,12 @@ class LyricsWindow(QWidget):
         self._menu_actions[SPOKEN].setChecked(self._spoken_enabled)
         self._menu_actions[ECHO].setChecked(self._echo_enabled)
         self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
+        # The system's answer, not ours: the tick follows what macOS says,
+        # so flipping it in System Settings shows up here rather than the
+        # two quietly disagreeing.
+        login_action = self._menu_actions[OPEN_AT_LOGIN]
+        login_action.setChecked(login_item.is_enabled(self._login_status))
+        login_action.setText(login_item.label_for(self._login_status))
         for wpm, action in self._rate_actions.items():
             action.setChecked(wpm == self._speech_rate)
 
@@ -1564,6 +1597,37 @@ class LyricsWindow(QWidget):
             self._native_applied = True
             self._apply_vibrancy()
             self._apply_all_desktops(self._all_desktops)
+
+    def _reread_login_item(self) -> None:
+        """Ask macOS what it thinks, discarding whatever we thought.
+
+        Never cached beyond one menu opening: the user can turn this off
+        in System Settings while the app runs, and the entry that claims
+        otherwise is the whole failure mode this guards against.
+        """
+        if not self._bundled:
+            return
+        self._login_status = login_item.status()
+
+    def _set_open_at_login(self, enabled: bool) -> None:
+        """Register or unregister, then show what actually happened.
+
+        The stored value records what the user asked for; the tick comes
+        from the status read back afterwards. When macOS holds the
+        registration for approval the two deliberately disagree, and the
+        entry stays unchecked with a label saying where to go — the app
+        does not start at login yet, and saying otherwise would be a lie
+        the user only discovers at their next login.
+        """
+        ok, self._login_status = login_item.set_enabled(enabled)
+        self._settings.setValue("window/open_at_login", enabled)
+        if not ok:
+            logger.warning(
+                "Open at Login stays %s (status %s)",
+                "off" if enabled else "on",
+                self._login_status.value,
+            )
+        self._refresh_menu()
 
     def _set_all_desktops(self, enabled: bool) -> None:
         self._all_desktops = enabled
@@ -1737,6 +1801,18 @@ class LyricsWindow(QWidget):
         )
         self._loop.echo = self._echo_enabled
         self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
+        # Open at Login is NOT restored from here: the stored value is what
+        # the user last asked for, and the system is what is actually true.
+        # Reading it back is the whole point, so the setting is only ever
+        # compared against reality — loudly, when they disagree.
+        wanted = self._settings.value("window/open_at_login", False, type=bool)
+        if self._bundled and wanted != login_item.is_enabled(self._login_status):
+            logger.info(
+                "Open at Login was last set to %s here but macOS says %s — "
+                "following macOS",
+                wanted,
+                self._login_status.value,
+            )
 
     def _save_settings(self) -> None:
         self._settings.setValue("window/pos", self.pos())

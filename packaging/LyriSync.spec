@@ -43,7 +43,13 @@ analysis = Analysis(
     datas=[(str(PROJECT / "src" / "lyrisync" / "assets"), "lyrisync/assets")],
     # AppKit and objc are imported inside functions (every native feature is
     # guarded), and korean_romanizer is reached through a lazy import too.
-    hiddenimports=["AppKit", "Foundation", "objc", "korean_romanizer"],
+    hiddenimports=[
+        "AppKit",
+        "Foundation",
+        "objc",
+        "ServiceManagement",  # Open at Login, imported inside a guard
+        "korean_romanizer",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

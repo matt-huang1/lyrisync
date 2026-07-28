@@ -6,12 +6,14 @@ ALL_LAYERS = dict(
     speech_available=True,
     synced=True,
     sync_offered=True,
+    login_item_offered=True,
 )
 NO_LAYERS = dict(
     has_korean_lyrics=False,
     speech_available=False,
     synced=False,
     sync_offered=False,
+    login_item_offered=False,
 )
 
 
@@ -89,6 +91,32 @@ def test_echo_practice_needs_synced_timestamps():
 def test_sync_entry_follows_the_view_models_offer():
     assert m.SYNC not in entries()
     assert m.SYNC in entries(sync_offered=True)
+
+
+def test_open_at_login_is_offered_only_when_something_can_be_registered():
+    """Gated on how the app was launched, not on the song: from a source
+    checkout there is no bundle for macOS to start."""
+    assert m.OPEN_AT_LOGIN not in entries()
+    assert m.OPEN_AT_LOGIN in entries(login_item_offered=True)
+
+
+def test_open_at_login_defaults_to_hidden():
+    """The default has to be 'not offered': every caller that has not been
+    taught about login items yet must get a menu without it, rather than an
+    entry that cannot work."""
+    assert m.OPEN_AT_LOGIN not in m.visible_entries(
+        has_korean_lyrics=True,
+        speech_available=True,
+        synced=True,
+        sync_offered=True,
+    )
+
+
+def test_open_at_login_sits_with_the_window_behaviour_entries():
+    """Next to Show on all desktops: both are about how the app behaves,
+    not about the song, and neither belongs among the learning layers."""
+    shown = without_separators(m.visible_entries(**ALL_LAYERS))
+    assert shown.index(m.OPEN_AT_LOGIN) == shown.index(m.ALL_DESKTOPS) + 1
 
 
 def test_layers_gate_independently():

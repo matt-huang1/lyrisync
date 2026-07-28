@@ -41,6 +41,7 @@ try:
 except Exception as exc:  # pragma: no cover - platform plugin missing
     pytest.skip(f"Qt cannot start: {exc}", allow_module_level=True)
 
+from lyrisync import login_item  # noqa: E402
 from lyrisync import menu as m  # noqa: E402
 from lyrisync import window as w  # noqa: E402
 from lyrisync.lyrics_provider import LyricsProvider, TrackLyrics  # noqa: E402
@@ -514,6 +515,143 @@ def test_shutdown_survives_a_worker_that_will_not_come_back(make_window, caplog)
 
 
 # -- activation policy ----------------------------------------------------
+
+
+# -- open at login --------------------------------------------------------
+
+
+def test_open_at_login_is_hidden_when_running_from_source(make_window):
+    """The suite runs from a checkout, which is the case every developer
+    sees: no bundle for macOS to launch, so no switch."""
+    window = make_window()
+    assert window._bundled is False
+    load(window, SYNCED)
+    assert m.OPEN_AT_LOGIN not in visible_keys(window)
+
+
+def test_open_at_login_appears_for_a_bundle(make_window):
+    window = make_window()
+    window._bundled = True
+    window._login_status = login_item.LoginItemStatus.NOT_REGISTERED
+    load(window, SYNCED)
+    assert m.OPEN_AT_LOGIN in visible_keys(window)
+
+
+def test_the_entry_follows_the_system_not_the_stored_preference(make_window):
+    """The requirement this feature turns on: the tick is macOS's answer.
+    A user who switches this off in System Settings must see it switched
+    off here, whatever this app last wrote down."""
+    window = make_window()
+    window._bundled = True
+    window._settings.setValue("window/open_at_login", True)  # what we asked for
+
+    window._login_status = login_item.LoginItemStatus.NOT_REGISTERED  # what is true
+    window._refresh_menu()
+    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is False
+
+    window._login_status = login_item.LoginItemStatus.ENABLED
+    window._refresh_menu()
+    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is True
+
+
+def test_awaiting_approval_stays_unchecked_and_says_why(make_window):
+    """Registered but not yet approved is not enabled. The entry must not
+    claim a launch that will not happen, and the label is the only place
+    that can point at System Settings."""
+    window = make_window()
+    window._bundled = True
+    window._login_status = login_item.LoginItemStatus.REQUIRES_APPROVAL
+    window._refresh_menu()
+
+    action = window._menu_actions[m.OPEN_AT_LOGIN]
+    assert action.isChecked() is False
+    assert "System Settings" in action.text()
+
+
+def test_the_label_returns_to_normal_once_approved(make_window):
+    window = make_window()
+    window._bundled = True
+    window._login_status = login_item.LoginItemStatus.REQUIRES_APPROVAL
+    window._refresh_menu()
+    window._login_status = login_item.LoginItemStatus.ENABLED
+    window._refresh_menu()
+    assert window._menu_actions[m.OPEN_AT_LOGIN].text() == login_item.MENU_LABEL
+
+
+def test_toggling_registers_and_records_what_was_asked(make_window, monkeypatch):
+    window = make_window()
+    window._bundled = True
+    asked = []
+
+    def fake_set(enabled):
+        asked.append(enabled)
+        return True, (
+            login_item.LoginItemStatus.ENABLED
+            if enabled
+            else login_item.LoginItemStatus.NOT_REGISTERED
+        )
+
+    monkeypatch.setattr(login_item, "set_enabled", fake_set)
+
+    window._set_open_at_login(True)
+    assert asked == [True]
+    assert window._settings.value("window/open_at_login", type=bool) is True
+    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is True
+
+    window._set_open_at_login(False)
+    assert asked == [True, False]
+    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is False
+
+
+def test_a_failed_registration_leaves_the_entry_unchecked(make_window, monkeypatch, caplog):
+    """Rather than lying about it. The user clicked, macOS refused, and
+    the menu has to show the refusal."""
+    window = make_window()
+    window._bundled = True
+    monkeypatch.setattr(
+        login_item,
+        "set_enabled",
+        lambda enabled: (False, login_item.LoginItemStatus.REQUIRES_APPROVAL),
+    )
+    with caplog.at_level(logging.WARNING, logger="lyrisync.window"):
+        window._set_open_at_login(True)
+
+    action = window._menu_actions[m.OPEN_AT_LOGIN]
+    assert action.isChecked() is False
+    assert "System Settings" in action.text()
+    assert "Open at Login stays off" in caplog.text
+
+
+def test_opening_the_menu_rereads_the_system(make_window, monkeypatch):
+    """Not cached: the user can change this in System Settings while the
+    app runs, so every opening asks again."""
+    window = make_window()
+    window._bundled = True
+    answers = iter(
+        [login_item.LoginItemStatus.ENABLED, login_item.LoginItemStatus.NOT_REGISTERED]
+    )
+    monkeypatch.setattr(login_item, "status", lambda: next(answers))
+
+    window._menu.aboutToShow.emit()
+    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is True
+    window._menu.aboutToShow.emit()
+    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is False
+
+
+def test_a_source_run_never_asks_the_system(make_window, monkeypatch):
+    """No bundle, no question: the entry is hidden, and asking would be
+    asking about an app that does not exist as far as macOS is
+    concerned."""
+    window = make_window()
+    window._bundled = False
+    asked = []
+    monkeypatch.setattr(
+        login_item,
+        "status",
+        lambda: asked.append(True) or login_item.LoginItemStatus.ENABLED,
+    )
+    window._menu.aboutToShow.emit()
+    assert asked == []
 
 
 def test_the_all_desktops_toggle_cannot_touch_the_activation_policy():
