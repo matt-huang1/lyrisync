@@ -132,16 +132,24 @@ _RESIZE_MARGIN = RESIZE_MARGIN
 
 _MIN_OPACITY = 0.25
 _MAX_OPACITY = 1.0
-_DEFAULT_OPACITY = 0.92
+# Full opacity by default, because window alpha and the blur are exclusive:
+# a window with alphaValue < 1 gets no behind-window blur at all, however
+# slight the translucency (verified by screenshot — at 0.92 the text of the
+# document underneath came through sharp, at 1.0 it dissolved completely).
+# Defaulting to anything less traded the entire material for a translucency
+# nobody asked for. Dimming still works and still means what it says: it
+# gives up the frost to let the screen underneath show through.
+_DEFAULT_OPACITY = 1.0
 
 # The painted background. With the native material behind it this is a
 # scrim; without one it is the whole background. Either way it is sized so
 # the sung line clears 4.5:1 against a PURE WHITE document with no blur at
 # all — measured, not guessed — because legibility over someone else's
-# screen outranks how much of the material shows through. At this alpha
-# just over a quarter of the backdrop still reads through the blur, so the
-# window frosts rather than going flat.
-_SCRIM_OVER_MATERIAL = QColor(14, 15, 20, 185)
+# screen outranks how much of the material shows through. 150 is the
+# lowest alpha that clears it: modelled at 4.70:1 with the material
+# contributing nothing, and measured at 8.2:1 over a real white page with
+# the material rendering (tests/test_scrim.py pins the floor).
+_SCRIM_OVER_MATERIAL = QColor(14, 15, 20, 150)
 _PAINTED_BACKGROUND = QColor(18, 18, 24, 232)
 
 # Anticipatory line fade: the old line fades out over [ts-200, ts-100],
@@ -1539,9 +1547,12 @@ class LyricsWindow(QWidget):
         """Slide a real NSVisualEffectView underneath the Qt content.
 
         The window is already frameless and non-opaque for the translucent
-        background, which is exactly what a behind-window blend needs, and
-        the opacity gesture rides on the NSWindow's alpha so it dims the
-        material along with everything else — no extra plumbing.
+        background, which is exactly what a behind-window blend needs. The
+        opacity gesture rides on the NSWindow's alpha, which dims the
+        material with everything else — but an alpha below 1 also switches
+        the blur off entirely, so the frost is something full opacity buys
+        and dimming spends. Dimming the two native views instead of the
+        window does not save it; the blur wants an untouched alpha.
 
         Returns whether the material is in place; ``paintEvent`` falls back
         to a solid background when it is not, so a failure here costs the

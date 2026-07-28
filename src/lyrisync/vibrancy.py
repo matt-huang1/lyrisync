@@ -18,6 +18,13 @@ choices follow from that:
 The window still paints a thin scrim on top. That is what guarantees
 contrast when the material underneath happens to be pale, and it is the
 whole background when vibrancy is unavailable.
+
+One thing the API does not say: the behind-window blur only renders while
+the window's alphaValue is exactly 1. Any translucency at all — the
+window's or either native view's — leaves the material as a flat tint with
+the backdrop showing through sharp. The window therefore starts at full
+opacity, and the scrim is sized to carry the sung line on its own for
+every value below it.
 """
 
 from __future__ import annotations
