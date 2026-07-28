@@ -34,7 +34,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QActionGroup, QColor, QIcon, QPainter
+from PySide6.QtGui import QActionGroup, QColor, QFontDatabase, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -99,6 +99,28 @@ from lyrisync.speech import (
     speak_korean,
 )
 from lyrisync.sync_session import interpolated_position
+from lyrisync.typography import (
+    BOTTOM_MARGIN,
+    CONTEXT,
+    CURRENT,
+    HEADER,
+    PLAIN,
+    PRONUNCIATION,
+    PRONUNCIATION_SPACING,
+    PROGRESS,
+    ROW_SPACING,
+    TOP_MARGIN,
+    font_stack,
+    style_for,
+)
+from lyrisync.vibrancy import (
+    AUTORESIZE_FILL,
+    BLENDING_MODE_BEHIND_WINDOW,
+    DARK_APPEARANCE,
+    MATERIAL_HUD_WINDOW,
+    STATE_ACTIVE,
+    WINDOW_BELOW,
+)
 from lyrisync.view_model import LyricsViewModel, Mode
 
 logger = logging.getLogger(__name__)
@@ -111,6 +133,16 @@ _RESIZE_MARGIN = RESIZE_MARGIN
 _MIN_OPACITY = 0.25
 _MAX_OPACITY = 1.0
 _DEFAULT_OPACITY = 0.92
+
+# The painted background. With the native material behind it this is a
+# scrim; without one it is the whole background. Either way it is sized so
+# the sung line clears 4.5:1 against a PURE WHITE document with no blur at
+# all — measured, not guessed — because legibility over someone else's
+# screen outranks how much of the material shows through. At this alpha
+# just over a quarter of the backdrop still reads through the blur, so the
+# window frosts rather than going flat.
+_SCRIM_OVER_MATERIAL = QColor(14, 15, 20, 185)
+_PAINTED_BACKGROUND = QColor(18, 18, 24, 232)
 
 # Anticipatory line fade: the old line fades out over [ts-200, ts-100],
 # the new line swaps in at ts-100 and its fade-in completes AT ts, so it
@@ -133,14 +165,42 @@ _RETRY_TICK_MS = 1000
 MENUBAR_ICON = Path(__file__).parent / "assets" / "menubar.svg"
 
 
-def _style_for(scale: float) -> str:
+def _style_for(scale: float, family_stack: str) -> str:
+    header = style_for(HEADER, scale)
+    context = style_for(CONTEXT, scale)
+    current = style_for(CURRENT, scale)
+    pron = style_for(PRONUNCIATION, scale)
+    plain = style_for(PLAIN, scale)
+    progress = style_for(PROGRESS, scale)
+    # Colour carries the hierarchy alongside weight: the sung line is the
+    # only near-white thing on screen, everything else recedes.
     return f"""
+QWidget {{ font-family: {family_stack}; }}
 QLabel {{ background: transparent; }}
-QLabel#header {{ color: rgba(255, 255, 255, 120); font-size: {round(11 * scale)}px; }}
-QLabel#dim {{ color: rgba(255, 255, 255, 115); font-size: {round(14 * scale)}px; }}
-QLabel#current {{ color: rgba(255, 255, 255, 235); font-size: {round(17 * scale)}px; font-weight: 600; }}
-QLabel#pron {{ color: rgba(255, 255, 255, 165); font-size: {round(12 * scale)}px; }}
-QLabel#plain {{ color: rgba(255, 255, 255, 200); font-size: {round(14 * scale)}px; }}
+QLabel#header {{
+    color: rgba(255, 255, 255, 130);
+    font-size: {header.size_px}px; font-weight: {header.weight};
+}}
+QLabel#dim {{
+    color: rgba(255, 255, 255, 148);
+    font-size: {context.size_px}px; font-weight: {context.weight};
+}}
+QLabel#current {{
+    color: rgba(255, 255, 255, 250);
+    font-size: {current.size_px}px; font-weight: {current.weight};
+}}
+QLabel#pron {{
+    color: rgba(255, 255, 255, 170);
+    font-size: {pron.size_px}px; font-weight: {pron.weight};
+}}
+QLabel#plain {{
+    color: rgba(255, 255, 255, 205);
+    font-size: {plain.size_px}px; font-weight: {plain.weight};
+}}
+QLabel#progress {{
+    color: rgba(130, 200, 255, 190);
+    font-size: {progress.size_px}px; font-weight: {progress.weight};
+}}
 QScrollArea#plainScroll, QScrollArea#plainScroll QWidget {{ background: transparent; border: none; }}
 QScrollArea#plainScroll QScrollBar:vertical {{
     background: transparent; width: {max(3, round(4 * scale))}px; margin: 0;
@@ -154,10 +214,13 @@ QScrollArea#plainScroll QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollArea#plainScroll QScrollBar::add-page:vertical,
 QScrollArea#plainScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
 QPushButton#loop, QPushButton#speak {{
-    color: rgba(255, 255, 255, 90); background: transparent; border: none;
+    color: rgba(255, 255, 255, 105); background: transparent; border: none;
+    border-radius: {round(6 * scale)}px;
     font-size: {round(15 * scale)}px;
 }}
-QPushButton#loop:hover, QPushButton#speak:hover {{ color: rgba(255, 255, 255, 190); }}
+QPushButton#loop:hover, QPushButton#speak:hover {{
+    color: rgba(255, 255, 255, 225); background: rgba(255, 255, 255, 26);
+}}
 QPushButton#loop:checked {{ color: rgba(130, 200, 255, 235); }}
 QPushButton#speak:disabled {{ color: rgba(130, 200, 255, 235); }}
 QPushButton#attempt {{
@@ -166,7 +229,6 @@ QPushButton#attempt {{
     font-size: {round(15 * scale)}px;
 }}
 QPushButton#attempt:hover {{ background: rgba(255, 214, 120, 60); }}
-QLabel#progress {{ color: rgba(130, 200, 255, 190); font-size: {round(11 * scale)}px; }}
 QPushButton#tap {{
     color: rgba(16, 18, 26, 245); background: rgba(235, 242, 255, 225);
     border: none; border-radius: {round(8 * scale)}px;
@@ -389,6 +451,12 @@ class LyricsWindow(QWidget):
         self._scale = 0.0
         self._all_desktops = False
         self._native_applied = False
+        # The NSVisualEffectView once installed; None means the painted
+        # background is carrying the window on its own.
+        self._material = None
+        self._family_stack = font_stack(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+        )
         # NSWindow (behavior, level) as Qt configured it, captured before
         # the first enable so disabling restores Qt's exact defaults.
         self._saved_native: Optional[tuple[int, int]] = None
@@ -418,11 +486,11 @@ class LyricsWindow(QWidget):
         # Current line + its pronunciation share one container so the
         # anticipatory fade covers both with a single opacity effect.
         self._current_box = QWidget()
-        current_layout = QVBoxLayout(self._current_box)
-        current_layout.setContentsMargins(0, 0, 0, 0)
-        current_layout.setSpacing(2)
-        current_layout.addWidget(self._current)
-        current_layout.addWidget(self._pron)
+        self._current_layout = QVBoxLayout(self._current_box)
+        self._current_layout.setContentsMargins(0, 0, 0, 0)
+        self._current_layout.setSpacing(PRONUNCIATION_SPACING)
+        self._current_layout.addWidget(self._current)
+        self._current_layout.addWidget(self._pron)
         self._current_fx = QGraphicsOpacityEffect(self._current_box)
         self._current_fx.setOpacity(1.0)
         self._current_box.setGraphicsEffect(self._current_fx)
@@ -487,7 +555,10 @@ class LyricsWindow(QWidget):
         self._loop_timer.timeout.connect(self._do_loop_wrap)
         self._echo_enabled = False  # restored from settings below
         self._attempt_button = self._make_overlay_button(
-            "attempt", "🎤", "Done — play the line again"
+            # U+FE0E asks for text presentation: the mic then draws as a
+            # monochrome glyph instead of a colour emoji, which is the only
+            # thing separating these controls from an iMessage sticker.
+            "attempt", "🎤︎", "Done — play the line again"
         )
         self._attempt_button.clicked.connect(self._on_attempt_done_clicked)
         self._loop_button = self._make_overlay_button("loop", "↻", "Loop this line")
@@ -499,7 +570,11 @@ class LyricsWindow(QWidget):
         self._spoken_enabled = True  # restored from settings below
         self._speech_rate = SPEECH_RATE_WPM
         self._speak_button = self._make_overlay_button(
-            "speak", "🔊", "Speak this line"
+            # Not 🔊: it renders in colour whatever we ask for, and macOS
+            # has no monochrome speaker glyph (U+1F56A and friends fall
+            # back to a striped tofu box). A beamed note is monochrome and
+            # legible at 22px; the tooltip carries the exact meaning.
+            "speak", "♬", "Speak this line aloud"
         )
         self._speak_button.clicked.connect(self._on_speak_clicked)
 
@@ -1057,10 +1132,14 @@ class LyricsWindow(QWidget):
         self._synced_box.setVisible(not plain)
 
     def paintEvent(self, event) -> None:
+        """Rounded background at the same radius as the material behind it,
+        so the two corners coincide rather than one clipping the other."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(18, 18, 24, 232))
+        painter.setBrush(
+            _SCRIM_OVER_MATERIAL if self._material is not None else _PAINTED_BACKGROUND
+        )
         painter.drawRoundedRect(self.rect(), _CORNER_RADIUS, _CORNER_RADIUS)
 
     def resizeEvent(self, event) -> None:
@@ -1075,10 +1154,17 @@ class LyricsWindow(QWidget):
         scale = max(0.65, self.width() / _BASE_WIDTH)
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
-            self.setStyleSheet(_style_for(scale))
+            self.setStyleSheet(_style_for(scale, self._family_stack))
             self._apply_layout_margins()
-            self._layout.setSpacing(round(6 * scale))
-            self._synced_layout.setSpacing(round(6 * scale))
+            row_gap = max(1, round(ROW_SPACING * scale))
+            self._layout.setSpacing(row_gap)
+            self._synced_layout.setSpacing(row_gap)
+            # Far tighter than the row gap: the pronunciation belongs to the
+            # line above it, and a uniform gap would read as three separate
+            # rows instead of one block.
+            self._current_layout.setSpacing(
+                max(1, round(PRONUNCIATION_SPACING * scale))
+            )
             side = button_side(scale)
             for button in (self._loop_button, self._speak_button, self._attempt_button):
                 button.setFixedSize(side, side)
@@ -1092,8 +1178,12 @@ class LyricsWindow(QWidget):
         scale = self._scale
         gutter = text_gutter(scale)
         syncing = self._syncing
-        bottom = round(16 * scale) + (sync_bar_reserve(scale) if syncing else 0)
-        self._layout.setContentsMargins(gutter, round(14 * scale), gutter, bottom)
+        bottom = round(BOTTOM_MARGIN * scale) + (
+            sync_bar_reserve(scale) if syncing else 0
+        )
+        self._layout.setContentsMargins(
+            gutter, round(TOP_MARGIN * scale), gutter, bottom
+        )
         # No window shape may hide the lyrics: height floor follows scale.
         self.setMinimumHeight(min_window_height(scale, sync_bar=syncing))
 
@@ -1407,12 +1497,13 @@ class LyricsWindow(QWidget):
         self._settings.setValue("lyrics/echo_practice", enabled)
         self._refresh_menu()
 
-    # -- all-desktops (native NSWindow collection behaviour) ---------------
+    # -- native window (vibrancy material, all-desktops behaviour) ---------
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if not self._native_applied:
             self._native_applied = True
+            self._apply_vibrancy()
             self._apply_all_desktops(self._all_desktops)
 
     def _set_all_desktops(self, enabled: bool) -> None:
@@ -1421,8 +1512,9 @@ class LyricsWindow(QWidget):
         self._save_settings()
         self._refresh_menu()
 
-    def _nswindow(self):
-        """The native NSWindow, or None off-cocoa / without pyobjc."""
+    def _nsview(self):
+        """The native NSView backing this widget, or None off-cocoa /
+        without pyobjc."""
         if QApplication.platformName() != "cocoa":
             # winId() is only an NSView under the cocoa platform plugin;
             # casting it blindly (e.g. offscreen in tests) would crash.
@@ -1430,14 +1522,79 @@ class LyricsWindow(QWidget):
         try:
             import objc
         except ImportError:
-            logger.warning("pyobjc unavailable — 'show on all desktops' disabled")
+            logger.warning("pyobjc unavailable — native window features disabled")
             return None
         try:
-            view = objc.objc_object(c_void_p=int(self.winId()))
-            return view.window()
+            return objc.objc_object(c_void_p=int(self.winId()))
         except Exception:
-            logger.exception("failed to resolve NSWindow")
+            logger.exception("failed to resolve NSView")
             return None
+
+    def _nswindow(self):
+        """The native NSWindow, or None off-cocoa / without pyobjc."""
+        view = self._nsview()
+        return view.window() if view is not None else None
+
+    def _apply_vibrancy(self) -> bool:
+        """Slide a real NSVisualEffectView underneath the Qt content.
+
+        The window is already frameless and non-opaque for the translucent
+        background, which is exactly what a behind-window blend needs, and
+        the opacity gesture rides on the NSWindow's alpha so it dims the
+        material along with everything else — no extra plumbing.
+
+        Returns whether the material is in place; ``paintEvent`` falls back
+        to a solid background when it is not, so a failure here costs the
+        blur and nothing else. Verified by readback, not assumed.
+        """
+        nsview = self._nsview()
+        if nsview is None:
+            return False
+        try:
+            from AppKit import NSAppearance, NSVisualEffectView
+        except ImportError:
+            logger.warning("pyobjc unavailable — no vibrancy material")
+            return False
+        try:
+            container = nsview.superview()
+            if container is None:
+                logger.warning("no superview to host the material")
+                return False
+            effect = NSVisualEffectView.alloc().initWithFrame_(nsview.frame())
+            effect.setAutoresizingMask_(AUTORESIZE_FILL)
+            effect.setBlendingMode_(BLENDING_MODE_BEHIND_WINDOW)
+            effect.setMaterial_(MATERIAL_HUD_WINDOW)
+            effect.setState_(STATE_ACTIVE)
+            # Pinned dark: a material following a light system appearance
+            # would turn pale over a white document and take the white
+            # lyric text with it.
+            appearance = NSAppearance.appearanceNamed_(DARK_APPEARANCE)
+            if appearance is not None:
+                effect.setAppearance_(appearance)
+            # The material owns its own corners at the same radius the
+            # scrim is painted with, so the two coincide exactly.
+            effect.setWantsLayer_(True)
+            effect.layer().setCornerRadius_(float(_CORNER_RADIUS))
+            effect.layer().setMasksToBounds_(True)
+            container.addSubview_positioned_relativeTo_(effect, WINDOW_BELOW, nsview)
+        except Exception:
+            logger.exception("failed to install the vibrancy material")
+            return False
+
+        # Readback: it must be in the hierarchy AND behind the Qt view.
+        siblings = list(container.subviews())
+        if effect not in siblings or siblings.index(effect) > siblings.index(nsview):
+            logger.warning("vibrancy material did not land behind the content")
+            return False
+        self._material = effect
+        logger.debug(
+            "vibrancy: material=%d state=%d radius=%.1f",
+            int(effect.material()),
+            int(effect.state()),
+            float(effect.layer().cornerRadius()),
+        )
+        self.update()  # repaint with the scrim rather than the solid fill
+        return True
 
     def _apply_all_desktops(self, enabled: bool) -> None:
         """All-desktops toggle: native window flags only —

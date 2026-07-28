@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+from lyrisync.typography import (
+    BOTTOM_MARGIN,
+    CONTEXT,
+    CURRENT,
+    HEADER,
+    PRONUNCIATION,
+    ROW_SPACING,
+    TOP_MARGIN,
+    base_size,
+)
+
 GRAB_MARGIN = 40  # px of window that must stay on-screen after a drag
 
 # Overlay button metrics. The window sizes its buttons AND reserves its
@@ -14,12 +25,15 @@ _BUTTON_MIN_MARGIN = 6
 _GUTTER_PAD = 6
 
 # Label rows top to bottom: header, previous, current, pronunciation,
-# upcoming — base font px at scale 1.0, mirrored from the stylesheet.
-_ROW_FONTS_PX = (11, 14, 17, 12, 14)
+# upcoming. Taken from typography.py rather than copied, so a change to the
+# type scale can never leave the height floor describing the old one.
+_ROW_FONTS_PX = tuple(
+    base_size(role) for role in (HEADER, CONTEXT, CURRENT, PRONUNCIATION, CONTEXT)
+)
 _LINE_HEIGHT_FACTOR = 1.45
-_ROW_SPACING = 6
-_TOP_MARGIN = 14
-_BOTTOM_MARGIN = 16
+_ROW_SPACING = ROW_SPACING
+_TOP_MARGIN = TOP_MARGIN
+_BOTTOM_MARGIN = BOTTOM_MARGIN
 _MIN_HEIGHT_FLOOR = 120
 
 # Tap-to-sync bottom row. _RESIZE_MARGIN mirrors the window's edge grab

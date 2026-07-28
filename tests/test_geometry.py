@@ -99,8 +99,26 @@ def test_text_gutter_grows_with_scale():
 
 
 def test_min_height_default_scale():
-    # rows 16+20+25+17+20=98, spacing 6*4+2=26, margins 14+16=30
-    assert min_window_height(1.0) == 154
+    # rows 16+20+26+17+20=99, spacing 8*4+2=34, margins 13+15=28
+    assert min_window_height(1.0) == 161
+
+
+def test_min_height_is_derived_from_the_type_scale():
+    """The floor exists to keep all five rows visible, so it has to be
+    computed from the same sizes the stylesheet uses — not a copy that can
+    drift when the type scale changes."""
+    from lyrisync import geometry, typography
+
+    assert geometry._ROW_FONTS_PX == (
+        typography.base_size(typography.HEADER),
+        typography.base_size(typography.CONTEXT),
+        typography.base_size(typography.CURRENT),
+        typography.base_size(typography.PRONUNCIATION),
+        typography.base_size(typography.CONTEXT),
+    )
+    assert geometry._ROW_SPACING == typography.ROW_SPACING
+    assert geometry._TOP_MARGIN == typography.TOP_MARGIN
+    assert geometry._BOTTOM_MARGIN == typography.BOTTOM_MARGIN
 
 
 def test_min_height_floor_at_small_scale():

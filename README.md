@@ -7,7 +7,8 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 ## Features
 
 - **Menu bar app** — LyriSync lives in the menu bar, not the Dock. Its menu is the same one you get by right-clicking the window, so every setting is reachable whether the lyrics are on screen or hidden away.
-- **Floating synced lyrics** — a frameless, always-on-top, translucent window shows the previous, current, and next line, advancing in time with playback. Lines fade anticipatorily so the new line is fully legible exactly on its timestamp.
+- **Floating synced lyrics** — a frameless, always-on-top window shows the previous, current, and next line, advancing in time with playback. Lines fade anticipatorily so the new line is fully legible exactly on its timestamp.
+- **Native HUD** — a real macOS vibrancy material behind the lyrics, the system font with weights picked per row, and a background sized so the line being sung stays readable over a white document, a dark editor, or video.
 - **Full-screen persistence** — an optional "show on all desktops" mode keeps the window visible across Spaces and over full-screen apps.
 - **Korean romanisation** — an optional pronunciation line renders the current lyric in Revised Romanization beneath the original hangul.
 - **Spoken reference** — click the speaker to pause the music and hear the current line read slowly by macOS's Korean voice, then resume where you left off. Speech rate is adjustable.
@@ -48,7 +49,7 @@ Play something in Spotify and the window follows along.
 - **Show lyrics** hides and shows the window without stopping anything: the music plays on, a loop stays engaged, and a sync pass in progress keeps going. Showing it again picks the song up wherever it now is. The setting is remembered, and the menu bar item is always the way back.
 - **Drag** anywhere to move; **drag edges/corners** to resize (text scales with width).
 - **Scroll** to adjust opacity; in plain-lyrics view, scroll moves the lyrics and **Option+scroll** adjusts opacity.
-- The loop button (top right) repeats the current line; with echo practice enabled, the microphone button ends your silent attempt and replays the line.
+- The **↻** button (top right) repeats the current line, and **♬** beside the lyric speaks it aloud; with echo practice enabled, the microphone button ends your silent attempt and replays the line.
 
 ### Timing a song yourself
 
@@ -60,7 +61,7 @@ Two auxiliary terminal tools exist for debugging: `lyrisync-monitor` (raw player
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app via a single batched AppleScript call (~300 ms); no Spotify Web API and no credentials. Lyrics come from [LRCLIB](https://lrclib.net) and are cached locally as JSON keyed by Spotify track ID, including definitive "no lyrics" results (delete `.lyrics_cache/` to reset). Syncs you tap out yourself are not part of that cache: they are plain `.lrc` files in `.user_syncs/`, written only when you finish a pass, consulted ahead of both the cache and the network, and left alone by that reset. A re-sync takes its lines from the sync it is replacing rather than re-fetching them, so it works offline and after that reset too. The app runs under the macOS accessory activation policy from the moment it starts — that is what keeps it out of the Dock and lets the overlay sit over full-screen Spaces instead of switching to one. Display logic, loop/echo state, tap-to-sync sessions, menu gating, gesture routing, and geometry live in pure, Qt-free modules behind a thin PySide6 window. All 326 tests run on every push via GitHub Actions, the window ones included: the runner installs PySide6's system libraries and drives a real Qt object tree on the offscreen platform, so nothing is macOS-only and nothing is skipped.
+A worker thread polls the Spotify desktop app via a single batched AppleScript call (~300 ms); no Spotify Web API and no credentials. Lyrics come from [LRCLIB](https://lrclib.net) and are cached locally as JSON keyed by Spotify track ID, including definitive "no lyrics" results (delete `.lyrics_cache/` to reset). Syncs you tap out yourself are not part of that cache: they are plain `.lrc` files in `.user_syncs/`, written only when you finish a pass, consulted ahead of both the cache and the network, and left alone by that reset. A re-sync takes its lines from the sync it is replacing rather than re-fetching them, so it works offline and after that reset too. The app runs under the macOS accessory activation policy from the moment it starts — that is what keeps it out of the Dock and lets the overlay sit over full-screen Spaces instead of switching to one. The window sits on an NSVisualEffectView pinned to the dark appearance, with the painted background reduced to a scrim over it — sized by measurement so the sung line clears 4.5:1 against a pure white page even if the material never renders, because legibility over someone else's screen outranks the blur. Display logic, loop/echo state, tap-to-sync sessions, menu gating, gesture routing, the type scale, and geometry live in pure, Qt-free modules behind a thin PySide6 window. All 344 tests run on every push via GitHub Actions, the window ones included: the runner installs PySide6's system libraries and drives a real Qt object tree on the offscreen platform, so nothing is macOS-only and nothing is skipped.
 
 ## Credits
 
