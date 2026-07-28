@@ -19,6 +19,8 @@ Decision log so far
 - User-made syncs are not cache. They live in .user_syncs/ as plain .lrc, are consulted before cache and network, and nothing in the app or its docs may delete them — clearing .lyrics_cache/ must stay a safe reset.
 - Tap timing = interpolated position (last poll + wall-clock since it landed) minus a reaction offset, clamped to >= 0 and >= the previous stamp. The UI thread never runs a subprocess to get a fresher position; the monitor stamps each poll instead.
 - A sync is saved only when complete. Exiting early discards, and confirmation is inline (two-step control), never a modal — the window must never take focus or activate the app.
+- A re-sync takes its lines from the sync it replaces, not a re-fetch: a completed pass stamps every non-blank plain line, so the stored lines ARE the song's lines. Re-syncing therefore works offline and after .lyrics_cache/ is cleared. LRCLIB's own timings are never offered for overwrite — only the user's.
+- A sync pass is modal and user-driven: a fetch landing under it must not tear it down. The result is held and becomes where cancelling lands.
 
 Parked
 - Album-art background
@@ -29,6 +31,6 @@ Parked
 - Global shortcut
 - Focus fade
 - Publishing user syncs to LRCLIB
-- Starting a sync mid-song, partial saves, editing an existing sync, per-line nudging
+- Starting a sync mid-song, partial saves, per-line editing/nudging of an existing sync
 
 - End every session by committing the work with a descriptive message and pushing.

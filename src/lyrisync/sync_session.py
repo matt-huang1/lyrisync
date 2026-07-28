@@ -19,7 +19,7 @@ actually started":
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 # Subtracted from every stamp to cancel the tap's reaction lag. Tuning
 # knob: raise it if your syncs consistently land late, lower it if lines
@@ -33,10 +33,16 @@ SYNC_REACTION_OFFSET_SECONDS = 0.25
 MAX_EXTRAPOLATION_SECONDS = 2.0
 
 
+def sync_targets_from_lines(lines: Iterable[str]) -> list[str]:
+    """The lines a sync pass will stamp: every non-blank one, in order.
+    Blank lines are structure (instrumental gaps, verse breaks), not tap
+    targets."""
+    return [line.strip() for line in lines if line.strip()]
+
+
 def sync_targets(plain_text: str) -> list[str]:
-    """The lines a sync pass will stamp: every non-blank line of the plain
-    lyrics, in order. Blank lines are structure, not tap targets."""
-    return [line.strip() for line in plain_text.splitlines() if line.strip()]
+    """Tap targets from a block of plain lyrics."""
+    return sync_targets_from_lines(plain_text.splitlines())
 
 
 def interpolated_position(
@@ -105,6 +111,17 @@ class SyncSession:
     @property
     def is_complete(self) -> bool:
         return bool(self._lines) and len(self._stamps) == len(self._lines)
+
+    @property
+    def previous(self) -> str:
+        """The line just stamped, or "" before the first tap.
+
+        Kept on screen because it is the timing cue for the next tap: the
+        singer is partway through it, and watching it run out is how you
+        know when the current line begins.
+        """
+        index = self.index
+        return self._lines[index - 1] if index >= 1 else ""
 
     @property
     def current(self) -> str:

@@ -7,6 +7,7 @@ from lyrisync.sync_session import (
     format_timestamp,
     interpolated_position,
     sync_targets,
+    sync_targets_from_lines,
 )
 
 
@@ -31,6 +32,14 @@ def test_sync_targets_strips_surrounding_whitespace():
 def test_sync_targets_of_empty_text_is_empty():
     assert sync_targets("") == []
     assert sync_targets("\n\n  \n") == []
+
+
+def test_sync_targets_from_lines_drops_the_same_blanks():
+    """A re-sync takes its targets from stored lines rather than a block of
+    text; instrumental gaps must fall out the same way."""
+    assert sync_targets_from_lines(["one", "", " ", "two"]) == ["one", "two"]
+    assert sync_targets_from_lines(iter([" padded "])) == ["padded"]
+    assert sync_targets_from_lines([]) == []
 
 
 # -- stamp / undo / complete ------------------------------------------------
@@ -102,6 +111,34 @@ def test_an_empty_session_is_never_complete():
     s = session(())
     assert s.is_complete is False
     assert s.stamp(1.0) is False
+    assert s.current == ""
+
+
+def test_previous_is_the_line_just_stamped():
+    s = session()
+    assert s.previous == ""  # nothing tapped yet
+    s.stamp(1.0)
+    assert s.previous == "one"
+    s.stamp(2.0)
+    assert s.previous == "two"
+
+
+def test_previous_follows_undo_back_up_the_list():
+    s = session()
+    s.stamp(1.0)
+    s.stamp(2.0)
+    s.undo()
+    assert s.previous == "one"
+    s.undo()
+    assert s.previous == ""
+
+
+def test_previous_after_the_last_stamp_is_the_last_line():
+    s = session()
+    for position in (1.0, 2.0, 3.0):
+        s.stamp(position)
+    assert s.is_complete is True
+    assert s.previous == "three"
     assert s.current == ""
 
 

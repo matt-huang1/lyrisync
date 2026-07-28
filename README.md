@@ -12,7 +12,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 - **Spoken reference** — click the speaker to pause the music and hear the current line read slowly by macOS's Korean voice, then resume where you left off. Speech rate is adjustable.
 - **Line looping** — repeat the current line until released; with **echo practice** on, each pass alternates with a silent, self-paced window for you to sing the line yourself.
 - **Plain-lyrics scrolling** — songs without timestamps show their full lyrics in a scrollable view.
-- **Tap-to-sync** — a song that only has plain lyrics can be timed by hand: the track restarts and you tap a wide bar once as each line begins. The finished sync is saved locally and used automatically from then on, so the song plays back like any other synced track.
+- **Tap-to-sync** — a song that only has plain lyrics can be timed by hand: the track restarts and you tap a wide bar once as each line begins. The finished sync is saved locally and used automatically from then on, so the song plays back like any other synced track. Not happy with the timings? Re-sync it and the pass starts over from line one.
 - **Everything optional** — all learning features are toggles, off by default or hidden until relevant. With every layer off, LyriSync is just a simple synced-lyrics window.
 
 ## Requirements
@@ -49,13 +49,15 @@ Play something in Spotify and the window follows along.
 
 ### Timing a song yourself
 
-When a song has plain lyrics only, right-click and choose **Sync this song**. The track jumps back to the start and starts playing, and the window shows the line you are waiting for with the next two beneath it. Tap the wide bar at the bottom the instant each line begins — ↩ undoes the last tap if you are early or late, and the counter tracks how far you have got. Taps are ignored while playback is paused, so you can stop to catch up. Finish the last line and the sync saves itself and reloads immediately, ready to listen back. ✕ abandons the pass and asks for a second click to confirm; a sync can only be saved complete, so there is nothing to keep otherwise.
+When a song has plain lyrics only, right-click and choose **Sync this song**. The track jumps back to the start and starts playing, and the window shows the line you are waiting for, with the line you just stamped above it and the next two beneath. Tap the wide bar at the bottom the instant each line begins — watching the line above run out is the cue for the next tap. ↩ undoes the last tap if you are early or late, and the counter tracks how far you have got. Taps are ignored while playback is paused, so you can stop to catch up. Finish the last line and the sync saves itself and reloads immediately, ready to listen back. ✕ abandons the pass and asks for a second click to confirm; a sync can only be saved complete, so there is nothing to keep otherwise.
+
+Once a song carries a sync of your own, the menu offers **Re-sync this song** instead — a fresh full pass from line one that replaces the old timings when you finish it. Abandoning a re-sync leaves the sync you already had exactly as it was.
 
 Two auxiliary terminal tools exist for debugging: `lyrisync-monitor` (raw player events) and `lyrisync-lyrics` (synced lyrics in the terminal).
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app via a single batched AppleScript call (~300 ms); no Spotify Web API and no credentials. Lyrics come from [LRCLIB](https://lrclib.net) and are cached locally as JSON keyed by Spotify track ID, including definitive "no lyrics" results (delete `.lyrics_cache/` to reset). Syncs you tap out yourself are not part of that cache: they are plain `.lrc` files in `.user_syncs/`, written only when you finish a pass, consulted ahead of both the cache and the network, and left alone by that reset. Display logic, loop/echo state, tap-to-sync sessions, gesture routing, and geometry live in pure, Qt-free modules behind a thin PySide6 window; 268 tests cover them, run by GitHub Actions on every push.
+A worker thread polls the Spotify desktop app via a single batched AppleScript call (~300 ms); no Spotify Web API and no credentials. Lyrics come from [LRCLIB](https://lrclib.net) and are cached locally as JSON keyed by Spotify track ID, including definitive "no lyrics" results (delete `.lyrics_cache/` to reset). Syncs you tap out yourself are not part of that cache: they are plain `.lrc` files in `.user_syncs/`, written only when you finish a pass, consulted ahead of both the cache and the network, and left alone by that reset. A re-sync takes its lines from the sync it is replacing rather than re-fetching them, so it works offline and after that reset too. Display logic, loop/echo state, tap-to-sync sessions, gesture routing, and geometry live in pure, Qt-free modules behind a thin PySide6 window; 293 tests cover them, run by GitHub Actions on every push.
 
 ## Credits
 

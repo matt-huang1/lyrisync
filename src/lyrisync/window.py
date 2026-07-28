@@ -963,7 +963,7 @@ class LyricsWindow(QWidget):
         if display.mode is Mode.SYNCING:
             self._displayed_index = None
             self._show_plain_view(False)
-            self._previous.setText("")
+            self._previous.setText(display.previous)
             self._current.setText(display.current)
             self._set_pronunciation(display.pronunciation)
             self._upcoming.setText(display.upcoming)
@@ -1012,9 +1012,6 @@ class LyricsWindow(QWidget):
         for button in (self._tap_button, self._undo_button, self._sync_exit_button):
             button.setVisible(syncing)
         self._progress.setVisible(syncing)
-        # Nothing sits above the line being stamped, and an empty label
-        # would still claim a row and push it off centre.
-        self._previous.setVisible(not syncing)
         if not syncing:
             return
         playing = self._last_state is PlaybackState.PLAYING
@@ -1232,14 +1229,13 @@ class LyricsWindow(QWidget):
         all_desktops.setCheckable(True)
         all_desktops.setChecked(self._all_desktops)
         all_desktops.toggled.connect(self._set_all_desktops)
-        if display.mode is Mode.PLAIN and display.plain_text:
-            # Only offered where it can help: lyrics exist but carry no
-            # timestamps, so there is something to stamp and nothing to lose.
-            existing = self._provider.has_user_sync(self._view_model.track_id)
-            menu.addAction(
-                "Re-sync this song" if existing else "Sync this song",
-                self._begin_sync,
-            )
+        # Offered wherever a pass can be run: plain lyrics to stamp for the
+        # first time, or a sync of the user's own that they may redo.
+        sync_entry = self._view_model.sync_menu_entry(
+            self._provider.has_user_sync(self._view_model.track_id)
+        )
+        if sync_entry is not None:
+            menu.addAction(sync_entry, self._begin_sync)
         if self._view_model.has_korean_lyrics:
             romanisation = menu.addAction("Romanisation")
             romanisation.setCheckable(True)

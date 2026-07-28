@@ -125,6 +125,64 @@ def test_a_saved_sync_survives_every_provider_code_path(provider, monkeypatch):
     assert path.read_text(encoding="utf-8") == lrc
 
 
+def test_only_save_user_sync_ever_writes_to_the_directory():
+    """One writer, one entry point. A second place writing user-sync files
+    would be a second place that could truncate one."""
+    source = (PACKAGE_DIR / "lyrics_provider.py").read_text(encoding="utf-8")
+    body = source.split("def save_user_sync", 1)
+    assert len(body) == 2, "save_user_sync is gone or renamed"
+    writes = [
+        path.name
+        for path in source_files()
+        if "write_text" in path.read_text(encoding="utf-8")
+    ]
+    assert writes == ["lyrics_provider.py"]
+    assert source.count("write_text") == 2  # the cache entry, and this one
+
+
+def test_completing_a_resync_overwrites_the_previous_one(provider):
+    """The one sanctioned way a stored sync ever changes."""
+    provider.save_user_sync("track123", "[00:01.00] alpha\n[00:04.00] beta\n")
+    path = provider.user_sync_path("track123")
+
+    redone = "[00:02.50] alpha\n[00:06.75] beta\n"
+    assert provider.save_user_sync("track123", redone) == path
+    assert path.read_text(encoding="utf-8") == redone  # replaced, not appended
+    assert provider.read_user_sync("track123").synced == [
+        (2.5, "alpha"),
+        (6.75, "beta"),
+    ]
+    assert len(list(provider.user_sync_dir.iterdir())) == 1  # no stray copies
+
+
+def test_an_abandoned_resync_leaves_the_stored_sync_untouched(provider):
+    """Only a completed pass reaches save_user_sync, so abandoning one
+    cannot cost the user the sync they already had."""
+    original = "[00:01.00] alpha\n[00:04.00] beta\n"
+    provider.save_user_sync("track123", original)
+
+    from lyrisync.sync_session import SyncSession
+    from lyrisync.view_model import LyricsViewModel
+
+    vm = LyricsViewModel()
+    vm.track_changed(
+        PlayerSnapshot(
+            state=PlaybackState.PLAYING,
+            track_id="track123",
+            title="Song",
+            artist="Artist",
+        )
+    )
+    vm.fetch_completed("track123", provider.read_user_sync("track123"))
+    assert vm.begin_sync() is True
+    vm.sync_session.stamp(30.0)  # a partial, wrong pass
+    assert isinstance(vm.sync_session, SyncSession)
+    vm.end_sync()
+
+    assert provider.user_sync_path("track123").read_text(encoding="utf-8") == original
+    assert provider.read_user_sync("track123").synced == [(1.0, "alpha"), (4.0, "beta")]
+
+
 def test_a_saved_sync_is_never_overwritten_by_a_fetch(provider, monkeypatch):
     lrc = "[00:01.00] Mine\n"
     provider.save_user_sync("track123", lrc)

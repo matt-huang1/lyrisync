@@ -16,7 +16,11 @@ from lyrisync.lyrics_provider import TrackLyrics
 from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
 from lyrisync.romanize import contains_hangul, romanize_korean
 from lyrisync.sync import current_line_index
-from lyrisync.sync_session import SyncSession, sync_targets
+from lyrisync.sync_session import (
+    SyncSession,
+    sync_targets,
+    sync_targets_from_lines,
+)
 
 
 class Mode(Enum):
@@ -65,8 +69,9 @@ class LyricsViewModel:
         self._error_at = 0.0
         self._suspended_mode: Optional[Mode] = None
         self._has_hangul_synced = False
-        self._has_hangul_plain = False
+        self._has_hangul_sync = False
         self._sync: Optional[SyncSession] = None
+        self._sync_return_mode: Optional[Mode] = None
 
     def track_changed(self, snapshot: PlayerSnapshot) -> bool:
         """Returns True when the new track needs a lyrics fetch."""
@@ -92,8 +97,10 @@ class LyricsViewModel:
         self._lyrics = None
         self._index = -1
         self._has_hangul_synced = False
-        self._has_hangul_plain = False
-        self._sync = None  # a sync pass belongs to the song it started on
+        self._has_hangul_sync = False
+        # A sync pass belongs to the song it started on.
+        self._sync = None
+        self._sync_return_mode = None
         if not snapshot.is_music_track:
             # DJ narration, ads: header only, nothing to look up.
             self._mode = Mode.NON_MUSIC
@@ -124,15 +131,20 @@ class LyricsViewModel:
         else:
             resolved = Mode.SYNCED if lyrics.synced else Mode.PLAIN
             self._lyrics = lyrics
-            # Tracked separately because romanisation renders under a single
-            # current line: that exists in SYNCED mode and during a sync
-            # pass, but never in the scrolling PLAIN body.
+            # Synced only: romanisation renders under a single current
+            # line, which exists in SYNCED mode and during a sync pass, but
+            # never in the scrolling PLAIN body. A pass computes its own
+            # flag from the lines it is about to stamp.
             self._has_hangul_synced = bool(lyrics.synced) and any(
                 contains_hangul(text) for _, text in lyrics.synced
             )
-            self._has_hangul_plain = bool(lyrics.plain) and contains_hangul(
-                lyrics.plain
-            )
+        if self._sync is not None:
+            # A sync pass is modal and user-driven: a fetch landing under it
+            # (a retry, a re-announcement) must not tear it down mid-song.
+            # The session owns its own copy of the lines, so the new lyrics
+            # simply become where cancelling lands.
+            self._sync_return_mode = resolved
+            return False
         if self._mode is Mode.IDLE and self._suspended_mode is not None:
             # Player is stopped right now; remember the outcome for the
             # resume-restore instead of showing lyrics over the idle state.
@@ -191,7 +203,7 @@ class LyricsViewModel:
         Never in PLAIN mode: the scrolling body has no current line, so the
         toggle would do nothing there."""
         if self._mode is Mode.SYNCING:
-            return self._has_hangul_plain
+            return self._has_hangul_sync
         return self._has_hangul_synced
 
     # -- tap-to-sync -------------------------------------------------------
@@ -205,32 +217,73 @@ class LyricsViewModel:
         """The sync pass in progress, or None."""
         return self._sync
 
+    def _stampable_lines(self) -> list[str]:
+        """The lines a sync pass would stamp, from whichever lyrics are in
+        hand.
+
+        Plain text when there is any. Otherwise the synced lines, which is
+        what a re-sync works from: a completed pass stamps every non-blank
+        plain line, so the stored lines ARE the song's lines, already timed
+        once. Deriving them this way means a re-sync needs no plain lyrics
+        on disk or on the network — it still works after ``.lyrics_cache/``
+        is cleared, and offline.
+        """
+        if self._lyrics is None:
+            return []
+        if self._lyrics.plain:
+            return sync_targets(self._lyrics.plain)
+        if self._lyrics.synced:
+            return sync_targets_from_lines(text for _, text in self._lyrics.synced)
+        return []
+
+    def sync_menu_entry(self, has_user_sync: bool) -> Optional[str]:
+        """Label for the tap-to-sync context-menu entry, or None when no
+        pass can be started.
+
+        Plain lyrics can always be stamped. A song that already shows as
+        synced is only re-offered when the sync on screen is the user's own
+        — LRCLIB's timings are not theirs to overwrite.
+        """
+        if not self._stampable_lines():
+            return None
+        if self._mode is Mode.PLAIN:
+            return "Re-sync this song" if has_user_sync else "Sync this song"
+        if self._mode is Mode.SYNCED and has_user_sync:
+            return "Re-sync this song"
+        return None
+
     def begin_sync(self) -> bool:
-        """Start a tap-to-sync pass over the current plain lyrics. Only
-        possible from PLAIN mode with lines to stamp; returns False (and
-        changes nothing) otherwise."""
-        if self._mode is not Mode.PLAIN or self._lyrics is None:
+        """Start a tap-to-sync pass over the lines in hand. Possible from
+        PLAIN (a first sync) and SYNCED (a re-sync); returns False (and
+        changes nothing) when there is nothing to stamp."""
+        if self._mode not in (Mode.PLAIN, Mode.SYNCED):
             return False
-        targets = sync_targets(self._lyrics.plain or "")
+        targets = self._stampable_lines()
         if not targets:
             return False
         self._sync = SyncSession(targets)
+        # Where cancelling lands: a re-sync that is abandoned must put the
+        # existing sync back, not drop the song to plain lyrics.
+        self._sync_return_mode = self._mode
+        self._has_hangul_sync = any(contains_hangul(line) for line in targets)
         self._mode = Mode.SYNCING
         return True
 
     def end_sync(self) -> bool:
         """Leave sync mode, discarding the session, and fall back to the
-        plain lyrics it started from. Returns True when a pass was actually
-        in progress."""
+        lyrics it started from. Returns True when a pass was actually in
+        progress."""
         if self._sync is None:
             return False
         self._sync = None
+        restored = self._sync_return_mode or Mode.PLAIN
+        self._sync_return_mode = None
         if self._mode is Mode.SYNCING:
-            self._mode = Mode.PLAIN
+            self._mode = restored
         if self._suspended_mode is Mode.SYNCING:
             # Cancelled while the player was stopped: resuming must restore
-            # the plain lyrics, not a session that no longer exists.
-            self._suspended_mode = Mode.PLAIN
+            # the lyrics, not a session that no longer exists.
+            self._suspended_mode = restored
         return True
 
     def begin_reload(self, track_id: str) -> bool:
@@ -261,8 +314,9 @@ class LyricsViewModel:
         self._index = -1
         self._suspended_mode = None
         self._has_hangul_synced = False
-        self._has_hangul_plain = False
+        self._has_hangul_sync = False
         self._sync = None
+        self._sync_return_mode = None
 
     def display(self) -> Display:
         mode = self._mode
@@ -295,6 +349,10 @@ class LyricsViewModel:
             return Display(
                 mode=mode,
                 header=self._header,
+                # The line just stamped stays up: the singer is still
+                # partway through it, and watching it run out is the cue
+                # for the next tap.
+                previous=session.previous,
                 current=current,
                 # The next two lines, so the tapper can see what is coming
                 # rather than reading the current line for the first time

@@ -431,6 +431,7 @@ def test_sync_display_shows_current_next_two_and_progress():
     vm.begin_sync()
     display = vm.display()
     assert display.header == "Song — Artist"
+    assert display.previous == ""  # nothing stamped yet
     assert display.current == "one"
     assert display.upcoming == "two\nthree"
     assert display.progress == "0 / 4 lines"
@@ -440,6 +441,45 @@ def test_sync_display_shows_current_next_two_and_progress():
     assert display.current == "two"
     assert display.upcoming == "three\nfour"
     assert display.progress == "1 / 4 lines"
+
+
+def test_sync_keeps_the_just_stamped_line_above_the_target():
+    """The stamped line is still being sung, and watching it run out is the
+    cue for the next tap."""
+    vm = plain_vm()
+    vm.begin_sync()
+    vm.sync_session.stamp(1.0)
+    assert vm.display().previous == "one"
+    vm.sync_session.stamp(2.0)
+    display = vm.display()
+    assert display.previous == "two"
+    assert display.current == "three"
+
+
+def test_undo_restores_the_line_above_as_well():
+    vm = plain_vm()
+    vm.begin_sync()
+    for position in (1.0, 2.0, 3.0):
+        vm.sync_session.stamp(position)
+    assert (vm.display().previous, vm.display().current) == ("three", "four")
+
+    vm.sync_session.undo()
+    assert (vm.display().previous, vm.display().current) == ("two", "three")
+    vm.sync_session.undo()
+    assert (vm.display().previous, vm.display().current) == ("one", "two")
+    vm.sync_session.undo()
+    display = vm.display()
+    assert (display.previous, display.current) == ("", "one")
+    assert display.progress == "0 / 4 lines"
+
+
+def test_the_line_above_is_the_stamped_one_not_a_lyrics_neighbour():
+    """Blank lines are skipped as tap targets, so the line above the target
+    is the previous TARGET, not the previous line of the lyrics file."""
+    vm = plain_vm()  # "one\n\ntwo\nthree\nfour": a blank sits between 1 and 2
+    vm.begin_sync()
+    vm.sync_session.stamp(1.0)
+    assert vm.display().previous == "one"
 
 
 def test_sync_display_near_the_end_runs_out_of_upcoming_lines():
@@ -453,14 +493,15 @@ def test_sync_display_near_the_end_runs_out_of_upcoming_lines():
     assert display.progress == "3 / 4 lines"
 
 
-def test_sync_refused_outside_plain_mode():
+def test_sync_refused_without_lyrics_in_hand():
     vm = LyricsViewModel()
     assert vm.begin_sync() is False  # idle
     vm.track_changed(snapshot())
     assert vm.begin_sync() is False  # fetching
-    vm.fetch_completed("trackA", SYNCED)
-    assert vm.begin_sync() is False  # already synced
-    assert vm.display().mode is Mode.SYNCED
+    assert vm.display().mode is Mode.FETCHING
+    vm.fetch_completed("trackA", None)
+    assert vm.begin_sync() is False  # no lyrics found
+    assert vm.display().mode is Mode.NO_LYRICS
 
 
 def test_sync_refused_when_there_is_nothing_to_stamp():
@@ -510,6 +551,31 @@ def test_cancelling_while_stopped_restores_plain_not_the_session():
     assert vm.display().mode is Mode.PLAIN
 
 
+def test_a_fetch_landing_during_a_pass_does_not_tear_it_down():
+    """A pass is modal and user-driven. A retry or a re-announcement's fetch
+    completing underneath it must not throw away the taps so far."""
+    vm = plain_vm()
+    vm.begin_sync()
+    vm.sync_session.stamp(1.0)
+    assert vm.fetch_completed("trackA", SYNCED) is False  # nothing to redraw
+    assert vm.display().mode is Mode.SYNCING
+    assert vm.sync_session.index == 1
+    assert vm.display().current == "two"
+
+    # The result is not discarded either: it becomes where cancelling lands.
+    vm.end_sync()
+    assert vm.display().mode is Mode.SYNCED
+
+
+def test_a_failed_fetch_during_a_pass_is_held_back_the_same_way():
+    vm = plain_vm()
+    vm.begin_sync()
+    assert vm.fetch_completed("trackA", None, ok=False, now=1.0) is False
+    assert vm.display().mode is Mode.SYNCING
+    vm.end_sync()
+    assert vm.display().mode is Mode.ERROR
+
+
 def test_reload_after_saving_a_sync_refetches_the_same_track():
     vm = plain_vm()
     vm.begin_sync()
@@ -545,3 +611,134 @@ def test_no_romanisation_offered_syncing_non_korean_lyrics():
     vm = plain_vm()
     vm.begin_sync()
     assert vm.has_korean_lyrics is False
+
+
+# -- re-syncing -----------------------------------------------------------
+
+USER_SYNC = TrackLyrics(synced=[(1.0, "alpha"), (4.0, "beta"), (9.0, "gamma")])
+
+
+def synced_vm(lyrics=USER_SYNC):
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", lyrics)
+    return vm
+
+
+def test_menu_offers_a_first_sync_for_plain_lyrics():
+    vm = plain_vm()
+    assert vm.sync_menu_entry(has_user_sync=False) == "Sync this song"
+
+
+def test_menu_offers_a_resync_wherever_the_users_own_sync_is_showing():
+    assert synced_vm().sync_menu_entry(has_user_sync=True) == "Re-sync this song"
+    # Plain lyrics with a sync already on disk (a hand-edit broke it, say).
+    assert plain_vm().sync_menu_entry(has_user_sync=True) == "Re-sync this song"
+
+
+def test_menu_never_offers_overwriting_lyrics_that_are_not_the_users():
+    """A song synced by LRCLIB has no user sync to redo."""
+    assert synced_vm().sync_menu_entry(has_user_sync=False) is None
+
+
+def test_menu_entry_absent_where_there_is_nothing_to_stamp():
+    vm = LyricsViewModel()
+    assert vm.sync_menu_entry(has_user_sync=True) is None  # idle
+    vm.track_changed(snapshot())
+    assert vm.sync_menu_entry(has_user_sync=True) is None  # fetching
+    vm.fetch_completed("trackA", None)
+    assert vm.sync_menu_entry(has_user_sync=True) is None  # no lyrics
+    assert vm.sync_menu_entry(has_user_sync=False) is None
+
+    blank = plain_vm(TrackLyrics(plain="  \n\n"))
+    assert blank.sync_menu_entry(has_user_sync=True) is None
+
+
+def test_menu_entry_absent_during_a_pass_already_running():
+    vm = plain_vm()
+    vm.begin_sync()
+    assert vm.sync_menu_entry(has_user_sync=False) is None
+
+
+def test_resync_stamps_the_lines_of_the_existing_sync():
+    """A completed pass stamps every non-blank plain line, so the stored
+    lines are the song's lines — a re-sync needs no plain lyrics on disk or
+    on the network."""
+    vm = synced_vm()
+    assert vm.begin_sync() is True
+    session = vm.sync_session
+    assert session.lines == ["alpha", "beta", "gamma"]
+    assert session.stamps == []  # a fresh pass, from line one
+    display = vm.display()
+    assert display.mode is Mode.SYNCING
+    assert display.current == "alpha"
+    assert display.progress == "0 / 3 lines"
+
+
+def test_resync_skips_instrumental_gaps_in_the_stored_lines():
+    """LRCLIB-style empty lines mark instrumental gaps and are not taps."""
+    vm = synced_vm(TrackLyrics(synced=[(1.0, "alpha"), (4.0, ""), (9.0, "gamma")]))
+    vm.begin_sync()
+    assert vm.sync_session.lines == ["alpha", "gamma"]
+
+
+def test_a_track_with_both_forms_syncs_from_the_plain_text():
+    """LRCLIB usually returns plain alongside synced; that is the fuller
+    source, so prefer it."""
+    both = TrackLyrics(synced=[(1.0, "alpha")], plain="alpha\nbeta\ngamma")
+    vm = synced_vm(both)
+    vm.begin_sync()
+    assert vm.sync_session.lines == ["alpha", "beta", "gamma"]
+
+
+def test_abandoning_a_resync_puts_the_existing_sync_back():
+    vm = synced_vm()
+    vm.position_changed(5.0)
+    vm.begin_sync()
+    vm.sync_session.stamp(2.0)
+    assert vm.end_sync() is True
+    assert vm.display().mode is Mode.SYNCED
+    assert vm.timeline()[0] == USER_SYNC.synced  # untouched
+
+
+def test_abandoning_a_resync_while_stopped_restores_synced_not_plain():
+    vm = synced_vm()
+    vm.begin_sync()
+    vm.end_sync()
+    vm.player_state_changed(PlaybackState.STOPPED)
+    assert vm.display().mode is Mode.IDLE
+    vm.player_state_changed(PlaybackState.PLAYING)
+    assert vm.display().mode is Mode.SYNCED
+
+
+def test_a_new_track_discards_a_resync_too():
+    vm = synced_vm()
+    vm.begin_sync()
+    vm.track_changed(snapshot(track_id="trackB", title="Next"))
+    assert vm.sync_session is None
+    assert vm.display().mode is Mode.FETCHING
+
+
+def test_reload_after_a_resync_shows_the_new_timings():
+    vm = synced_vm()
+    vm.begin_sync()
+    for position in (2.0, 6.0, 11.0):
+        vm.sync_session.stamp(position)
+    assert vm.sync_session.is_complete is True
+    lrc = vm.sync_session.to_lrc()
+    vm.end_sync()
+    assert vm.begin_reload("trackA") is True
+
+    from lyrisync.lyrics_provider import parse_lrc
+
+    vm.fetch_completed("trackA", TrackLyrics(synced=parse_lrc(lrc)))
+    assert vm.display().mode is Mode.SYNCED
+    assert vm.timeline()[0] != USER_SYNC.synced  # the redone timings
+
+
+def test_romanisation_offered_when_resyncing_korean_stored_lines():
+    vm = synced_vm(TrackLyrics(synced=[(1.0, "안녕하세요"), (5.0, "잘 가")]))
+    vm.romanisation_enabled = True
+    vm.begin_sync()
+    assert vm.has_korean_lyrics is True
+    assert vm.display().pronunciation == "annyeonghaseyo"
