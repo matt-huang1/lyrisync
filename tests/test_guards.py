@@ -1,0 +1,151 @@
+"""The guards in conftest.py, exercised.
+
+A guard nobody runs is worth nothing — one of the four escapes this suite
+has had was a tray test that silently never ran. So each door gets a test
+that walks into it: through the app's own functions where possible, so
+what is proven is that the real call path is blocked, not that a patch is
+installed somewhere.
+
+These are the only tests allowed to cause an escape on purpose, and they
+drain the record afterwards so the autouse check does not fail them.
+"""
+
+import socket
+import threading
+
+import pytest
+
+from lyrisync import lyrics_provider as lp
+from lyrisync import player_monitor as pm
+from lyrisync import speech
+
+
+def test_the_lyrics_fetch_cannot_reach_lrclib(escapes):
+    """The real escape, at the real call site: this is the function that
+    was mid-ssl-handshake when CI aborted."""
+    with pytest.raises(RuntimeError, match="test escape"):
+        lp._fetch_json(lp.LRCLIB_GET_URL + "?track_name=x")
+    assert any("lrclib.net" in e or "outbound network" in e for e in escapes.drain())
+
+
+def test_a_raw_socket_cannot_leave_the_machine(escapes):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with pytest.raises(RuntimeError, match="test escape"):
+        sock.connect(("lrclib.net", 443))
+    sock.close()
+    assert escapes.drain()
+
+
+def test_create_connection_is_guarded_too(escapes):
+    """urllib takes this path rather than socket.connect on some versions;
+    both doors or neither."""
+    with pytest.raises(RuntimeError, match="test escape"):
+        socket.create_connection(("lrclib.net", 443), timeout=1)
+    assert escapes.drain()
+
+
+def test_loopback_still_works(escapes):
+    """The guard must not be a blanket ban: Qt and pytest talk to
+    themselves over local sockets, and a suite that cannot do that would
+    be fixed by weakening the guard."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    accepted = threading.Thread(target=server.accept, daemon=True)
+    accepted.start()
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(server.getsockname())
+    client.close()
+    accepted.join(timeout=2)
+    server.close()
+
+    assert escapes.drain() == []
+
+
+def test_spotify_cannot_be_commanded(escapes):
+    """osascript is how every player command reaches Spotify — a seek, a
+    pause, a resume. Unstubbed, a test restarts the developer's music."""
+    with pytest.raises(RuntimeError, match="test escape"):
+        pm.set_position(0.0)
+    assert escapes.drain()
+
+
+def test_the_speakers_cannot_be_reached(escapes):
+    with pytest.raises(RuntimeError, match="test escape"):
+        speech.speak_korean("안녕하세요")
+    assert escapes.drain()
+
+
+def test_the_voice_check_is_a_subprocess_too(escapes):
+    """detect_voice runs at window construction, so it escapes on every
+    single Qt test unless it is stubbed."""
+    with pytest.raises(RuntimeError, match="test escape"):
+        speech.detect_voice()
+    assert escapes.drain()
+
+
+def test_a_bare_provider_refuses_to_touch_the_real_directories(escapes):
+    """.user_syncs/ holds syncs the user tapped out by hand and nothing in
+    this project may write over them, least of all a test."""
+    with pytest.raises(RuntimeError, match="test escape"):
+        lp.LyricsProvider()
+    assert any(".user_syncs" in e for e in escapes.drain())
+
+
+def test_a_provider_given_only_one_directory_refuses_as_well(escapes, tmp_path):
+    with pytest.raises(RuntimeError, match="test escape"):
+        lp.LyricsProvider(cache_dir=tmp_path / "cache")
+    assert escapes.drain()
+
+
+def test_an_injected_provider_is_fine(escapes, tmp_path):
+    provider = lp.LyricsProvider(
+        cache_dir=tmp_path / "cache", user_sync_dir=tmp_path / "syncs"
+    )
+    assert provider.cache_dir == tmp_path / "cache"
+    assert escapes.drain() == []
+
+
+def test_the_real_preferences_file_cannot_be_opened(escapes):
+    """The first escape this project had: QSettings("lyrisync", "lyrisync")
+    is the user's own window position, opacity and toggles."""
+    w = pytest.importorskip(
+        "lyrisync.window",
+        reason="PySide6 unusable (missing system Qt libraries?)",
+        exc_type=ImportError,
+    )
+    with pytest.raises(RuntimeError, match="test escape"):
+        w.QSettings("lyrisync", "lyrisync")
+    assert escapes.drain()
+
+
+def test_a_settings_file_of_its_own_is_fine(escapes, tmp_path):
+    w = pytest.importorskip(
+        "lyrisync.window",
+        reason="PySide6 unusable (missing system Qt libraries?)",
+        exc_type=ImportError,
+    )
+    settings = w.QSettings(str(tmp_path / "own.ini"), w.QSettings.Format.IniFormat)
+    settings.setValue("window/opacity", 1.0)
+    settings.sync()
+    assert (tmp_path / "own.ini").exists()
+    assert escapes.drain() == []
+
+
+def test_an_escape_off_the_main_thread_is_still_recorded(escapes):
+    """The property the whole design rests on. Worker threads catch broad
+    exceptions on purpose — a failed fetch is a retry state, not a crash —
+    so a guard that only raised would be swallowed exactly where these
+    escapes happen."""
+
+    def swallow():
+        try:
+            socket.create_connection(("lrclib.net", 443), timeout=1)
+        except Exception:
+            pass  # precisely what FetchTask does
+
+    worker = threading.Thread(target=swallow)
+    worker.start()
+    worker.join(timeout=5)
+    assert escapes.drain(), "an escape on a worker thread went unrecorded"

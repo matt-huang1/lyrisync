@@ -14,7 +14,10 @@ case where that has gone wrong, so a broken runner degrades to a visible
 skip instead of a collection error.
 """
 
+import logging
 import os
+import threading
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -30,7 +33,7 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
-from PySide6.QtCore import QSettings, QTimer  # noqa: E402
+from PySide6.QtCore import QRunnable, QSettings, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 
 try:
@@ -51,14 +54,25 @@ KOREAN_SYNCED = TrackLyrics(synced=[(1.0, "안녕하세요"), (5.0, "잘 가")])
 
 
 @pytest.fixture(autouse=True)
-def no_spotify(monkeypatch):
-    """Nothing here may reach the real Spotify.
+def no_real_world(monkeypatch):
+    """Nothing here may reach Spotify, the speakers, or the network.
 
     The polling thread runs and joins like the real one so shutdown is
     exercised for real, but never shells out. The player commands matter
     just as much: entering a sync pass dispatches a seek-to-0 and a resume,
     and on a developer's Mac osascript would happily restart whatever they
     were listening to — or launch Spotify to do it.
+
+    Every worker the window can start is stubbed here, FetchTask included:
+    a track change fires a fetch, and left alone it goes to LRCLIB for
+    real. That is what aborted CI — a request still in its ssl handshake
+    when the test tore the window down. Tests that want lyrics call
+    ``load()``, which hands them over as if the fetch had returned.
+
+    detect_voice is stubbed for a second reason on top of the `say`
+    subprocess: unstubbed it answers True on a Mac and False on the Linux
+    runner, so the speech paths would be covered locally and skipped in CI
+    while both were green.
     """
 
     def fake_run(self):
@@ -67,8 +81,9 @@ def no_spotify(monkeypatch):
             self.msleep(5)
 
     monkeypatch.setattr(w.MonitorThread, "run", fake_run)
-    for task in (w.PlayerCommandTask, w.SeekTask, w.SpeakTask):
+    for task in (w.PlayerCommandTask, w.SeekTask, w.SpeakTask, w.FetchTask):
         monkeypatch.setattr(task, "run", lambda self: None)
+    monkeypatch.setattr(w, "detect_voice", lambda: True)
 
 
 @pytest.fixture
@@ -94,11 +109,27 @@ def make_window(tmp_path):
         return window
 
     yield factory
+    unjoined = []
     for window in windows:
         window._shutdown()
+        # Destroying a QWidget whose QThread is still running is a qFatal:
+        # the process aborts with "QThread: Destroyed while thread is still
+        # running", taking the whole run with it and naming whichever test
+        # happened to be on screen — which is how a shutdown bug came to
+        # look like a bug in the quit test. So the thread is forced down
+        # before anything is destroyed, and the test fails afterwards with
+        # a sentence instead of a signal.
+        if window._monitor_thread.isRunning():
+            unjoined.append(window)
+            window._monitor_thread.terminate()
+            window._monitor_thread.wait(1000)
         window.hide()
         window.deleteLater()
     APP.processEvents()
+    assert not unjoined, (
+        f"{len(unjoined)} monitor thread(s) outlived _shutdown — destroying "
+        "those windows would have aborted the process"
+    )
 
 
 def test_the_window_writes_only_where_it_is_told(make_window, tmp_path):
@@ -384,14 +415,102 @@ def test_quit_from_the_menu_bar_runs_the_clean_shutdown(make_window):
     assert window._monitor_thread.isRunning() is True
 
     timed_out = []
+    # The rescue timer is owned and stopped rather than fired-and-forgotten:
+    # a singleShot that outlives this test is still armed when a later one
+    # calls exec(), and quits somebody else's event loop.
+    rescue = QTimer()
+    rescue.setSingleShot(True)
+    rescue.timeout.connect(lambda: (timed_out.append(True), APP.quit()))
+    rescue.start(5000)
     QTimer.singleShot(0, window._menu_actions[m.QUIT].trigger)
-    QTimer.singleShot(5000, lambda: (timed_out.append(True), APP.quit()))
     APP.exec()
+    rescue.stop()
 
     assert not timed_out, "quit did not come from the menu bar action"
     assert window._monitor_thread.isRunning() is False  # joined
+    assert window._pool.activeThreadCount() == 0  # and drained
     window._settings.sync()
     assert make_window()._lyrics_visible is False  # settings saved on the way out
+
+
+def test_shutdown_waits_for_a_worker_still_running(make_window):
+    """The other half of a clean quit.
+
+    A fetch blocked in a socket, or `say` reading a line out, outlives
+    exec() by as long as it takes — and used to be left to report into a
+    window that teardown was already destroying. Shutdown now waits for
+    it, so by the time anything is torn down there is nobody left holding
+    a reference to it.
+    """
+    window = make_window()
+    finished = threading.Event()
+
+    class SlowWorker(QRunnable):
+        def run(self):
+            time.sleep(0.2)
+            finished.set()
+
+    window._pool.start(SlowWorker())
+    assert not finished.is_set()  # genuinely still running
+
+    window._shutdown()
+
+    assert finished.is_set(), "shutdown returned with a worker still going"
+    assert window._pool.activeThreadCount() == 0
+
+
+def test_shutdown_drops_work_that_never_started(make_window):
+    """Queued-but-unstarted tasks are cleared rather than waited for: a
+    fetch that has not begun has nothing to finish, and quitting should
+    not first work through a backlog."""
+    window = make_window()
+    started = []
+    release = threading.Event()
+
+    class Blocker(QRunnable):
+        def run(self):
+            started.append(True)
+            release.wait(timeout=5)
+
+    class NeverRuns(QRunnable):
+        def run(self):
+            started.append("queued task ran")
+
+    for _ in range(window._pool.maxThreadCount()):
+        window._pool.start(Blocker())
+    window._pool.start(NeverRuns())  # no thread free: queued, not started
+
+    # Freed only once shutdown is already under way, so the queued task is
+    # cleared before any thread could pick it up.
+    threading.Timer(0.15, release.set).start()
+    window._shutdown()
+
+    assert "queued task ran" not in started
+    assert started.count(True) == window._pool.maxThreadCount()  # those ran
+
+
+def test_shutdown_survives_a_worker_that_will_not_come_back(make_window, caplog):
+    """The wait is bounded. `say` can hold a line for a minute and quit
+    cannot hang on it, so an undrainable worker is logged and left to the
+    pool's own destructor rather than blocking the exit forever."""
+    release = threading.Event()
+
+    class Stuck(QRunnable):
+        def run(self):
+            release.wait(timeout=30)
+
+    window = make_window()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(w, "_SHUTDOWN_WAIT_MS", 50)
+    window._pool.start(Stuck())
+    try:
+        with caplog.at_level(logging.WARNING, logger="lyrisync.window"):
+            window._shutdown()
+        assert "worker still running at shutdown" in caplog.text
+    finally:
+        monkeypatch.undo()
+        release.set()
+        window._pool.waitForDone(5000)
 
 
 # -- activation policy ----------------------------------------------------

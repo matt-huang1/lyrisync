@@ -159,6 +159,11 @@ _FADE_OUT_LEAD_MS = 200
 _SWAP_LEAD_MS = 100
 _FADE_MS = 100
 
+# How long shutdown waits for the monitor thread and then for the worker
+# pool. Long enough for a poll to finish its osascript (2s timeout) or a
+# fetch to notice it is done, short enough that quit still feels like quit.
+_SHUTDOWN_WAIT_MS = 3000
+
 _TITLE_CARD_SECONDS = 2.0
 # How long the sync exit control stays armed awaiting its second click,
 # and what the progress row says meanwhile.
@@ -1695,10 +1700,34 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/visible", self._lyrics_visible)
 
     def _shutdown(self) -> None:
+        """Leave nothing of ours running, before anything of ours is
+        destroyed.
+
+        The monitor is a QThread the window owns, and a QThread destroyed
+        while it is still running is a qFatal — the process aborts with
+        "QThread: Destroyed while thread is still running" rather than
+        exiting. The pool workers are the same hazard one step removed:
+        each holds a signals object and a provider, and a fetch blocked in
+        a socket outlives ``exec()`` by as long as its timeout, so without
+        this the app tore its window down and then let a worker report
+        into the wreckage.
+
+        Both waits are bounded. A worker that will not come back in time
+        (``say`` can hold a line for a minute) is logged and left to the
+        thread pool's own destructor, which is where it was always going
+        to be dealt with; blocking quit on it would be worse.
+        """
         self._save_settings()
         self._monitor_thread.stop()
         # Poll may be mid-osascript (up to its 2s timeout).
-        self._monitor_thread.wait(3000)
+        if not self._monitor_thread.wait(_SHUTDOWN_WAIT_MS):
+            logger.warning("monitor thread did not stop in time")
+        # Queued work that has not started yet is simply dropped: a fetch
+        # or a save that has not begun has nothing to finish.
+        self._pool.clear()
+        if not self._pool.waitForDone(_SHUTDOWN_WAIT_MS):
+            logger.warning("worker still running at shutdown (%d active)",
+                           self._pool.activeThreadCount())
 
 
 def apply_accessory_policy() -> None:
