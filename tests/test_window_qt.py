@@ -33,7 +33,7 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
-from PySide6.QtCore import QRunnable, QSettings, QTimer  # noqa: E402
+from PySide6.QtCore import Qt, QRunnable, QSettings, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 
 try:
@@ -41,9 +41,11 @@ try:
 except Exception as exc:  # pragma: no cover - platform plugin missing
     pytest.skip(f"Qt cannot start: {exc}", allow_module_level=True)
 
+from lyrisync import appearance as ap  # noqa: E402
 from lyrisync import hotkey  # noqa: E402
 from lyrisync import login_item  # noqa: E402
 from lyrisync import menu as m  # noqa: E402
+from lyrisync import vibrancy  # noqa: E402
 from lyrisync import window as w  # noqa: E402
 from lyrisync.lyrics_provider import LyricsProvider, TrackLyrics  # noqa: E402
 from lyrisync.player_monitor import PlaybackState, PlayerSnapshot  # noqa: E402
@@ -421,6 +423,188 @@ def test_visibility_survives_the_shutdown_save(make_window):
     assert make_window()._lyrics_visible is False
 
 
+# -- following the system appearance --------------------------------------
+
+
+def set_scheme(scheme):
+    """Publish an appearance change the way the platform does.
+
+    The offscreen plugin will not change its own colour scheme —
+    setColorScheme is ignored and it reports Unknown forever — so the
+    signal is emitted directly. That still exercises the real connection
+    the window makes in __init__ rather than calling its slot by hand,
+    which is the half of this that could silently not be wired.
+    """
+    APP.styleHints().colorSchemeChanged.emit(scheme)
+    APP.processEvents()
+
+
+def test_the_window_starts_on_the_system_appearance(make_window):
+    """Offscreen reports Unknown, which resolves to dark — so the suite
+    runs against the palette the app has always had."""
+    window = make_window()
+    assert window._appearance is ap.Appearance.DARK
+    assert window._palette is ap.DARK
+
+
+def test_a_system_change_repaints_the_window(make_window):
+    window = make_window()
+    load(window, SYNCED)
+
+    set_scheme(Qt.ColorScheme.Light)
+    assert window._appearance is ap.Appearance.LIGHT
+    assert window._palette is ap.LIGHT
+    assert ap.rgba(ap.LIGHT.current) in window.styleSheet()
+
+    set_scheme(Qt.ColorScheme.Dark)
+    assert window._palette is ap.DARK
+    assert ap.rgba(ap.DARK.current) in window.styleSheet()
+
+
+def test_the_scrim_follows_the_palette(make_window, monkeypatch):
+    """The background is painted, not styled, so it needs its own path out
+    of the palette — and it is the one thing a stylesheet swap would
+    silently leave behind."""
+    window = make_window()
+    # No material on the offscreen platform, so paintEvent reaches for the
+    # solid background — the same code path, one field along.
+    assert window._material is None
+    painted = []
+    real_qcolor = w._qcolor
+    monkeypatch.setattr(
+        w, "_qcolor", lambda colour: (painted.append(colour), real_qcolor(colour))[1]
+    )
+
+    window.grab()  # a real paintEvent, into a pixmap
+    assert painted[-1] == ap.DARK.solid
+
+    set_scheme(Qt.ColorScheme.Light)
+    painted.clear()
+    window.grab()
+    assert painted[-1] == ap.LIGHT.solid
+
+
+def test_a_redundant_change_restyles_nothing(make_window, monkeypatch):
+    """The signal fires for changes this window does not care about — an
+    Unknown, or a re-announcement of what is already on screen. Rebuilding
+    the stylesheet for those would repolish every widget for nothing."""
+    window = make_window()
+    # Spied on the instance, not the module: the signal reaches every
+    # window alive in the process, and windows from earlier tests outlive
+    # their deleteLater() until an event loop runs. Counting module-level
+    # calls would be counting theirs.
+    repaints = []
+    real_apply = window._apply_appearance
+    monkeypatch.setattr(
+        window, "_apply_appearance", lambda: (repaints.append(1), real_apply())[1]
+    )
+
+    set_scheme(Qt.ColorScheme.Dark)      # already dark
+    set_scheme(Qt.ColorScheme.Unknown)   # resolves to dark
+    assert repaints == []
+    assert window._palette is ap.DARK
+
+    set_scheme(Qt.ColorScheme.Light)
+    assert len(repaints) == 1
+
+
+def test_a_resize_after_a_switch_keeps_the_new_palette(make_window):
+    """_apply_scale rebuilds the stylesheet too. If it reached for a
+    constant instead of the current palette, the window would snap back to
+    dark the next time it was dragged wider."""
+    window = make_window()
+    set_scheme(Qt.ColorScheme.Light)
+
+    window.resize(600, 260)
+    APP.processEvents()
+    assert ap.rgba(ap.LIGHT.current) in window.styleSheet()
+    assert ap.rgba(ap.DARK.current) not in window.styleSheet()
+
+
+def test_everything_that_is_not_a_colour_survives_a_switch(make_window):
+    """The switch repaints; it must not disturb anything else. Geometry,
+    opacity, an engaged loop and a sync pass in progress all carry on."""
+    window = make_window()
+    load(window, PLAIN)
+    window._begin_sync()
+    window._on_position_update(snapshot())
+    window._on_tap()
+
+    window.resize(520, 240)
+    window._set_opacity(0.6)
+    APP.processEvents()
+    geometry, opacity = window.geometry(), window._opacity
+    scale, stamped = window._scale, window._view_model.sync_session.index
+
+    set_scheme(Qt.ColorScheme.Light)
+
+    assert window.geometry() == geometry
+    assert window._opacity == opacity
+    assert window._scale == scale
+    assert window._view_model.sync_session.index == stamped
+    assert window._view_model.display().mode is Mode.SYNCING
+    assert window._monitor_thread.isRunning() is True
+    # isVisibleTo, not isVisible: this window was never shown, so every
+    # child reports hidden regardless. What matters is that the switch did
+    # not take the tap row out of the layout.
+    assert window._tap_button.isVisibleTo(window) is True
+
+
+def test_the_armed_discard_prompt_is_coloured_per_mode(make_window):
+    """It carries its colour inline rather than by object name, so it is
+    the one piece of text a stylesheet swap cannot reach."""
+    window = make_window()
+    load(window, PLAIN)
+    window._begin_sync()
+    window._on_sync_exit()  # arms it
+    assert ap.rgba(ap.DARK.confirm_text) in window._progress.text()
+
+    set_scheme(Qt.ColorScheme.Light)
+    assert ap.rgba(ap.LIGHT.confirm_text) in window._progress.text()
+
+
+def test_the_speak_icon_is_redrawn_for_the_new_mode(make_window, monkeypatch):
+    """An SF Symbol is a template image tinted by us, so a white glyph
+    stays white on a pale panel unless it is rendered again."""
+    window = make_window()
+    tints = []
+    monkeypatch.setattr(
+        w, "symbol_icon", lambda name, size, normal, **kw: tints.append(normal) or None
+    )
+
+    set_scheme(Qt.ColorScheme.Light)
+    assert tints, "the icon was never re-rendered"
+    assert tints[-1].alpha() == ap.LIGHT.control_idle[3]
+    assert tints[-1].blue() == ap.LIGHT.control_idle[2]
+
+
+def test_the_material_appearance_is_asked_for_the_same_mode(make_window):
+    """No material off cocoa, so this is the guard rather than the call —
+    but the guard is what keeps the suite headless."""
+    window = make_window()
+    assert window._material is None
+    window._apply_material_appearance()  # must be a no-op, not a crash
+
+
+def test_the_material_and_the_scrim_cannot_disagree():
+    """One answer drives both: whichever mode the palette came from is the
+    NSAppearance the material is told to adopt."""
+    assert vibrancy.appearance_name(True) == vibrancy.DARK_APPEARANCE
+    assert vibrancy.appearance_name(False) == vibrancy.LIGHT_APPEARANCE
+    assert "NSAppearanceName" in vibrancy.LIGHT_APPEARANCE
+
+
+def test_there_is_no_appearance_setting(make_window):
+    """Following the system is the whole feature. A toggle would be a
+    second source of truth for something macOS already answers."""
+    window = make_window()
+    assert not any("appearance" in key for key in window._menu_actions)
+    assert not any("theme" in key for key in window._menu_actions)
+    window._save_settings()
+    keys = window._settings.allKeys()
+    assert not any("appearance" in k or "theme" in k for k in keys)
+
+
 # -- the global hotkey ----------------------------------------------------
 
 
@@ -527,7 +711,7 @@ def test_a_refused_hotkey_leaves_the_app_fully_working(make_window, caplog):
 
 def test_the_menu_entry_never_advertises_the_combination(make_window):
     """Two mechanisms firing one action is the drift this app designs
-    away, and a label printing ⇧⌘L while another app holds it would be a
+    away, and a label printing ⇧⌘J while another app holds it would be a
     menu claiming something untrue. Qt's shortcut is deliberately unset."""
     window = make_window()
     show = window._menu_actions[m.SHOW_LYRICS]

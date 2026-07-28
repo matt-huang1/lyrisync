@@ -21,7 +21,7 @@ UPP.
 
 ``_carbon()`` is the single door. Everything native goes through it, so
 tests have one seam to block — a stray registration in the suite would
-take ⌘⇧L away from whoever was running it. The pure half — what the
+take ⇧⌘J away from whoever was running it. The pure half — what the
 combination is and how it reads — is a plain dataclass and a string, and
 is tested everywhere.
 
@@ -51,12 +51,15 @@ SHIFT = 1 << 9
 COMMAND = 1 << 8
 
 # Virtual key codes (Events.h). A position on the keyboard, not a
-# character: kVK_ANSI_L is where L sits on a US layout, and the same
+# character: kVK_ANSI_J is where J sits on a US layout, and the same
 # physical key on any other — which is what a hotkey should follow.
-KEY_L = 0x25
+# Verified against the live layout rather than read off a header:
+# CGEventKeyboardGetUnicodeString on a keyboard event built from 0x26
+# answers "j" (and 0x25, the L this used to be, answers "l").
+KEY_J = 0x26
 
 # Apple's order for writing a combination down, outermost modifier first.
-# ⌘⇧L and ⇧⌘L are the same keys; only one of them is how macOS spells it.
+# ⌘⇧J and ⇧⌘J are the same keys; only one of them is how macOS spells it.
 _MODIFIER_SYMBOLS = (
     (CONTROL, "⌃"),
     (OPTION, "⌥"),
@@ -77,12 +80,15 @@ class Combination:
 # The one constant. Not configurable in v1: a binding the user can change
 # needs somewhere to change it, a way to describe a conflict, and a
 # fallback when the new one is refused — all of which is a feature, not a
-# setting. ⌘⇧L is unclaimed by macOS itself and reads as "lyrics".
-TOGGLE_LYRICS = Combination(key_code=KEY_L, modifiers=COMMAND | SHIFT, key_label="L")
+# setting. ⇧⌘J is unclaimed by macOS itself; it was ⇧⌘L until that turned
+# out to collide with something the user already runs, which is the whole
+# argument for keeping the combination in exactly one place — moving it
+# was this constant, its label, and nothing else.
+TOGGLE_LYRICS = Combination(key_code=KEY_J, modifiers=COMMAND | SHIFT, key_label="J")
 
 
 def describe(combination: Combination) -> str:
-    """The combination as macOS writes it, e.g. ``⇧⌘L``. For logs and the
+    """The combination as macOS writes it, e.g. ``⇧⌘J``. For logs and the
     README; the menu deliberately does not show it (see window.py)."""
     return "".join(
         symbol for mask, symbol in _MODIFIER_SYMBOLS if combination.modifiers & mask
@@ -120,7 +126,7 @@ def _carbon():
     """The Carbon framework, ready to call, or None where unavailable.
 
     The single door: everything native goes through here, so the suite
-    has one seam to block and no test can quietly take ⌘⇧L away from the
+    has one seam to block and no test can quietly take ⇧⌘J away from the
     developer running it. Signatures are declared here rather than at the
     call site for the same reason — what comes back is either fully
     configured or None, and there is no half-usable middle.
@@ -189,7 +195,7 @@ class GlobalHotkey:
         as before, minus the shortcut.
 
         Registration is not exclusive across apps — measured, not assumed:
-        two LyriSync processes both claimed ⇧⌘L and both got noErr, and
+        two LyriSync processes both claimed ⇧⌘J and both got noErr, and
         macOS decided between them for each press. ``eventHotKeyExistsErr``
         comes back only when *this* process already holds the combination.
         So a refusal here is never "another app owns it"; it is the event

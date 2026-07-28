@@ -24,31 +24,31 @@ from lyrisync.hotkey import Combination, GlobalHotkey
 
 
 def test_the_default_is_command_shift_l():
-    assert hotkey.TOGGLE_LYRICS.key_code == hotkey.KEY_L
+    assert hotkey.TOGGLE_LYRICS.key_code == hotkey.KEY_J
     assert hotkey.TOGGLE_LYRICS.modifiers == hotkey.COMMAND | hotkey.SHIFT
-    assert hotkey.TOGGLE_LYRICS.key_label == "L"
+    assert hotkey.TOGGLE_LYRICS.key_label == "J"
 
 
 def test_there_is_exactly_one_combination_to_change():
     """Not configurable in v1, so the constant is the whole contract: the
     README quotes it and the window asks for it by name."""
     assert isinstance(hotkey.TOGGLE_LYRICS, Combination)
-    assert hotkey.describe(hotkey.TOGGLE_LYRICS) == "⇧⌘L"
+    assert hotkey.describe(hotkey.TOGGLE_LYRICS) == "⇧⌘J"
 
 
 def test_modifiers_read_in_apples_order():
-    """⌘⇧L and ⇧⌘L are the same keys and only one is how macOS spells it,
+    """⌘⇧J and ⇧⌘J are the same keys and only one is how macOS spells it,
     so the order is fixed rather than however the masks happen to sit."""
     every = Combination(
-        key_code=hotkey.KEY_L,
+        key_code=hotkey.KEY_J,
         modifiers=hotkey.COMMAND | hotkey.SHIFT | hotkey.OPTION | hotkey.CONTROL,
-        key_label="L",
+        key_label="J",
     )
-    assert hotkey.describe(every) == "⌃⌥⇧⌘L"
+    assert hotkey.describe(every) == "⌃⌥⇧⌘J"
 
 
 def test_an_unmodified_key_is_just_the_key():
-    assert hotkey.describe(Combination(hotkey.KEY_L, 0, "L")) == "L"
+    assert hotkey.describe(Combination(hotkey.KEY_J, 0, "J")) == "J"
 
 
 def test_the_carbon_constants_are_apples():
@@ -58,7 +58,7 @@ def test_the_carbon_constants_are_apples():
     assert hotkey.SHIFT == 0x0200
     assert hotkey.OPTION == 0x0800
     assert hotkey.CONTROL == 0x1000
-    assert hotkey.KEY_L == 37  # kVK_ANSI_L
+    assert hotkey.KEY_J == 38  # kVK_ANSI_J, verified against the live layout
 
 
 # -- registering it, through a stand-in for the one door ------------------
@@ -140,7 +140,7 @@ def test_registering_claims_exactly_the_combination_it_was_given(carbon):
     assert hk.register() is True
     assert hk.registered is True
     assert lib.registered == [
-        (hotkey.KEY_L, hotkey.COMMAND | hotkey.SHIFT, 0x4C595253)
+        (hotkey.KEY_J, hotkey.COMMAND | hotkey.SHIFT, 0x4C595253)
     ]
 
 
@@ -216,7 +216,7 @@ def test_a_refused_registration_leaves_nothing_installed(carbon, caplog):
     """The app has to stay entirely usable and leave nothing behind it.
 
     The message deliberately does not name a cause. Measured: two
-    processes can both claim ⇧⌘L and both get noErr, so a refusal here is
+    processes can both claim ⇧⌘J and both get noErr, so a refusal here is
     never "another app owns it" — eventHotKeyExistsErr comes back only
     when this process already holds the combination.
     """
@@ -227,7 +227,7 @@ def test_a_refused_registration_leaves_nothing_installed(carbon, caplog):
         assert hk.register() is False
     assert hk.registered is False
     assert lib.removed == [FakeCarbon.HANDLER_REF]  # handler not left behind
-    assert "could not claim ⇧⌘L" in caplog.text
+    assert "could not claim ⇧⌘J" in caplog.text
     assert "menu bar item" in caplog.text
     assert "another app" not in caplog.text  # a cause we cannot know
 

@@ -135,7 +135,7 @@ def _no_real_world():
 
     # -- the developer's own keyboard -------------------------------------
     # RegisterEventHotKey claims a combination system-wide for as long as
-    # the process lives, so a stray registration here takes ⇧⌘L away from
+    # the process lives, so a stray registration here takes ⇧⌘J away from
     # whoever is running the suite — every window construction would do
     # it, and nothing about it is scoped to a test. Every native call goes
     # through _carbon, so blocking it is enough.

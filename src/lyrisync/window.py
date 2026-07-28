@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from lyrisync import appearance
 from lyrisync.geometry import (
     RESIZE_MARGIN,
     button_margin,
@@ -125,10 +126,10 @@ from lyrisync.typography import (
 from lyrisync.vibrancy import (
     AUTORESIZE_FILL,
     BLENDING_MODE_BEHIND_WINDOW,
-    DARK_APPEARANCE,
     MATERIAL_HUD_WINDOW,
     STATE_ACTIVE,
     WINDOW_BELOW,
+    appearance_name,
 )
 from lyrisync.view_model import LyricsViewModel, Mode
 
@@ -150,31 +151,22 @@ _MAX_OPACITY = 1.0
 # gives up the frost to let the screen underneath show through.
 _DEFAULT_OPACITY = 1.0
 
-# The painted background. With the native material behind it this is a
-# scrim; without one it is the whole background. Either way it is sized so
-# the sung line clears 4.5:1 against a PURE WHITE document with no blur at
-# all — measured, not guessed — because legibility over someone else's
-# screen outranks how much of the material shows through. 150 is the
-# lowest alpha that clears it: modelled at 4.70:1 with the material
-# contributing nothing, and measured at 8.2:1 over a real white page with
-# the material rendering (tests/test_scrim.py pins the floor).
-_SCRIM_OVER_MATERIAL = QColor(14, 15, 20, 150)
-_PAINTED_BACKGROUND = QColor(18, 18, 24, 232)
-
-# Overlay control colours. One source for both ways a control can be
-# drawn: the stylesheet paints them as text, symbols.py tints the SF
-# Symbol with the same values, so the icon and the glyph it falls back to
-# can never describe different states.
-_CONTROL_IDLE = QColor(255, 255, 255, 105)
-_CONTROL_HOVER = QColor(255, 255, 255, 225)
-_CONTROL_ENGAGED = QColor(130, 200, 255, 235)
+# Every colour the window draws now lives in appearance.py, as two
+# palettes with the same shape — including the painted background, which
+# is a scrim over the vibrancy material and the whole background without
+# one. Both are sized so the sung line clears 4.5:1 with the material
+# contributing nothing, against whichever backdrop is worst for that mode
+# (a white page for dark, a black one for light). tests/test_scrim.py
+# pins both floors.
+#
+# One palette still serves both ways a control can be drawn: the
+# stylesheet paints it as text, symbols.py tints the SF Symbol from the
+# same values, so the icon and the glyph it falls back to can never
+# describe different states.
 
 
-def _rgba(colour: QColor) -> str:
-    return (
-        f"rgba({colour.red()}, {colour.green()}, "
-        f"{colour.blue()}, {colour.alpha()})"
-    )
+def _qcolor(colour: appearance.RGBA) -> QColor:
+    return QColor(*colour)
 
 
 # Anticipatory line fade: the old line fades out over [ts-200, ts-100],
@@ -190,20 +182,20 @@ _FADE_MS = 100
 _SHUTDOWN_WAIT_MS = 3000
 
 _TITLE_CARD_SECONDS = 2.0
-# How long the sync exit control stays armed awaiting its second click,
-# and what the progress row says meanwhile.
+# How long the sync exit control stays armed awaiting its second click.
+# What the progress row says meanwhile is coloured from the palette, so
+# the armed prompt reads in both modes (see _exit_confirm_text).
 _EXIT_CONFIRM_MS = 4000
-_EXIT_CONFIRM_TEXT = (
-    '<span style="color: rgba(255, 170, 170, 235)">'
-    "discard this sync? tap ✕ again</span>"
-)
+_EXIT_CONFIRM_TEXT = "discard this sync? tap ✕ again"
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
 
 MENUBAR_ICON = Path(__file__).parent / "assets" / "menubar.svg"
 
 
-def _style_for(scale: float, family_stack: str) -> str:
+def _style_for(
+    scale: float, family_stack: str, palette: appearance.Palette
+) -> str:
     header = style_for(HEADER, scale)
     context = style_for(CONTEXT, scale)
     current = style_for(CURRENT, scale)
@@ -211,32 +203,35 @@ def _style_for(scale: float, family_stack: str) -> str:
     plain = style_for(PLAIN, scale)
     progress = style_for(PROGRESS, scale)
     # Colour carries the hierarchy alongside weight: the sung line is the
-    # only near-white thing on screen, everything else recedes.
+    # only full-strength thing on screen, everything else recedes. Which
+    # direction "full strength" runs in — near-white or near-black — is
+    # the palette's business, not this function's.
+    rgba = appearance.rgba
     return f"""
 QWidget {{ font-family: {family_stack}; }}
 QLabel {{ background: transparent; }}
 QLabel#header {{
-    color: rgba(255, 255, 255, 130);
+    color: {rgba(palette.header)};
     font-size: {header.size_px}px; font-weight: {header.weight};
 }}
 QLabel#dim {{
-    color: rgba(255, 255, 255, 148);
+    color: {rgba(palette.context)};
     font-size: {context.size_px}px; font-weight: {context.weight};
 }}
 QLabel#current {{
-    color: rgba(255, 255, 255, 250);
+    color: {rgba(palette.current)};
     font-size: {current.size_px}px; font-weight: {current.weight};
 }}
 QLabel#pron {{
-    color: rgba(255, 255, 255, 170);
+    color: {rgba(palette.pronunciation)};
     font-size: {pron.size_px}px; font-weight: {pron.weight};
 }}
 QLabel#plain {{
-    color: rgba(255, 255, 255, 205);
+    color: {rgba(palette.plain)};
     font-size: {plain.size_px}px; font-weight: {plain.weight};
 }}
 QLabel#progress {{
-    color: rgba(130, 200, 255, 190);
+    color: {rgba(palette.progress)};
     font-size: {progress.size_px}px; font-weight: {progress.weight};
 }}
 QScrollArea#plainScroll, QScrollArea#plainScroll QWidget {{ background: transparent; border: none; }}
@@ -244,7 +239,7 @@ QScrollArea#plainScroll QScrollBar:vertical {{
     background: transparent; width: {max(3, round(4 * scale))}px; margin: 0;
 }}
 QScrollArea#plainScroll QScrollBar::handle:vertical {{
-    background: rgba(255, 255, 255, 70); border-radius: {max(1, round(2 * scale))}px;
+    background: {rgba(palette.scrollbar)}; border-radius: {max(1, round(2 * scale))}px;
     min-height: 24px;
 }}
 QScrollArea#plainScroll QScrollBar::add-line:vertical,
@@ -252,42 +247,55 @@ QScrollArea#plainScroll QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollArea#plainScroll QScrollBar::add-page:vertical,
 QScrollArea#plainScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
 QPushButton#loop, QPushButton#speak {{
-    color: {_rgba(_CONTROL_IDLE)}; background: transparent; border: none;
+    color: {rgba(palette.control_idle)}; background: transparent; border: none;
     border-radius: {round(6 * scale)}px;
     font-size: {round(15 * scale)}px;
 }}
 QPushButton#loop:hover, QPushButton#speak:hover {{
-    color: {_rgba(_CONTROL_HOVER)}; background: rgba(255, 255, 255, 26);
+    color: {rgba(palette.control_hover)}; background: {rgba(palette.control_wash)};
 }}
-QPushButton#loop:checked {{ color: {_rgba(_CONTROL_ENGAGED)}; }}
-QPushButton#speak:disabled {{ color: {_rgba(_CONTROL_ENGAGED)}; }}
+QPushButton#loop:checked {{ color: {rgba(palette.control_engaged)}; }}
+QPushButton#speak:disabled {{ color: {rgba(palette.control_engaged)}; }}
 QPushButton#attempt {{
-    color: rgba(255, 214, 120, 240); border: none;
-    background: rgba(255, 214, 120, 28); border-radius: {round(6 * scale)}px;
+    color: {rgba(palette.attempt_text)}; border: none;
+    background: {rgba(palette.attempt_fill)}; border-radius: {round(6 * scale)}px;
     font-size: {round(15 * scale)}px;
 }}
-QPushButton#attempt:hover {{ background: rgba(255, 214, 120, 60); }}
+QPushButton#attempt:hover {{ background: {rgba(palette.attempt_fill_hover)}; }}
 QPushButton#tap {{
-    color: rgba(16, 18, 26, 245); background: rgba(235, 242, 255, 225);
+    color: {rgba(palette.tap_text)}; background: {rgba(palette.tap_fill)};
     border: none; border-radius: {round(8 * scale)}px;
     font-size: {round(13 * scale)}px; font-weight: 700;
 }}
-QPushButton#tap:hover {{ background: rgba(255, 255, 255, 245); }}
-QPushButton#tap:pressed {{ background: rgba(130, 200, 255, 245); }}
+QPushButton#tap:hover {{ background: {rgba(palette.tap_fill_hover)}; }}
+QPushButton#tap:pressed {{ background: {rgba(palette.tap_fill_pressed)}; }}
 QPushButton#tap:disabled {{
-    color: rgba(255, 255, 255, 110); background: rgba(255, 255, 255, 30);
+    color: {rgba(palette.tap_text_off)}; background: {rgba(palette.tap_fill_off)};
 }}
 QPushButton#syncUndo, QPushButton#syncExit {{
-    color: rgba(255, 255, 255, 150); border: none;
-    background: rgba(255, 255, 255, 22); border-radius: {round(8 * scale)}px;
+    color: {rgba(palette.sync_text)}; border: none;
+    background: {rgba(palette.sync_fill)}; border-radius: {round(8 * scale)}px;
     font-size: {round(14 * scale)}px;
 }}
-QPushButton#syncUndo:hover {{ color: rgba(255, 255, 255, 230); }}
-QPushButton#syncUndo:disabled {{ color: rgba(255, 255, 255, 60); }}
+QPushButton#syncUndo:hover {{ color: {rgba(palette.sync_text_hover)}; }}
+QPushButton#syncUndo:disabled {{ color: {rgba(palette.sync_text_off)}; }}
 QPushButton#syncExit:hover {{
-    color: rgba(255, 160, 160, 240); background: rgba(255, 120, 120, 45);
+    color: {rgba(palette.exit_text_hover)}; background: {rgba(palette.exit_fill_hover)};
 }}
 """
+
+
+def _system_appearance() -> appearance.Appearance:
+    """The palette the system is currently asking for.
+
+    Qt's colour scheme rather than an AppKit call of our own: the cocoa
+    plugin already watches NSApp.effectiveAppearance and republishes every
+    change as a signal, so following the system costs no pyobjc, behaves
+    the same on the offscreen platform the suite runs on, and cannot end
+    up disagreeing with what Qt thinks the window's own palette is.
+    """
+    hints = QApplication.instance().styleHints()
+    return appearance.from_color_scheme(int(hints.colorScheme().value))
 
 
 def _clamped_point(frame: QRect, available: QRect) -> QPoint:
@@ -488,6 +496,12 @@ class LyricsWindow(QWidget):
         self._dots_frame = 0
         self._scale = 0.0
         self._all_desktops = False
+        # Which palette the window is painting with. Resolved from the
+        # system now and re-resolved on every change for as long as the
+        # app runs — reading it once at startup would be wrong by the
+        # afternoon on a Mac set to Auto.
+        self._appearance = _system_appearance()
+        self._palette = appearance.palette_for(self._appearance)
         # Open at Login: only meaningful from a bundle, and the status is
         # the system's to report. Read once here so the menu bar item is
         # already right the first time it is opened, then re-read on every
@@ -660,6 +674,12 @@ class LyricsWindow(QWidget):
         self._build_tray()
         self._build_hotkey()
         self._apply_scale()
+        # Live, not read-once: on a Mac set to Auto the appearance changes
+        # under a running app, and the app that only looked at startup is
+        # the one that is wrong every evening.
+        QApplication.instance().styleHints().colorSchemeChanged.connect(
+            self._on_color_scheme_changed
+        )
         QApplication.instance().aboutToQuit.connect(self._shutdown)
 
         self._monitor_thread = MonitorThread(self)
@@ -1173,9 +1193,17 @@ class LyricsWindow(QWidget):
         # The armed prompt is coloured inline rather than by object name:
         # a stylesheet swap would need a repolish on every render.
         self._progress.setText(
-            _EXIT_CONFIRM_TEXT if self._exit_armed else display.progress
+            self._exit_confirm_text() if self._exit_armed else display.progress
         )
         self._place_sync_controls()
+
+    def _exit_confirm_text(self) -> str:
+        """The armed discard prompt, in this appearance's warning colour —
+        a pale red on a dark panel is invisible on a light one."""
+        return (
+            f'<span style="color: {appearance.rgba(self._palette.confirm_text)}">'
+            f"{_EXIT_CONFIRM_TEXT}</span>"
+        )
 
     def _show_plain_view(self, plain: bool) -> None:
         """Swap between the scrolling plain body and the synced rows; the
@@ -1191,7 +1219,11 @@ class LyricsWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(
-            _SCRIM_OVER_MATERIAL if self._material is not None else _PAINTED_BACKGROUND
+            _qcolor(
+                self._palette.scrim
+                if self._material is not None
+                else self._palette.solid
+            )
         )
         painter.drawRoundedRect(self.rect(), _CORNER_RADIUS, _CORNER_RADIUS)
 
@@ -1207,7 +1239,9 @@ class LyricsWindow(QWidget):
         scale = max(0.65, self.width() / _BASE_WIDTH)
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
-            self.setStyleSheet(_style_for(scale, self._family_stack))
+            self.setStyleSheet(
+                _style_for(scale, self._family_stack, self._palette)
+            )
             self._apply_layout_margins()
             row_gap = max(1, round(ROW_SPACING * scale))
             self._layout.setSpacing(row_gap)
@@ -1232,13 +1266,20 @@ class LyricsWindow(QWidget):
         resized window gets a glyph rendered at its size instead of a
         blurred one. Where symbols are unavailable this does nothing and
         the button keeps the text glyph it was built with.
+
+        Re-rendered per appearance too, and for the same reason the tint
+        exists at all: the symbol arrives as a template image carrying its
+        shape in the alpha channel and takes its colour from us, so a
+        white glyph would stay white on a pale panel. The three states are
+        the palette's, which is what keeps the icon and the stylesheet
+        that paints its fallback glyph describing the same thing.
         """
         icon = symbol_icon(
             SPEAK_SYMBOL,
             float(icon_size(side).width()),
-            _CONTROL_IDLE,
-            active=_CONTROL_HOVER,
-            disabled=_CONTROL_ENGAGED,
+            _qcolor(self._palette.control_idle),
+            active=_qcolor(self._palette.control_hover),
+            disabled=_qcolor(self._palette.control_engaged),
         )
         if icon is None:
             return
@@ -1554,7 +1595,7 @@ class LyricsWindow(QWidget):
         action is the drift this app keeps designing away. Worse, the
         claim would not always be true: registration can be refused, and
         macOS may hand a press to another app holding the same keys, so a
-        menu printing ⇧⌘L beside "Show lyrics" would be the login-item
+        menu printing ⇧⌘J beside "Show lyrics" would be the login-item
         failure again — an entry promising something that does not
         happen. So the label stays as it was, the README says what the
         keys are, and the log says whether they landed.
@@ -1633,6 +1674,61 @@ class LyricsWindow(QWidget):
             self._native_applied = True
             self._apply_vibrancy()
             self._apply_all_desktops(self._all_desktops)
+
+    def _on_color_scheme_changed(self, scheme) -> None:
+        """The system changed appearance under us — follow it.
+
+        Fires for a manual flip in System Settings and for the scheduled
+        Auto transition alike: both are the same effectiveAppearance
+        change as far as anything above AppKit can tell, which is why
+        there is nothing here that knows about sunset.
+        """
+        resolved = appearance.from_color_scheme(int(scheme.value))
+        if resolved is self._appearance:
+            return
+        logger.info(
+            "system appearance -> %s, following", resolved.value
+        )
+        self._appearance = resolved
+        self._palette = appearance.palette_for(resolved)
+        self._apply_appearance()
+
+    def _apply_appearance(self) -> None:
+        """Repaint everything the palette owns.
+
+        Deliberately not routed through _apply_scale: that one early-outs
+        when the width has not moved, which is exactly the case here, and
+        an appearance change that silently did nothing is the bug this
+        whole feature is about. Everything else — geometry, fonts,
+        margins, the fade timers, an engaged loop, a sync pass in
+        progress — is untouched, because none of it is a colour.
+        """
+        self.setStyleSheet(_style_for(self._scale, self._family_stack, self._palette))
+        self._apply_material_appearance()
+        self._apply_speak_icon(button_side(self._scale))
+        self.update()  # the scrim is painted, not styled
+        self._render()  # the armed discard prompt carries its colour inline
+
+    def _apply_material_appearance(self) -> None:
+        """Point the NSVisualEffectView at the same mode the scrim is
+        painted for. No-op without a material, which is every non-cocoa
+        run and any run where vibrancy did not install."""
+        if self._material is None:
+            return
+        try:
+            from AppKit import NSAppearance
+        except ImportError:  # pragma: no cover - material implies pyobjc
+            return
+        try:
+            name = appearance_name(self._appearance is appearance.Appearance.DARK)
+            native = NSAppearance.appearanceNamed_(name)
+            if native is None:
+                logger.warning("no NSAppearance named %s", name)
+                return
+            self._material.setAppearance_(native)
+            logger.debug("material appearance -> %s", name)
+        except Exception:
+            logger.exception("failed to set the material appearance")
 
     def _reread_login_item(self) -> None:
         """Ask macOS what it thinks, discarding whatever we thought.
@@ -1727,12 +1823,13 @@ class LyricsWindow(QWidget):
             effect.setBlendingMode_(BLENDING_MODE_BEHIND_WINDOW)
             effect.setMaterial_(MATERIAL_HUD_WINDOW)
             effect.setState_(STATE_ACTIVE)
-            # Pinned dark: a material following a light system appearance
-            # would turn pale over a white document and take the white
-            # lyric text with it.
-            appearance = NSAppearance.appearanceNamed_(DARK_APPEARANCE)
-            if appearance is not None:
-                effect.setAppearance_(appearance)
+            # Set to the mode this window resolved, not left to inherit:
+            # the scrim painted on top comes from that same answer, and a
+            # material in the other mode would show through it.
+            name = appearance_name(self._appearance is appearance.Appearance.DARK)
+            native = NSAppearance.appearanceNamed_(name)
+            if native is not None:
+                effect.setAppearance_(native)
             # The material owns its own corners at the same radius the
             # scrim is painted with, so the two coincide exactly.
             effect.setWantsLayer_(True)
