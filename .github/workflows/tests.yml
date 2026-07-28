@@ -48,4 +48,20 @@ jobs:
           "
       # -rs lists any skip with its reason, so a silently skipped module
       # cannot hide behind a green tick.
-      - run: pytest -rs
+      - run: pytest -rs --junitxml=report.xml
+      - name: Confirm nothing was skipped
+        # The whole point of installing Qt above is that CI runs the same
+        # tests a developer runs. No test is macOS-only today, so any skip
+        # here means a module failed to import and quietly opted out. If a
+        # genuinely platform-specific test is ever added, mark it with an
+        # explicit skipif and raise the allowance below deliberately.
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("report.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          total = int(suite.get("tests"))
+          skipped = int(suite.get("skipped"))
+          print(f"{total} tests collected, {skipped} skipped")
+          assert skipped == 0, f"{skipped} test(s) skipped in CI — see the -rs list above"
+          PY
