@@ -6,6 +6,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 
 ## Features
 
+- **Menu bar app** — LyriSync lives in the menu bar, not the Dock. Its menu is the same one you get by right-clicking the window, so every setting is reachable whether the lyrics are on screen or hidden away.
 - **Floating synced lyrics** — a frameless, always-on-top, translucent window shows the previous, current, and next line, advancing in time with playback. Lines fade anticipatorily so the new line is fully legible exactly on its timestamp.
 - **Full-screen persistence** — an optional "show on all desktops" mode keeps the window visible across Spaces and over full-screen apps.
 - **Korean romanisation** — an optional pronunciation line renders the current lyric in Revised Romanization beneath the original hangul.
@@ -42,7 +43,9 @@ For the spoken-reference feature, install the Korean system voice **Yuna** (Syst
 
 Play something in Spotify and the window follows along.
 
-- **Right-click** the window for the menu: show on all desktops, sync this song, romanisation, spoken reference and speech rate, echo practice, quit.
+- **The menu bar item** is the app's home: show lyrics, romanisation, spoken reference and speech rate, echo practice, show on all desktops, sync this song, quit. Entries appear only where they apply, so with every layer off the menu is just show/hide, Spaces and quit.
+- **Right-click** the window for that same menu — it is literally the same menu, so the two can never disagree.
+- **Show lyrics** hides and shows the window without stopping anything: the music plays on, a loop stays engaged, and a sync pass in progress keeps going. Showing it again picks the song up wherever it now is. The setting is remembered, and the menu bar item is always the way back.
 - **Drag** anywhere to move; **drag edges/corners** to resize (text scales with width).
 - **Scroll** to adjust opacity; in plain-lyrics view, scroll moves the lyrics and **Option+scroll** adjusts opacity.
 - The loop button (top right) repeats the current line; with echo practice enabled, the microphone button ends your silent attempt and replays the line.
@@ -57,7 +60,7 @@ Two auxiliary terminal tools exist for debugging: `lyrisync-monitor` (raw player
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app via a single batched AppleScript call (~300 ms); no Spotify Web API and no credentials. Lyrics come from [LRCLIB](https://lrclib.net) and are cached locally as JSON keyed by Spotify track ID, including definitive "no lyrics" results (delete `.lyrics_cache/` to reset). Syncs you tap out yourself are not part of that cache: they are plain `.lrc` files in `.user_syncs/`, written only when you finish a pass, consulted ahead of both the cache and the network, and left alone by that reset. A re-sync takes its lines from the sync it is replacing rather than re-fetching them, so it works offline and after that reset too. Display logic, loop/echo state, tap-to-sync sessions, gesture routing, and geometry live in pure, Qt-free modules behind a thin PySide6 window; 293 tests cover them, run by GitHub Actions on every push.
+A worker thread polls the Spotify desktop app via a single batched AppleScript call (~300 ms); no Spotify Web API and no credentials. Lyrics come from [LRCLIB](https://lrclib.net) and are cached locally as JSON keyed by Spotify track ID, including definitive "no lyrics" results (delete `.lyrics_cache/` to reset). Syncs you tap out yourself are not part of that cache: they are plain `.lrc` files in `.user_syncs/`, written only when you finish a pass, consulted ahead of both the cache and the network, and left alone by that reset. A re-sync takes its lines from the sync it is replacing rather than re-fetching them, so it works offline and after that reset too. The app runs under the macOS accessory activation policy from the moment it starts — that is what keeps it out of the Dock and lets the overlay sit over full-screen Spaces instead of switching to one. Display logic, loop/echo state, tap-to-sync sessions, menu gating, gesture routing, and geometry live in pure, Qt-free modules behind a thin PySide6 window; 323 tests cover them, run by GitHub Actions on every push, with the handful that need a live Qt window skipping where there isn't one.
 
 ## Credits
 

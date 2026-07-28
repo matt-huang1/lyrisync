@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -33,7 +34,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QActionGroup, QColor, QPainter
+from PySide6.QtGui import QActionGroup, QColor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -42,6 +43,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -62,9 +64,22 @@ from lyrisync.gestures import opacity_step, scroll_step, wheel_action
 from lyrisync.loop import LineLoop, LoopPhase
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
 from lyrisync.macspaces import (
+    ACTIVATION_POLICY_ACCESSORY,
     STATUS_WINDOW_LEVEL,
-    activation_policy_for,
     all_desktops_behavior,
+)
+from lyrisync.menu import (
+    ALL_DESKTOPS,
+    ECHO,
+    QUIT,
+    ROMANISATION,
+    SEPARATOR_AFTER_SHOW,
+    SEPARATOR_BEFORE_QUIT,
+    SHOW_LYRICS,
+    SPEECH_RATE,
+    SPOKEN,
+    SYNC,
+    visible_entries,
 )
 from lyrisync.player_monitor import (
     PlaybackState,
@@ -114,6 +129,8 @@ _EXIT_CONFIRM_TEXT = (
 )
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
+
+MENUBAR_ICON = Path(__file__).parent / "assets" / "menubar.svg"
 
 
 def _style_for(scale: float) -> str:
@@ -342,12 +359,19 @@ class FetchTask(QRunnable):
 
 
 class LyricsWindow(QWidget):
-    def __init__(self, provider: Optional[LyricsProvider] = None) -> None:
+    def __init__(
+        self,
+        provider: Optional[LyricsProvider] = None,
+        settings: Optional[QSettings] = None,
+    ) -> None:
         super().__init__()
         self._provider = provider or LyricsProvider()
         self._view_model = LyricsViewModel()
         self._pool = QThreadPool.globalInstance()
-        self._settings = QSettings("lyrisync", "lyrisync")
+        # Injectable so tests and scratch runs write somewhere of their own:
+        # QSettings' default location is global process state, and getting
+        # it wrong means stamping on the real user's saved window.
+        self._settings = settings or QSettings("lyrisync", "lyrisync")
 
         self._drag_offset: Optional[QPoint] = None
         self._resize_edges = Qt.Edges()
@@ -505,12 +529,9 @@ class LyricsWindow(QWidget):
         self._exit_disarm_timer.timeout.connect(self._disarm_sync_exit)
 
         self._restore_settings()
+        self._build_menu()
+        self._build_tray()
         self._apply_scale()
-        if self._all_desktops:
-            # Persisted-on startup: accessory policy must be in force
-            # before the window first shows, or macOS may still treat the
-            # first show as a regular-app activation.
-            self._apply_activation_policy(True)
         QApplication.instance().aboutToQuit.connect(self._shutdown)
 
         self._monitor_thread = MonitorThread(self)
@@ -944,6 +965,9 @@ class LyricsWindow(QWidget):
     def _render(self) -> None:
         display = self._view_model.display()
         self._cancel_line_schedule()
+        # Menu entries follow mode and lyrics, so keep the menu bar item in
+        # step here rather than only when it is about to open.
+        self._refresh_menu()
 
         # Loop button only where looping is possible (synced timestamps).
         self._loop_button.setVisible(display.mode is Mode.SYNCED)
@@ -1222,49 +1246,144 @@ class LyricsWindow(QWidget):
             return False  # native (kinetic) scrolling handles it
         return super().eventFilter(watched, event)
 
-    def contextMenuEvent(self, event) -> None:
-        menu = QMenu(self)
-        display = self._view_model.display()
-        all_desktops = menu.addAction("Show on all desktops")
+    # -- settings menu (shared by the menu bar item and right-click) -------
+
+    def _build_menu(self) -> None:
+        """Build the one settings menu, once.
+
+        The same QMenu backs the menu bar item and the window's right-click
+        menu, so the two cannot drift apart. Its structure never changes
+        afterwards — ``_refresh_menu`` only flips visibility, check marks
+        and the sync label — which keeps the native menu bar item from
+        being rebuilt underneath the user.
+
+        Checkable entries connect to ``triggered``, not ``toggled``: a
+        refresh calls setChecked() on all of them, and toggled would feed
+        that straight back into the setters.
+        """
+        self._menu = QMenu(self)
+        actions = {}
+
+        show = self._menu.addAction("Show lyrics")
+        show.setCheckable(True)
+        show.triggered.connect(self._set_lyrics_visible)
+        actions[SHOW_LYRICS] = show
+
+        actions[SEPARATOR_AFTER_SHOW] = self._menu.addSeparator()
+
+        romanisation = self._menu.addAction("Romanisation")
+        romanisation.setCheckable(True)
+        romanisation.triggered.connect(self._set_romanisation)
+        actions[ROMANISATION] = romanisation
+
+        spoken = self._menu.addAction("Spoken reference")
+        spoken.setCheckable(True)
+        spoken.triggered.connect(self._set_spoken_reference)
+        actions[SPOKEN] = spoken
+
+        rate_menu = self._menu.addMenu("Speech rate")
+        rate_group = QActionGroup(rate_menu)
+        rate_group.setExclusive(True)
+        self._rate_actions = {}
+        for wpm in SPEECH_RATE_PRESETS:
+            preset = rate_menu.addAction(f"{wpm} wpm")
+            preset.setCheckable(True)
+            rate_group.addAction(preset)
+            preset.triggered.connect(
+                lambda checked=False, rate=wpm: self._set_speech_rate(rate)
+            )
+            self._rate_actions[wpm] = preset
+        actions[SPEECH_RATE] = rate_menu.menuAction()
+
+        echo = self._menu.addAction("Echo practice")
+        echo.setCheckable(True)
+        echo.triggered.connect(self._set_echo_practice)
+        actions[ECHO] = echo
+
+        all_desktops = self._menu.addAction("Show on all desktops")
         all_desktops.setCheckable(True)
-        all_desktops.setChecked(self._all_desktops)
-        all_desktops.toggled.connect(self._set_all_desktops)
-        # Offered wherever a pass can be run: plain lyrics to stamp for the
-        # first time, or a sync of the user's own that they may redo.
-        sync_entry = self._view_model.sync_menu_entry(
+        all_desktops.triggered.connect(self._set_all_desktops)
+        actions[ALL_DESKTOPS] = all_desktops
+
+        # Label swaps between "Sync" and "Re-sync" in _refresh_menu.
+        sync = self._menu.addAction("Sync this song")
+        sync.triggered.connect(self._begin_sync)
+        actions[SYNC] = sync
+
+        actions[SEPARATOR_BEFORE_QUIT] = self._menu.addSeparator()
+        # Straight to the app's quit, so the existing aboutToQuit shutdown
+        # (settings saved, monitor joined) runs however quit is reached.
+        actions[QUIT] = self._menu.addAction("Quit", QApplication.instance().quit)
+
+        self._menu_actions = actions
+        self._menu.aboutToShow.connect(self._refresh_menu)
+
+    def _refresh_menu(self) -> None:
+        """Bring the shared menu in line with the current state. Cheap
+        enough to run on every render, so the menu bar item is already
+        correct before it is opened rather than only on aboutToShow."""
+        sync_label = self._view_model.sync_menu_entry(
             self._provider.has_user_sync(self._view_model.track_id)
         )
-        if sync_entry is not None:
-            menu.addAction(sync_entry, self._begin_sync)
-        if self._view_model.has_korean_lyrics:
-            romanisation = menu.addAction("Romanisation")
-            romanisation.setCheckable(True)
-            romanisation.setChecked(self._view_model.romanisation_enabled)
-            romanisation.toggled.connect(self._set_romanisation)
-        if display.mode is Mode.SYNCED:
-            echo = menu.addAction("Echo practice")
-            echo.setCheckable(True)
-            echo.setChecked(self._echo_enabled)
-            echo.toggled.connect(self._set_echo_practice)
-        if self._speech_available:
-            spoken = menu.addAction("Spoken reference")
-            spoken.setCheckable(True)
-            spoken.setChecked(self._spoken_enabled)
-            spoken.toggled.connect(self._set_spoken_reference)
-            rate_menu = menu.addMenu("Speech rate")
-            rate_group = QActionGroup(rate_menu)
-            rate_group.setExclusive(True)
-            for wpm in SPEECH_RATE_PRESETS:
-                preset = rate_menu.addAction(f"{wpm} wpm")
-                preset.setCheckable(True)
-                preset.setChecked(wpm == self._speech_rate)
-                rate_group.addAction(preset)
-                preset.triggered.connect(
-                    lambda checked=False, rate=wpm: self._set_speech_rate(rate)
-                )
-        menu.addSeparator()
-        menu.addAction("Quit", QApplication.instance().quit)
-        menu.exec(event.globalPos())
+        visible = set(
+            visible_entries(
+                has_korean_lyrics=self._view_model.has_korean_lyrics,
+                speech_available=self._speech_available,
+                synced=self._view_model.display().mode is Mode.SYNCED,
+                sync_offered=sync_label is not None,
+            )
+        )
+        for key, action in self._menu_actions.items():
+            action.setVisible(key in visible)
+        if sync_label is not None:
+            self._menu_actions[SYNC].setText(sync_label)
+        self._menu_actions[SHOW_LYRICS].setChecked(self._lyrics_visible)
+        self._menu_actions[ROMANISATION].setChecked(
+            self._view_model.romanisation_enabled
+        )
+        self._menu_actions[SPOKEN].setChecked(self._spoken_enabled)
+        self._menu_actions[ECHO].setChecked(self._echo_enabled)
+        self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
+        for wpm, action in self._rate_actions.items():
+            action.setChecked(wpm == self._speech_rate)
+
+    def _build_tray(self) -> None:
+        """The menu bar item. Its icon is a template image, so macOS tints
+        it for light and dark menu bars instead of us shipping two."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.info("no system tray — menu bar item unavailable")
+            self._tray = None
+            return
+        icon = QIcon(str(MENUBAR_ICON))
+        icon.setIsMask(True)
+        self._tray = QSystemTrayIcon(icon, self)
+        self._tray.setToolTip("LyriSync")
+        self._tray.setContextMenu(self._menu)
+        self._tray.show()
+
+    def contextMenuEvent(self, event) -> None:
+        self._refresh_menu()
+        self._menu.exec(event.globalPos())
+
+    # -- settings -----------------------------------------------------------
+
+    def _set_lyrics_visible(self, visible: bool) -> None:
+        """Show or hide the lyrics window. Nothing else stops: the monitor
+        thread keeps polling, an engaged loop stays engaged, and a sync pass
+        in progress carries on — so showing it again picks the song up
+        wherever it now is."""
+        self._lyrics_visible = visible
+        self.setVisible(visible)
+        if visible:
+            self._render()  # catch up with whatever happened while hidden
+        self._settings.setValue("window/visible", visible)
+        self._refresh_menu()
+
+    def apply_saved_visibility(self) -> None:
+        """Show the window at startup unless the user left it hidden. Used
+        instead of an unconditional show(): the menu bar item is the way
+        back, so starting hidden is a valid state."""
+        self.setVisible(self._lyrics_visible)
 
     def _set_romanisation(self, enabled: bool) -> None:
         self._view_model.romanisation_enabled = enabled
@@ -1275,15 +1394,18 @@ class LyricsWindow(QWidget):
         self._spoken_enabled = enabled
         self._settings.setValue("lyrics/spoken_reference", enabled)
         self._update_speak_button()
+        self._refresh_menu()
 
     def _set_speech_rate(self, rate: int) -> None:
         self._speech_rate = rate
         self._settings.setValue("lyrics/speech_rate", rate)
+        self._refresh_menu()
 
     def _set_echo_practice(self, enabled: bool) -> None:
         self._echo_enabled = enabled
         self._loop.echo = enabled
         self._settings.setValue("lyrics/echo_practice", enabled)
+        self._refresh_menu()
 
     # -- all-desktops (native NSWindow collection behaviour) ---------------
 
@@ -1297,6 +1419,7 @@ class LyricsWindow(QWidget):
         self._all_desktops = enabled
         self._apply_all_desktops(enabled)
         self._save_settings()
+        self._refresh_menu()
 
     def _nswindow(self):
         """The native NSWindow, or None off-cocoa / without pyobjc."""
@@ -1316,39 +1439,18 @@ class LyricsWindow(QWidget):
             logger.exception("failed to resolve NSWindow")
             return None
 
-    def _apply_activation_policy(self, enabled: bool) -> None:
-        """Accessory policy while the toggle is on: a regular app owns a
-        Space, so any activation from inside a full-screen Space makes
-        macOS switch there instead of overlaying. Accessory removes the
-        Dock icon and Cmd-Tab entry; Quit stays in the context menu and
-        SIGINT. Needs no native window, so it can run before first show."""
-        if QApplication.platformName() != "cocoa":
-            return
-        try:
-            from AppKit import NSApplication
-        except ImportError:
-            logger.warning("pyobjc unavailable — activation policy unchanged")
-            return
-        try:
-            shared = NSApplication.sharedApplication()
-            shared.setActivationPolicy_(activation_policy_for(enabled))
-            logger.debug(
-                "activation policy -> %s (readback=%d)",
-                "accessory" if enabled else "regular",
-                int(shared.activationPolicy()),
-            )
-        except Exception:
-            logger.exception("failed to set activation policy")
-
     def _apply_all_desktops(self, enabled: bool) -> None:
-        """All-desktops toggle: accessory activation policy plus native
-        window flags — CanJoinAllSpaces + FullScreenAuxiliary with Qt's
-        conflicting FullScreenPrimary bit cleared (Primary wins over
-        Auxiliary and blocks full-screen Spaces), at status window level
-        so the overlay stays above full-screen content. Disabling restores
-        Qt's saved defaults. Qt has no cross-platform API for Spaces,
-        hence pyobjc."""
-        self._apply_activation_policy(enabled)
+        """All-desktops toggle: native window flags only —
+        CanJoinAllSpaces + FullScreenAuxiliary with Qt's conflicting
+        FullScreenPrimary bit cleared (Primary wins over Auxiliary and
+        blocks full-screen Spaces), at status window level so the overlay
+        stays above full-screen content. Disabling restores Qt's saved
+        defaults. Qt has no cross-platform API for Spaces, hence pyobjc.
+
+        The accessory activation policy is NOT part of this: it is applied
+        once at startup and never revoked (see apply_accessory_policy), so
+        no toggle state can bring the Dock icon back.
+        """
         nswindow = self._nswindow()
         if nswindow is None:
             return
@@ -1415,18 +1517,48 @@ class LyricsWindow(QWidget):
             "lyrics/echo_practice", False, type=bool
         )
         self._loop.echo = self._echo_enabled
+        self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
 
     def _save_settings(self) -> None:
         self._settings.setValue("window/pos", self.pos())
         self._settings.setValue("window/size", self.size())
         self._settings.setValue("window/opacity", self._opacity)
         self._settings.setValue("window/all_desktops", self._all_desktops)
+        self._settings.setValue("window/visible", self._lyrics_visible)
 
     def _shutdown(self) -> None:
         self._save_settings()
         self._monitor_thread.stop()
         # Poll may be mid-osascript (up to its 2s timeout).
         self._monitor_thread.wait(3000)
+
+
+def apply_accessory_policy() -> None:
+    """Run as a menu bar accessory: no Dock icon, no Cmd-Tab entry.
+
+    Unconditional and permanent. A Regular-policy app owns a Space, so
+    activating it from inside another app's full-screen Space makes macOS
+    switch there instead of overlaying — which no collection-behavior flag
+    can undo. Must be in force before the window is first shown, or macOS
+    may still treat that show as a regular-app activation. With no Dock
+    icon, Quit lives in the menu bar item (and SIGINT).
+    """
+    if QApplication.platformName() != "cocoa":
+        return
+    try:
+        from AppKit import NSApplication
+    except ImportError:
+        logger.warning("pyobjc unavailable — activation policy unchanged")
+        return
+    try:
+        shared = NSApplication.sharedApplication()
+        shared.setActivationPolicy_(ACTIVATION_POLICY_ACCESSORY)
+        logger.debug(
+            "activation policy -> accessory (readback=%d)",
+            int(shared.activationPolicy()),
+        )
+    except Exception:
+        logger.exception("failed to set activation policy")
 
 
 def main() -> int:
@@ -1437,6 +1569,10 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("lyrisync")
     app.setOrganizationName("lyrisync")
+    # A menu bar app outlives its window: hiding the lyrics must not be
+    # mistaken for the user closing the last window and quitting.
+    app.setQuitOnLastWindowClosed(False)
+    apply_accessory_policy()  # before any window exists, let alone shows
 
     # Ctrl-C: Python signal handlers only run while the interpreter is
     # executing bytecode, so an idle Qt event loop would never deliver
@@ -1447,7 +1583,7 @@ def main() -> int:
     interrupt_timer.start(200)
 
     window = LyricsWindow()
-    window.show()
+    window.apply_saved_visibility()
     return app.exec()
 
 

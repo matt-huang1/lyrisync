@@ -1,0 +1,13 @@
+<!-- Menu bar glyph: the window's three lyric rows — previous, current,
+     next — with the current line longest and heaviest.
+
+     A macOS template image: solid black, shape carried entirely by the
+     alpha channel, so the system tints it for light and dark menu bars.
+     Loaded with QIcon.setIsMask(True). Keep it black; do not add colour. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <g fill="#000000">
+    <rect x="6" y="5" width="10" height="2" rx="1"/>
+    <rect x="2" y="9.5" width="18" height="3" rx="1.5"/>
+    <rect x="6" y="15" width="10" height="2" rx="1"/>
+  </g>
+</svg>

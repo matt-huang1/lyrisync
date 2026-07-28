@@ -21,12 +21,15 @@ Decision log so far
 - A sync is saved only when complete. Exiting early discards, and confirmation is inline (two-step control), never a modal — the window must never take focus or activate the app.
 - A re-sync takes its lines from the sync it replaces, not a re-fetch: a completed pass stamps every non-blank plain line, so the stored lines ARE the song's lines. Re-syncing therefore works offline and after .lyrics_cache/ is cleared. LRCLIB's own timings are never offered for overwrite — only the user's.
 - A sync pass is modal and user-driven: a fetch landing under it must not tear it down. The result is held and becomes where cancelling lands.
+- Accessory activation policy is permanent and unconditional, applied before any window exists. It is no longer coupled to the all-desktops toggle, which now owns only collection behaviour and window level. There is no regular policy to fall back to, so nothing can bring the Dock icon back.
+- One QMenu serves both the menu bar item and the window's right-click menu — two menus could drift apart, one cannot. Its structure is built once and never rebuilt; refresh only flips visibility, check marks and labels, so the native menu bar item never flickers. Checkable entries connect to triggered, not toggled: refresh calls setChecked on all of them.
+- The menu bar item is the way back from a hidden window, so quit must be visible in every state and hiding must leave the monitor, loop and any sync pass running.
+- QSettings location is injected into LyricsWindow, not global. QSettings.setDefaultFormat/setPath are process-wide and silently do nothing on macOS — trusting them meant tests writing into the real user's preferences.
 
 Parked
 - Album-art background
 - Karaoke word-by-word
 - Side panels
-- Menu bar app
 - Japanese romanisation
 - Global shortcut
 - Focus fade

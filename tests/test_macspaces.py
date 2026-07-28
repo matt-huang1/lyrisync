@@ -24,6 +24,10 @@ def test_unrelated_bits_are_preserved():
     assert behavior & ignores_cycle
 
 
-def test_activation_policy_follows_toggle():
-    assert ms.activation_policy_for(True) == ms.ACTIVATION_POLICY_ACCESSORY
-    assert ms.activation_policy_for(False) == ms.ACTIVATION_POLICY_REGULAR
+def test_activation_policy_is_accessory_only():
+    """The app is a menu bar accessory permanently: there is no regular
+    policy to fall back to, so the toggle can never drag the Dock icon
+    (and the full-screen Space switch) back."""
+    assert ms.ACTIVATION_POLICY_ACCESSORY == 1
+    assert not hasattr(ms, "activation_policy_for")
+    assert not hasattr(ms, "ACTIVATION_POLICY_REGULAR")
