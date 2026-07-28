@@ -99,6 +99,12 @@ from lyrisync.speech import (
     speak_korean,
 )
 from lyrisync.sync_session import interpolated_position
+from lyrisync.symbols import (
+    SPEAK_FALLBACK_GLYPH,
+    SPEAK_SYMBOL,
+    icon_size,
+    symbol_icon,
+)
 from lyrisync.typography import (
     BOTTOM_MARGIN,
     CONTEXT,
@@ -151,6 +157,22 @@ _DEFAULT_OPACITY = 1.0
 # the material rendering (tests/test_scrim.py pins the floor).
 _SCRIM_OVER_MATERIAL = QColor(14, 15, 20, 150)
 _PAINTED_BACKGROUND = QColor(18, 18, 24, 232)
+
+# Overlay control colours. One source for both ways a control can be
+# drawn: the stylesheet paints them as text, symbols.py tints the SF
+# Symbol with the same values, so the icon and the glyph it falls back to
+# can never describe different states.
+_CONTROL_IDLE = QColor(255, 255, 255, 105)
+_CONTROL_HOVER = QColor(255, 255, 255, 225)
+_CONTROL_ENGAGED = QColor(130, 200, 255, 235)
+
+
+def _rgba(colour: QColor) -> str:
+    return (
+        f"rgba({colour.red()}, {colour.green()}, "
+        f"{colour.blue()}, {colour.alpha()})"
+    )
+
 
 # Anticipatory line fade: the old line fades out over [ts-200, ts-100],
 # the new line swaps in at ts-100 and its fade-in completes AT ts, so it
@@ -227,15 +249,15 @@ QScrollArea#plainScroll QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollArea#plainScroll QScrollBar::add-page:vertical,
 QScrollArea#plainScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
 QPushButton#loop, QPushButton#speak {{
-    color: rgba(255, 255, 255, 105); background: transparent; border: none;
+    color: {_rgba(_CONTROL_IDLE)}; background: transparent; border: none;
     border-radius: {round(6 * scale)}px;
     font-size: {round(15 * scale)}px;
 }}
 QPushButton#loop:hover, QPushButton#speak:hover {{
-    color: rgba(255, 255, 255, 225); background: rgba(255, 255, 255, 26);
+    color: {_rgba(_CONTROL_HOVER)}; background: rgba(255, 255, 255, 26);
 }}
-QPushButton#loop:checked {{ color: rgba(130, 200, 255, 235); }}
-QPushButton#speak:disabled {{ color: rgba(130, 200, 255, 235); }}
+QPushButton#loop:checked {{ color: {_rgba(_CONTROL_ENGAGED)}; }}
+QPushButton#speak:disabled {{ color: {_rgba(_CONTROL_ENGAGED)}; }}
 QPushButton#attempt {{
     color: rgba(255, 214, 120, 240); border: none;
     background: rgba(255, 214, 120, 28); border-radius: {round(6 * scale)}px;
@@ -583,11 +605,12 @@ class LyricsWindow(QWidget):
         self._spoken_enabled = True  # restored from settings below
         self._speech_rate = SPEECH_RATE_WPM
         self._speak_button = self._make_overlay_button(
-            # Not 🔊: it renders in colour whatever we ask for, and macOS
-            # has no monochrome speaker glyph (U+1F56A and friends fall
-            # back to a striped tofu box). A beamed note is monochrome and
-            # legible at 22px; the tooltip carries the exact meaning.
-            "speak", "♬", "Speak this line aloud"
+            # The system's own glyph for a spoken line, as a template
+            # image (symbols.py). The text glyph behind it is what shows
+            # when SF Symbols cannot be had — off macOS, or without
+            # pyobjc — and is a beamed note rather than 🔊 because that
+            # renders in colour whatever is asked of it.
+            "speak", SPEAK_FALLBACK_GLYPH, "Speak this line aloud"
         )
         self._speak_button.clicked.connect(self._on_speak_clicked)
 
@@ -1181,7 +1204,30 @@ class LyricsWindow(QWidget):
             side = button_side(scale)
             for button in (self._loop_button, self._speak_button, self._attempt_button):
                 button.setFixedSize(side, side)
+            self._apply_speak_icon(side)
             self._place_buttons()
+
+    def _apply_speak_icon(self, side: int) -> None:
+        """Draw the speak button as its SF Symbol, at this scale.
+
+        Re-rendered per scale rather than scaled from one pixmap: SF
+        Symbols are drawn for the point size they are asked for, so a
+        resized window gets a glyph rendered at its size instead of a
+        blurred one. Where symbols are unavailable this does nothing and
+        the button keeps the text glyph it was built with.
+        """
+        icon = symbol_icon(
+            SPEAK_SYMBOL,
+            float(icon_size(side).width()),
+            _CONTROL_IDLE,
+            active=_CONTROL_HOVER,
+            disabled=_CONTROL_ENGAGED,
+        )
+        if icon is None:
+            return
+        self._speak_button.setText("")
+        self._speak_button.setIcon(icon)
+        self._speak_button.setIconSize(icon_size(side))
 
     def _apply_layout_margins(self) -> None:
         """Side margins reserve the button gutters (geometry.py owns the

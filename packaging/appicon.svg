@@ -1,0 +1,32 @@
+<!-- App icon source: the menu bar glyph's three lyric rows — previous,
+     current, next, with the current line longest and heaviest — sitting on
+     the window's own background.
+
+     Same shapes as assets/menubar.svg at 1024, so the icon in the Dock's
+     recent items, in Finder, and the glyph in the menu bar are recognisably
+     one thing. Unlike the menu bar image this one is NOT a template: it
+     keeps its colours, because macOS renders app icons in full colour.
+
+     Drawn at 1024 with an 80px margin: macOS rounds the corners of nothing
+     for you, so the squircle is part of the artwork. Radius 224 is Big
+     Sur's proportion (roughly 22.4% of the 864pt tile). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"
+     viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2d3a"/>
+      <stop offset="1" stop-color="#111219"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="80" y="80" width="864" height="864" rx="224" ry="224"
+        fill="url(#tile)"/>
+
+  <!-- The three rows, scaled from the 22px menu bar glyph: x, y, width and
+       height all multiplied by 39.3 and centred on the tile. -->
+  <g fill="#ffffff">
+    <rect x="374" y="378" width="276" height="56" rx="28" opacity="0.55"/>
+    <rect x="276" y="484" width="472" height="80" rx="40"/>
+    <rect x="374" y="614" width="276" height="56" rx="28" opacity="0.55"/>
+  </g>
+</svg>

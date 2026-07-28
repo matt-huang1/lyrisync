@@ -20,6 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Only needed to build the .app bundle (`make app`); the app itself does
+# not depend on it, and CI never installs it.
+build = ["pyinstaller>=6.10"]
 
 [project.scripts]
 lyrisync = "lyrisync.window:main"

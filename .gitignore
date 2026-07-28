@@ -2,6 +2,11 @@
 __pycache__/
 *.egg-info/
 dist/
+build/
+# Generated from packaging/appicon.svg by `make icon`, which `make app`
+# runs first — the SVG is the source, the .icns is an artefact.
+packaging/LyriSync.icns
+packaging/LyriSync.iconset/
 .pytest_cache/
 .DS_Store
 .lyrics_cache/
