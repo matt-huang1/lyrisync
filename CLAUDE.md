@@ -25,6 +25,8 @@ Decision log so far
 - One QMenu serves both the menu bar item and the window's right-click menu — two menus could drift apart, one cannot. Its structure is built once and never rebuilt; refresh only flips visibility, check marks and labels, so the native menu bar item never flickers. Checkable entries connect to triggered, not toggled: refresh calls setChecked on all of them.
 - The menu bar item is the way back from a hidden window, so quit must be visible in every state and hiding must leave the monitor, loop and any sync pass running.
 - QSettings location is injected into LyricsWindow, not global. QSettings.setDefaultFormat/setPath are process-wide and silently do nothing on macOS — trusting them meant tests writing into the real user's preferences.
+- Tests must never reach the real Spotify. Entering a sync pass dispatches a seek-to-0 and a resume, so the Qt tests stub PlayerCommandTask/SeekTask/SpeakTask as well as the monitor thread; otherwise running the suite restarts whatever the developer is listening to.
+- No test is macOS-only. Everything native is guarded off-cocoa in the code and asserted structurally, so the whole suite runs headless on the offscreen platform. CI must apt-get PySide6's system libraries (libegl1, libgl1, libxkbcommon-x11-0, ...) — the wheel imports fine without them and only fails at load with "libEGL.so.1: cannot open shared object file", which pytest.importorskip does NOT skip by default (it is an ImportError, not a ModuleNotFoundError).
 
 Parked
 - Album-art background

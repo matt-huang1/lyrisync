@@ -3,9 +3,15 @@ menu, the menu bar item, window visibility, and shutdown.
 
 Everything testable without Qt lives in the pure modules (menu.py,
 view_model.py, geometry.py) and is covered there. These fill the gap that
-cannot be made pure — signal wiring, QSettings round-trips, the tray — and
-skip wherever a QApplication cannot start, which includes CI, where no
-system Qt libraries are installed.
+cannot be made pure: signal wiring, QSettings round-trips, the tray.
+
+They run everywhere, on the offscreen platform — nothing here is
+macOS-only, because everything native (Cocoa collection behaviour, the
+activation policy) is guarded off-cocoa in the code under test and is
+asserted structurally rather than by calling into AppKit. CI installs the
+system libraries PySide6 needs; the import guard below only catches the
+case where that has gone wrong, so a broken runner degrades to a visible
+skip instead of a collection error.
 """
 
 import os
@@ -14,10 +20,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-pytest.importorskip("PySide6.QtWidgets", reason="PySide6 not installed")
+# exc_type=ImportError, not the default ModuleNotFoundError: PySide6 imports
+# fine with its shared libraries missing and fails later on "libEGL.so.1:
+# cannot open shared object file", which is an ImportError but not a
+# ModuleNotFoundError.
+pytest.importorskip(
+    "PySide6.QtWidgets",
+    reason="PySide6 unusable (missing system Qt libraries?)",
+    exc_type=ImportError,
+)
 
 from PySide6.QtCore import QSettings, QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 
 try:
     APP = QApplication.instance() or QApplication([])
@@ -37,9 +51,15 @@ KOREAN_SYNCED = TrackLyrics(synced=[(1.0, "안녕하세요"), (5.0, "잘 가")])
 
 
 @pytest.fixture(autouse=True)
-def no_real_polling(monkeypatch):
-    """A thread that runs and joins like the real one, but never shells out
-    to Spotify. stop() still ends it, so shutdown is exercised for real."""
+def no_spotify(monkeypatch):
+    """Nothing here may reach the real Spotify.
+
+    The polling thread runs and joins like the real one so shutdown is
+    exercised for real, but never shells out. The player commands matter
+    just as much: entering a sync pass dispatches a seek-to-0 and a resume,
+    and on a developer's Mac osascript would happily restart whatever they
+    were listening to — or launch Spotify to do it.
+    """
 
     def fake_run(self):
         self._monitor._running = True
@@ -47,6 +67,8 @@ def no_real_polling(monkeypatch):
             self.msleep(5)
 
     monkeypatch.setattr(w.MonitorThread, "run", fake_run)
+    for task in (w.PlayerCommandTask, w.SeekTask, w.SpeakTask):
+        monkeypatch.setattr(task, "run", lambda self: None)
 
 
 @pytest.fixture
@@ -122,11 +144,57 @@ def visible_keys(window):
 # -- one menu, two ways in ------------------------------------------------
 
 
-def test_menu_bar_and_right_click_are_literally_the_same_menu(make_window):
+@pytest.fixture
+def with_tray(monkeypatch):
+    """Force the menu bar item into existence.
+
+    The offscreen platform reports no system tray, so the real one would
+    never be built and the test would skip everywhere, testing nothing. A
+    QSystemTrayIcon still constructs and holds its menu here; what is being
+    checked is that _build_tray hands over the shared menu and a template
+    icon, not whether this platform can draw a menu bar.
+    """
+
+    class AlwaysAvailable(QSystemTrayIcon):
+        @staticmethod
+        def isSystemTrayAvailable():
+            return True
+
+    monkeypatch.setattr(w, "QSystemTrayIcon", AlwaysAvailable)
+
+
+def test_menu_bar_and_right_click_are_literally_the_same_menu(with_tray, make_window):
     window = make_window()
-    if window._tray is None:
-        pytest.skip("no system tray on this platform")
+    assert window._tray is not None
     assert window._tray.contextMenu() is window._menu
+
+
+def test_the_menu_bar_icon_is_a_template_image(with_tray, make_window):
+    """A mask icon is what macOS tints for light and dark menu bars; ship a
+    coloured one and it stays black on a dark menu bar."""
+    window = make_window()
+    icon = window._tray.icon()
+    assert not icon.isNull()
+    assert icon.isMask() is True
+
+
+def test_no_system_tray_is_survivable(monkeypatch, make_window):
+    """Nothing else may depend on the menu bar item existing. Forced rather
+    than relying on the platform, so the path is exercised wherever the
+    suite runs."""
+
+    class NeverAvailable(QSystemTrayIcon):
+        @staticmethod
+        def isSystemTrayAvailable():
+            return False
+
+    monkeypatch.setattr(w, "QSystemTrayIcon", NeverAvailable)
+    window = make_window()
+    assert window._tray is None
+    assert window._menu is not None
+    window._refresh_menu()
+    window._set_lyrics_visible(False)
+    assert window.isVisible() is False
 
 
 def test_the_menu_is_built_once_and_never_rebuilt(make_window):
