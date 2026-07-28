@@ -133,6 +133,19 @@ def _no_real_world():
 
     patch.setattr(login_item, "_main_app_service", guard_service)
 
+    # -- the developer's own keyboard -------------------------------------
+    # RegisterEventHotKey claims a combination system-wide for as long as
+    # the process lives, so a stray registration here takes ⇧⌘L away from
+    # whoever is running the suite — every window construction would do
+    # it, and nothing about it is scoped to a test. Every native call goes
+    # through _carbon, so blocking it is enough.
+    from lyrisync import hotkey
+
+    def guard_carbon():
+        raise _violation("Carbon — a test may not claim a system-wide hotkey")
+
+    patch.setattr(hotkey, "_carbon", guard_carbon)
+
     # -- the developer's own settings -------------------------------------
     # QSettings("lyrisync", "lyrisync") is the real ~/Library/Preferences
     # entry: the user's window position, size, opacity and every toggle.

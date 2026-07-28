@@ -61,6 +61,7 @@ from lyrisync.geometry import (
     text_gutter,
 )
 from lyrisync.gestures import opacity_step, scroll_step, wheel_action
+from lyrisync import hotkey
 from lyrisync.loop import LineLoop, LoopPhase
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
 from lyrisync.macspaces import (
@@ -657,6 +658,7 @@ class LyricsWindow(QWidget):
         self._restore_settings()
         self._build_menu()
         self._build_tray()
+        self._build_hotkey()
         self._apply_scale()
         QApplication.instance().aboutToQuit.connect(self._shutdown)
 
@@ -1543,6 +1545,28 @@ class LyricsWindow(QWidget):
         self._tray.setContextMenu(self._menu)
         self._tray.show()
 
+    def _build_hotkey(self) -> None:
+        """Claim the global show/hide combination.
+
+        Deliberately not shown on the menu entry it duplicates. A QAction
+        with a shortcut is a second thing that can fire it — Qt would own
+        one path and Carbon the other, and two mechanisms driving one
+        action is the drift this app keeps designing away. Worse, the
+        claim would not always be true: registration can be refused, and
+        macOS may hand a press to another app holding the same keys, so a
+        menu printing ⇧⌘L beside "Show lyrics" would be the login-item
+        failure again — an entry promising something that does not
+        happen. So the label stays as it was, the README says what the
+        keys are, and the log says whether they landed.
+        """
+        self._hotkey = hotkey.GlobalHotkey(
+            hotkey.TOGGLE_LYRICS, self._toggle_lyrics_visible
+        )
+        if not self._hotkey.register():
+            # Already logged with the reason. Nothing here depends on it:
+            # the menu bar item does the same job and always has.
+            logger.info("continuing without the global hotkey")
+
     def contextMenuEvent(self, event) -> None:
         self._refresh_menu()
         self._menu.exec(event.globalPos())
@@ -1560,6 +1584,18 @@ class LyricsWindow(QWidget):
             self._render()  # catch up with whatever happened while hidden
         self._settings.setValue("window/visible", visible)
         self._refresh_menu()
+
+    def _toggle_lyrics_visible(self) -> None:
+        """What the global hotkey does, and all it does.
+
+        It flips the same flag the menu entry writes and goes through the
+        same setter, so there is one piece of state and one place that
+        changes it — the tick matches the window whichever of the two was
+        used, without either having to know about the other. Runs on the
+        main thread: Carbon delivers the event through the Qt event loop
+        (see hotkey.py), so this is an ordinary UI call.
+        """
+        self._set_lyrics_visible(not self._lyrics_visible)
 
     def apply_saved_visibility(self) -> None:
         """Show the window at startup unless the user left it hidden. Used
@@ -1838,7 +1874,14 @@ class LyricsWindow(QWidget):
         (``say`` can hold a line for a minute) is logged and left to the
         thread pool's own destructor, which is where it was always going
         to be dealt with; blocking quit on it would be worse.
+
+        The global hotkey goes first, before anything is saved or joined.
+        It is the one thing here that can still call *in*: Carbon holds a
+        pointer to a callback that toggles this window, so releasing it
+        last would leave a keypress able to land in the middle of a
+        teardown.
         """
+        self._hotkey.unregister()
         self._save_settings()
         self._monitor_thread.stop()
         # Poll may be mid-osascript (up to its 2s timeout).

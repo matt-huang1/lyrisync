@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -240,7 +241,14 @@ class PlayerMonitor:
         self.on_state_change = on_state_change
         self._last: Optional[PlayerSnapshot] = None
         self._track_loss_pending = False
-        self._running = False
+        # Set by stop() and never cleared. A monitor is run once, and the
+        # flag this replaces was raised at the top of run() — so a stop()
+        # that landed in the gap between starting the thread and the thread
+        # body actually beginning was simply erased, and the loop polled on
+        # forever. That surfaced as "monitor thread did not stop in time"
+        # at shutdown, which is one bounded wait away from destroying a
+        # QThread that is still running.
+        self._stop = threading.Event()
 
     def poll_once(self) -> Optional[PlayerSnapshot]:
         """One poll cycle. Returns the snapshot, or None if the query
@@ -284,17 +292,20 @@ class PlayerMonitor:
             callback(snapshot)
 
     def run(self) -> None:
-        """Block and poll until ``stop()`` is called (or KeyboardInterrupt)."""
-        self._running = True
-        try:
-            while self._running:
-                started = time.monotonic()
-                self.poll_once()
-                remaining = self.poll_interval - (time.monotonic() - started)
-                if remaining > 0:
-                    time.sleep(remaining)
-        finally:
-            self._running = False
+        """Block and poll until ``stop()`` is called (or KeyboardInterrupt).
+
+        Returns immediately if ``stop()`` already happened: the request is
+        never overwritten from in here, which is the whole point of the
+        event.
+        """
+        while not self._stop.is_set():
+            started = time.monotonic()
+            self.poll_once()
+            remaining = self.poll_interval - (time.monotonic() - started)
+            if remaining > 0:
+                # Waited on rather than slept through, so stopping does not
+                # first sit out the rest of a poll interval.
+                self._stop.wait(remaining)
 
     def stop(self) -> None:
-        self._running = False
+        self._stop.set()

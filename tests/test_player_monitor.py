@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from lyrisync import player_monitor as pm
@@ -380,3 +382,41 @@ def test_transient_query_failure_keeps_state(monkeypatch):
     fake.output = batched_output()
     monitor.poll_once()
     assert recorder.names() == ["position"]
+
+
+# -- starting and stopping the poll loop ---------------------------------
+
+
+def test_a_stop_before_run_is_not_erased(monkeypatch):
+    """The race that made shutdown flaky.
+
+    ``stop()`` used to clear a flag that ``run()`` raised again on entry,
+    so a stop arriving in the gap between starting the thread and the
+    thread body beginning was lost and the loop polled on forever. In the
+    app that is "monitor thread did not stop in time", and one bounded
+    wait later, a QThread destroyed while still running — a qFatal that
+    takes the process with it.
+    """
+    fake = use_output(monkeypatch, batched_output())
+    monitor = pm.PlayerMonitor(poll_interval=0.01)
+
+    monitor.stop()
+    monitor.run()  # must return, not poll
+
+    assert fake.calls == 0
+
+
+def test_run_stops_when_asked(monkeypatch):
+    """And stops promptly: the remaining poll interval is waited on rather
+    than slept through, so quit does not first sit out a poll."""
+    use_output(monkeypatch, batched_output())
+    monitor = pm.PlayerMonitor(poll_interval=30.0)
+
+    def stop_after_first_poll(snapshot):
+        monitor.stop()
+
+    monitor.on_position_update = stop_after_first_poll
+
+    started = time.monotonic()
+    monitor.run()
+    assert time.monotonic() - started < 5.0  # not the 30s interval

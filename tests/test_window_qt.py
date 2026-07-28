@@ -41,6 +41,7 @@ try:
 except Exception as exc:  # pragma: no cover - platform plugin missing
     pytest.skip(f"Qt cannot start: {exc}", allow_module_level=True)
 
+from lyrisync import hotkey  # noqa: E402
 from lyrisync import login_item  # noqa: E402
 from lyrisync import menu as m  # noqa: E402
 from lyrisync import window as w  # noqa: E402
@@ -74,17 +75,30 @@ def no_real_world(monkeypatch):
     subprocess: unstubbed it answers True on a Mac and False on the Linux
     runner, so the speech paths would be covered locally and skipped in CI
     while both were green.
+
+    Carbon is answered rather than blocked. Every window built here
+    registers the global hotkey, and the conftest guard would fail all of
+    them for it; handing back None is the same branch a machine without
+    Carbon takes, so the real GlobalHotkey runs its real code and simply
+    finds nothing to claim. The tests that need a live registration fake
+    the door themselves.
     """
 
     def fake_run(self):
-        self._monitor._running = True
-        while self._monitor._running:
+        # Stops the way the real one does — by asking the monitor, never by
+        # raising a flag of its own. The stub used to set _running itself on
+        # entry, which meant a _shutdown() landing before the thread body
+        # started had its stop erased and the teardown waited 3s for a
+        # thread that would never come back. That race was the monitor's,
+        # not the stub's; the stub only has to keep sharing it.
+        while not self._monitor._stop.is_set():
             self.msleep(5)
 
     monkeypatch.setattr(w.MonitorThread, "run", fake_run)
     for task in (w.PlayerCommandTask, w.SeekTask, w.SpeakTask, w.FetchTask):
         monkeypatch.setattr(task, "run", lambda self: None)
     monkeypatch.setattr(w, "detect_voice", lambda: True)
+    monkeypatch.setattr(w.hotkey, "_carbon", lambda: None)
 
 
 @pytest.fixture
@@ -405,6 +419,199 @@ def test_visibility_survives_the_shutdown_save(make_window):
     window._shutdown()
     window._settings.sync()
     assert make_window()._lyrics_visible is False
+
+
+# -- the global hotkey ----------------------------------------------------
+
+
+def test_the_hotkey_toggles_the_window(make_window):
+    window = make_window()
+    window.apply_saved_visibility()
+    assert window.isVisible() is True
+
+    window._toggle_lyrics_visible()
+    APP.processEvents()
+    assert window.isVisible() is False
+
+    window._toggle_lyrics_visible()
+    APP.processEvents()
+    assert window.isVisible() is True
+
+
+def test_the_tick_matches_whichever_of_the_two_was_used(make_window):
+    """The requirement: one piece of state, two ways to reach it. A press
+    after a menu click, and a menu click after a press, both have to leave
+    the tick describing the window."""
+    window = make_window()
+    window.apply_saved_visibility()
+    show = window._menu_actions[m.SHOW_LYRICS]
+
+    for act in (
+        window._toggle_lyrics_visible,        # hotkey hides
+        show.trigger,                          # menu shows
+        window._toggle_lyrics_visible,        # hotkey hides again
+        window._toggle_lyrics_visible,        # hotkey shows
+        show.trigger,                          # menu hides
+    ):
+        act()
+        APP.processEvents()
+        assert show.isChecked() is window.isVisible()
+        assert show.isChecked() is window._lyrics_visible
+
+
+def test_the_hotkey_persists_the_same_setting_the_menu_does(make_window):
+    window = make_window()
+    window._toggle_lyrics_visible()
+    assert window._settings.value("window/visible", type=bool) is False
+    window._settings.sync()
+
+    assert make_window()._lyrics_visible is False
+
+
+def test_hiding_by_hotkey_leaves_everything_else_running(make_window):
+    """Same contract as the menu entry: the window goes, nothing else
+    does."""
+    window = make_window()
+    load(window, PLAIN)
+    window._begin_sync()
+    window._on_position_update(snapshot())
+    window._on_tap()
+    stamped = window._view_model.sync_session.index
+
+    window._toggle_lyrics_visible()
+    APP.processEvents()
+    assert window.isVisible() is False
+    assert window._monitor_thread.isRunning() is True
+    assert window._view_model.sync_session.index == stamped
+
+
+def test_showing_by_hotkey_catches_up_with_the_song(make_window):
+    window = make_window()
+    load(window, SYNCED)
+    window._toggle_lyrics_visible()  # hidden
+
+    window._on_position_update(
+        PlayerSnapshot(
+            state=PlaybackState.PLAYING,
+            track_id="t1",
+            title="Song",
+            artist="Artist",
+            duration_ms=200000,
+            position_seconds=6.0,
+        )
+    )
+    window._toggle_lyrics_visible()  # back
+    APP.processEvents()
+    assert window.isVisible() is True
+    assert window._current.text() == "two"
+
+
+def test_the_window_asks_for_the_one_documented_combination(make_window):
+    window = make_window()
+    assert window._hotkey.combination is hotkey.TOGGLE_LYRICS
+
+
+def test_a_refused_hotkey_leaves_the_app_fully_working(make_window, caplog):
+    """Registration fails here for real — the fixture hands back no Carbon
+    — so this is the "another app owns it" path. Everything the hotkey
+    would have done is still reachable from the menu."""
+    with caplog.at_level(logging.INFO, logger="lyrisync.window"):
+        window = make_window()
+    assert window._hotkey.registered is False
+    assert "continuing without the global hotkey" in caplog.text
+
+    window._menu_actions[m.SHOW_LYRICS].trigger()
+    APP.processEvents()
+    assert window.isVisible() is False
+
+
+def test_the_menu_entry_never_advertises_the_combination(make_window):
+    """Two mechanisms firing one action is the drift this app designs
+    away, and a label printing ⇧⌘L while another app holds it would be a
+    menu claiming something untrue. Qt's shortcut is deliberately unset."""
+    window = make_window()
+    show = window._menu_actions[m.SHOW_LYRICS]
+    assert show.shortcut().isEmpty()
+    assert "⌘" not in show.text()
+
+
+class RecordingCarbon:
+    """The far side of hotkey._carbon, so the window's registration and
+    release can be watched without claiming anything real."""
+
+    def __init__(self):
+        self.registered = 0
+        self.released = 0
+        self.handler = None
+
+    def GetApplicationEventTarget(self):
+        return 0xEE
+
+    def InstallEventHandler(self, target, callback, count, types, user_data, out):
+        self.handler = callback
+        out.contents.value = 0xA1
+        return 0
+
+    def RemoveEventHandler(self, ref):
+        return 0
+
+    def RegisterEventHotKey(self, key_code, modifiers, hotkey_id, target, options, out):
+        self.registered += 1
+        out.contents.value = 0xB2
+        return 0
+
+    def UnregisterEventHotKey(self, ref):
+        self.released += 1
+        return 0
+
+    def press(self):
+        self.handler(None, None, None)
+
+
+@pytest.fixture
+def carbon(monkeypatch):
+    lib = RecordingCarbon()
+    monkeypatch.setattr(w.hotkey, "_carbon", lambda: lib)
+    return lib
+
+
+def test_the_window_registers_on_startup(carbon, make_window):
+    window = make_window()
+    assert carbon.registered == 1
+    assert window._hotkey.registered is True
+
+
+def test_a_real_press_toggles_the_window(carbon, make_window):
+    """End to end on this side of the framework: the callback Carbon was
+    handed is the one that hides the lyrics."""
+    window = make_window()
+    window.apply_saved_visibility()
+    assert window.isVisible() is True
+
+    carbon.press()
+    APP.processEvents()
+    assert window.isVisible() is False
+    assert window._menu_actions[m.SHOW_LYRICS].isChecked() is False
+
+
+def test_shutdown_leaves_no_registration_behind(carbon, make_window):
+    """A stale registration after quit is a bug: it would keep swallowing
+    the combination from every other app until the process died."""
+    window = make_window()
+    assert carbon.released == 0
+
+    window._shutdown()
+    assert carbon.released == 1
+    assert window._hotkey.registered is False
+
+
+def test_reaching_shutdown_twice_releases_it_once(carbon, make_window):
+    """Quit from the menu bar runs _shutdown, and so does aboutToQuit
+    behind it; the fixture then runs it a third time on teardown."""
+    window = make_window()
+    window._shutdown()
+    window._shutdown()
+    assert carbon.released == 1
 
 
 # -- quit -----------------------------------------------------------------

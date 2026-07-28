@@ -15,6 +15,7 @@ import threading
 
 import pytest
 
+from lyrisync import hotkey
 from lyrisync import lyrics_provider as lp
 from lyrisync import player_monitor as pm
 from lyrisync import speech
@@ -105,6 +106,18 @@ def test_an_injected_provider_is_fine(escapes, tmp_path):
     )
     assert provider.cache_dir == tmp_path / "cache"
     assert escapes.drain() == []
+
+
+def test_a_test_cannot_claim_a_system_wide_hotkey(escapes):
+    """RegisterEventHotKey takes the combination from every other app for
+    as long as the process lives — including the developer's, mid-run. The
+    escape is recorded rather than raised out, because register() catches
+    broad exceptions by design: a hotkey it cannot have is a logged fact,
+    not a crash, so an exception alone would be swallowed here too."""
+    hk = hotkey.GlobalHotkey(hotkey.TOGGLE_LYRICS, lambda: None)
+    assert hk.register() is False
+    assert hk.registered is False
+    assert any("hotkey" in e for e in escapes.drain())
 
 
 def test_the_real_preferences_file_cannot_be_opened(escapes):
