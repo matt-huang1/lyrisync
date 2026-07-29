@@ -231,6 +231,13 @@ def read_snapshot() -> PlayerSnapshot:
 
 SnapshotCallback = Callable[[PlayerSnapshot], None]
 
+# How often the player is asked where it is. Named rather than left as a
+# default argument because the window reasons about it too: its predicted
+# line swap is allowed to run ahead of the player by the choreography plus
+# one of these, since the position that proves the prediction right cannot
+# arrive any sooner than the next poll.
+POLL_INTERVAL_SECONDS = 0.3
+
 
 class PlayerMonitor:
     """Polls Spotify and fires callbacks when things change.
@@ -247,7 +254,7 @@ class PlayerMonitor:
 
     def __init__(
         self,
-        poll_interval: float = 0.3,
+        poll_interval: float = POLL_INTERVAL_SECONDS,
         on_track_change: Optional[SnapshotCallback] = None,
         on_position_update: Optional[SnapshotCallback] = None,
         on_state_change: Optional[SnapshotCallback] = None,

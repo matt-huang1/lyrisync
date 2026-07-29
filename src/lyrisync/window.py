@@ -101,6 +101,7 @@ from lyrisync.menu import (
     visible_entries,
 )
 from lyrisync.player_monitor import (
+    POLL_INTERVAL_SECONDS,
     PlaybackState,
     PlayerMonitor,
     PlayerSnapshot,
@@ -124,6 +125,7 @@ from lyrisync.symbols import (
     icon_size,
     symbol_icon,
 )
+from lyrisync.transition import LineTransition
 from lyrisync.typography import (
     BOTTOM_MARGIN,
     CONTEXT,
@@ -201,6 +203,14 @@ def _qcolor(colour: appearance.RGBA) -> QColor:
 _FADE_MS = 260
 _SWAP_LEAD_MS = _FADE_MS
 _FADE_OUT_LEAD_MS = 2 * _FADE_MS
+
+# How far ahead of a line's timestamp the screen is allowed to be. The
+# predicted swap puts the next line up a whole phase early on purpose, so
+# the display and the view model disagreeing by one line is a state this
+# window asked for — but only until the player is further away than the
+# choreography can account for, and the position that would confirm it
+# cannot arrive before the next poll.
+_PREDICTION_LEAD_SECONDS = _FADE_OUT_LEAD_MS / 1000 + POLL_INTERVAL_SECONDS
 
 # The album-colour cross-fade. Slower than the line fade on purpose: that
 # one has to finish before a lyric is due, this one is scenery and a
@@ -665,6 +675,10 @@ class LyricsWindow(QWidget):
         self._tint_mix = 1.0
         self._tint_from = self._background_for(None)
         self._tint_to = self._tint_from
+        # The hairline rides the same mix: it is the same tint arriving,
+        # and two fades of the same thing could only drift apart.
+        self._border_from = self._border_for(None)
+        self._border_to = self._border_from
         self._tint_anim: Optional[QVariantAnimation] = None
         self._family_stack = font_stack(
             QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
@@ -678,6 +692,10 @@ class LyricsWindow(QWidget):
         # per transition from the gap to the next line; the nominal value
         # until a schedule says otherwise.
         self._transition_ms = _FADE_MS
+        # Which line change is in flight. The choreography outlasts the
+        # poll interval, so a poll almost always lands inside one: this is
+        # what stops that poll starting the same change over again.
+        self._transition = LineTransition(_PREDICTION_LEAD_SECONDS)
 
         # WindowDoesNotAcceptFocus + WA_ShowWithoutActivating: an overlay
         # must never activate the app or steal focus — all interaction here
@@ -905,11 +923,13 @@ class LyricsWindow(QWidget):
         if timeline is None:
             return
         lines, index = timeline
-        if self._displayed_index != index:
+        position = snapshot.position_seconds
+        if self._displayed_index != index and not self._predicted_ahead(
+            lines, index, position
+        ):
             # Seek, pause-drift correction, or a missed prediction: snap.
             self._render()
 
-        position = snapshot.position_seconds
         playing = snapshot.state is PlaybackState.PLAYING
         if self._loop.engaged:
             if not self._loop.still_valid(position):
@@ -1184,16 +1204,46 @@ class LyricsWindow(QWidget):
 
     # -- anticipatory line fade --------------------------------------------
 
+    def _predicted_ahead(
+        self, lines: list, index: int, position_seconds: Optional[float]
+    ) -> bool:
+        """Whether the screen being one line ahead of the view model is this
+        window's own doing.
+
+        The predicted swap runs a phase before the line's timestamp, so for
+        most of that phase — and the poll interval it takes the player to
+        catch up — the two legitimately disagree. Read as a missed
+        prediction instead, it snapped the display back to the previous
+        line and let the next poll play the whole change again: the same
+        line change, twice, which is what this bug looked like.
+
+        Only ever one line, only the line this transition owns, and only
+        while the player is still close enough to it for the choreography
+        to explain the gap. Anything else is the world having moved.
+        """
+        target = index + 1
+        if position_seconds is None or self._displayed_index != target:
+            return False
+        if target >= len(lines):
+            return False
+        return self._transition.leads(target, lines[target][0], position_seconds)
+
     def _schedule_line_advance(
         self, lines: list, index: int, position_seconds: float
     ) -> None:
         """(Re)arm the fade-out/swap timers from the next line's timestamp.
         Rescheduled on every poll, so seeks correct the timing within one
-        poll interval."""
+        poll interval — but only until the movement to that line has begun.
+        Past that point the schedule is settled: re-arming it from a poll
+        that landed mid-choreography is what made one line change play
+        twice, the second time in a hurry, because the eta it re-derived
+        was the remainder rather than the gap."""
         upcoming = index + 1
         if upcoming >= len(lines):
             self._fadeout_timer.stop()
             self._swap_timer.stop()
+            return
+        if not self._transition.may_arm(upcoming):
             return
         eta_ms = int((lines[upcoming][0] - position_seconds) * 1000)
         if eta_ms <= 0:
@@ -1217,11 +1267,22 @@ class LyricsWindow(QWidget):
         the outgoing is fastest exactly where the incoming picks up, and
         velocity is continuous across the swap — which is what makes two
         phases read as one movement.
+
+        This is also where a line change is claimed: the movement starting
+        is the moment the transition becomes one thing that is happening
+        rather than one thing that is scheduled. A second trigger for the
+        same line — a re-armed timer, a poll that arrived mid-flight — is
+        refused here and changes nothing.
         """
-        if self._view_model.timeline() is None or self._card_active():
+        timeline = self._view_model.timeline()
+        if timeline is None or self._card_active():
             return
-        if self._last_state is PlaybackState.PLAYING:
-            self._animate_line(-1.0, QEasingCurve.Type.InSine)
+        if self._last_state is not PlaybackState.PLAYING:
+            return
+        lines, index = timeline
+        if index + 1 >= len(lines) or not self._transition.begin(index + 1):
+            return
+        self._animate_line(-1.0, QEasingCurve.Type.InSine)
 
     def _predicted_swap(self) -> None:
         timeline = self._view_model.timeline()
@@ -1237,6 +1298,12 @@ class LyricsWindow(QWidget):
             return
         self._set_lines(lines, target)
         self._displayed_index = target
+        # The fade-out claimed this line a phase ago; claiming it again is
+        # a no-op. It matters for the one case where that phase never ran
+        # (the title card was still up when its timer fired), so that the
+        # display being a line ahead of the player is recognisably ours
+        # either way.
+        self._transition.begin(target)
         # The new line starts below and rises into place, eased OUT so it
         # decelerates onto its mark. The schedule is unchanged and still
         # authoritative: this animation ENDS at the line's timestamp, so
@@ -1261,9 +1328,12 @@ class LyricsWindow(QWidget):
         — a seek, a pause, a loop wrap, entering sync mode, a track change,
         any render at all — comes through here, so no animation can outlive
         the situation it was describing or leave a line parked off its
-        mark."""
+        mark. Nothing is in flight afterwards, which is what lets the next
+        poll schedule a fresh transition to the very line this one was
+        abandoning."""
         self._fadeout_timer.stop()
         self._swap_timer.stop()
+        self._transition.clear()
         if self._fade_anim is not None:
             self._fade_anim.stop()
             self._fade_anim = None
@@ -1406,12 +1476,29 @@ class LyricsWindow(QWidget):
         palette = appearance.tinted(self._palette, tint_rgb, self._appearance)
         return palette.scrim if self._material is not None else palette.solid
 
+    def _border_for(self, tint_rgb) -> appearance.RGBA:
+        """The hairline for this cover colour.
+
+        Where the album is actually felt. The panel's own luminance is
+        pinned by the contrast floor and has almost no room left for
+        colour — least of all in light mode, where the pale panel is close
+        enough to white that a saturated hue would have to darken it to
+        show at all. Nothing is read against the hairline, so nothing
+        stops it taking the hue properly.
+        """
+        return appearance.tinted(self._palette, tint_rgb, self._appearance).border
+
     def _current_background(self) -> appearance.RGBA:
         """What is on screen right now, mid-fade included."""
         return appearance.blend(self._tint_from, self._tint_to, self._tint_mix)
 
+    def _current_border(self) -> appearance.RGBA:
+        """The hairline on screen right now — the same mix, so the edge and
+        the panel arrive together."""
+        return appearance.blend(self._border_from, self._border_to, self._tint_mix)
+
     def _set_tint(self, tint_rgb, animate: bool = True) -> None:
-        """Cross-fade the panel to a new cover colour.
+        """Cross-fade the panel and its edge to a new cover colour.
 
         The fade starts from whatever is on screen rather than from the
         previous target, so a track changed halfway through the last fade
@@ -1422,15 +1509,19 @@ class LyricsWindow(QWidget):
         self._tint_rgb = tint_rgb
         start = self._current_background()
         end = self._background_for(tint_rgb)
+        edge_start = self._current_border()
+        edge_end = self._border_for(tint_rgb)
         if self._tint_anim is not None:
             self._tint_anim.stop()
             self._tint_anim = None
-        if start == end or not animate:
+        if (start, edge_start) == (end, edge_end) or not animate:
             self._tint_from = self._tint_to = end
+            self._border_from = self._border_to = edge_end
             self._tint_mix = 1.0
             self.update()
             return
         self._tint_from, self._tint_to, self._tint_mix = start, end, 0.0
+        self._border_from, self._border_to = edge_start, edge_end
         animation = QVariantAnimation(self)
         animation.setDuration(_TINT_FADE_MS)
         animation.setStartValue(0.0)
@@ -1444,7 +1535,7 @@ class LyricsWindow(QWidget):
         self.update()
 
     def _resnap_tint(self) -> None:
-        """Recompute the painted background without a fade.
+        """Recompute the painted background and edge without a fade.
 
         For the two things that change what a tint LOOKS like rather than
         which tint it is: the system appearance flipping, and the material
@@ -1454,6 +1545,7 @@ class LyricsWindow(QWidget):
             self._tint_anim.stop()
             self._tint_anim = None
         self._tint_from = self._tint_to = self._background_for(self._tint_rgb)
+        self._border_from = self._border_to = self._border_for(self._tint_rgb)
         self._tint_mix = 1.0
         self.update()
 
@@ -1505,6 +1597,10 @@ class LyricsWindow(QWidget):
         boundary — straddling would put half the stroke outside the
         material's mask and read as a second, softer edge beside the
         first.
+
+        Both come from the tint state rather than from the palette
+        directly, because both carry the album's hue and both have to
+        arrive on the same cross-fade.
         """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1516,7 +1612,7 @@ class LyricsWindow(QWidget):
 
         width = 1.0 / max(1.0, self.devicePixelRatioF())
         inset = width / 2
-        pen = QPen(_qcolor(self._palette.border))
+        pen = QPen(_qcolor(self._current_border()))
         pen.setWidthF(width)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)

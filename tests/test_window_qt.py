@@ -176,7 +176,9 @@ def test_the_window_writes_only_where_it_is_told(make_window, tmp_path):
     assert (tmp_path / "lyrisync-test.ini").exists()
 
 
-def snapshot(track_id="t1", title="Song", state=PlaybackState.PLAYING):
+def snapshot(
+    track_id="t1", title="Song", state=PlaybackState.PLAYING, position=0.0
+):
     return PlayerSnapshot(
         state=state,
         track_id=track_id,
@@ -184,7 +186,7 @@ def snapshot(track_id="t1", title="Song", state=PlaybackState.PLAYING):
         artist="Artist",
         album="Album",
         duration_ms=200000,
-        position_seconds=0.0,
+        position_seconds=position,
     )
 
 
@@ -845,6 +847,132 @@ def test_a_cancelled_schedule_leaves_no_timers_armed(make_window):
     assert window._current_fx.progress == 0.0
 
 
+# -- one line change plays once -------------------------------------------
+
+
+def expire(timer, fire):
+    """What Qt does when a single-shot timer runs out: it stops, and then
+    the slot runs. Driven by hand because the choreography is measured in
+    hundreds of milliseconds and a test that waited them out would be slow
+    and racy, while what is being checked here is purely the order events
+    arrive in."""
+    timer.stop()
+    fire()
+
+
+def record_lines(window):
+    """Every index the window puts on screen, in order. A line change that
+    plays twice shows up as [1, 0, 1] where it should read [1]."""
+    shown = []
+    original = window._set_lines
+
+    def spy(lines, index):
+        shown.append(index)
+        original(lines, index)
+
+    window._set_lines = spy
+    return shown
+
+
+def test_a_repeated_trigger_for_the_same_line_does_not_restart_it(make_window):
+    """The identity dedupe, on the path a re-armed timer takes. A second
+    fade-out for a line already leaving must not start the movement over
+    from wherever it had got to."""
+    window = synced_window(make_window)
+    window._on_position_update(snapshot(position=1.5))
+    window._begin_fade_out()
+    animation = window._fade_anim
+    assert animation is not None
+    animation.setCurrentTime(animation.duration() // 2)
+    half = animation.currentTime()
+
+    window._begin_fade_out()
+    window._begin_fade_out()
+
+    assert window._fade_anim is animation, "the animation was replaced"
+    assert window._fade_anim.currentTime() == half, "the movement restarted"
+
+
+def test_a_poll_landing_mid_change_does_not_play_it_again(make_window):
+    """The bug. One line change is 520ms and a poll arrives every 300ms,
+    so a poll lands inside almost every change. It used to re-arm the
+    timers from what was left of the gap AND snap the display back to the
+    line being left — so the same change played a second time, faster,
+    right on top of itself."""
+    window = synced_window(make_window)
+    window._on_position_update(snapshot(position=1.5))
+    shown = record_lines(window)
+
+    expire(window._fadeout_timer, window._begin_fade_out)
+    expire(window._swap_timer, window._predicted_swap)
+    assert shown == [1]
+
+    # Polls between the swap and the line's own timestamp, which is where
+    # the poll interval puts them nearly every time.
+    for position in (4.8, 4.9, 4.95):
+        window._on_position_update(snapshot(position=position))
+
+    assert shown == [1], "the line change played again"
+    assert window._current.text() == "two"
+    assert not window._fadeout_timer.isActive()
+    assert not window._swap_timer.isActive()
+
+
+def test_the_player_catching_up_is_not_a_second_change(make_window):
+    """The position finally crosses the timestamp and the view model
+    agrees with the screen. Nothing should move: the change already
+    happened."""
+    window = synced_window(make_window)
+    window._on_position_update(snapshot(position=1.5))
+    shown = record_lines(window)
+    expire(window._fadeout_timer, window._begin_fade_out)
+    expire(window._swap_timer, window._predicted_swap)
+    window._fade_anim.setCurrentTime(window._fade_anim.duration())  # it lands
+    APP.processEvents()
+
+    window._on_position_update(snapshot(position=5.1))
+
+    assert shown == [1]
+    assert window._displayed_index == 1
+    assert window._current_fx.progress == 0.0  # still on its mark, not moving
+
+
+def test_the_line_after_it_is_still_scheduled_normally(make_window):
+    """Dedupe by target, not a latch: the change to the next line is a
+    different change and arms as usual."""
+    window = make_window()
+    load(window, TrackLyrics(synced=[(1.0, "one"), (5.0, "two"), (9.0, "three")]))
+    window._last_state = PlaybackState.PLAYING
+    window._on_position_update(snapshot(position=1.5))
+    expire(window._fadeout_timer, window._begin_fade_out)
+    expire(window._swap_timer, window._predicted_swap)
+
+    window._on_position_update(snapshot(position=5.1))
+
+    assert window._swap_timer.isActive()
+    assert window._transition.may_arm(2)
+    window._begin_fade_out()
+    assert window._transition.target == 2
+
+
+def test_a_seek_back_into_the_current_line_still_snaps(make_window):
+    """The bound on being ahead. Once the player is further from the line
+    than the choreography can explain, the screen showing it is not a
+    prediction any more — it is wrong, and snapping is the whole point of
+    that check."""
+    window = synced_window(make_window)
+    window._on_position_update(snapshot(position=4.5))
+    expire(window._fadeout_timer, window._begin_fade_out)
+    expire(window._swap_timer, window._predicted_swap)
+    assert window._current.text() == "two"
+
+    window._on_position_update(snapshot(position=1.2))  # seek, backwards
+
+    assert window._displayed_index == 0
+    assert window._current.text() == "one"
+    assert window._swap_timer.isActive()  # and the change is scheduled afresh
+
+
 def test_the_effect_reserves_room_for_the_travel(make_window):
     """Without this the moving block is clipped to its own box and reads
     as dissolving at the edge instead of leaving."""
@@ -868,15 +996,102 @@ def test_both_palettes_carry_a_hairline(make_window):
         assert 0 < palette.border[3] < 64, "a hairline, not a border"
 
 
-def test_the_hairline_is_never_tinted_by_the_album(make_window):
-    """A coloured edge reads as a border; this one is meant to read as an
-    edge."""
-    for palette, appearance in (
-        (ap.DARK, ap.Appearance.DARK),
-        (ap.LIGHT, ap.Appearance.LIGHT),
-    ):
-        tinted = ap.tinted(palette, (200, 40, 40), appearance)
-        assert tinted.border == palette.border
+def test_the_hairline_is_where_the_album_colour_goes(make_window):
+    """SUPERSEDES "a coloured hairline reads as a border". The panel's
+    luminance is pinned by the contrast floor and has no gamut left to
+    spend, least of all in light mode; the edge has no text on it and can
+    take the hue properly. What is checked here is the wiring — that the
+    window paints the tinted edge rather than the palette's own — with
+    the derivation itself measured in test_scrim.py."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    assert window._current_border() == ap.DARK.border  # untinted until a cover
+
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+
+    expected = ap.tinted(ap.DARK, RED_COVER, ap.Appearance.DARK).border
+    assert window._current_border() == expected
+    assert window._current_border() != ap.DARK.border
+
+
+def test_the_painted_edge_is_the_tinted_one(make_window):
+    """From the pixels paintEvent produced, not from the colour it was
+    asked for: the top row of the grab is the hairline over the fill, and
+    it has to be the album's hue rather than the palette's neutral edge.
+    grab() does not apply a QGraphicsEffect, but paintEvent is exactly
+    what it does run."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    middle = window.width() // 2
+    neutral = window.grab().toImage().pixelColor(middle, 0)
+    assert neutral.red() == neutral.green()  # a grey edge over a grey fill
+
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+
+    edge = window.grab().toImage().pixelColor(middle, 0)
+    fill = window.grab().toImage().pixelColor(middle, 4)
+    assert edge.red() > edge.green() and edge.red() > edge.blue(), "not red at all"
+    assert edge.red() - min(edge.green(), edge.blue()) > 3 * (
+        fill.red() - min(fill.green(), fill.blue())
+    ), "the edge is carrying no more colour than the panel"
+
+
+def test_the_edge_and_the_panel_arrive_together(make_window):
+    """One cross-fade drives both. Two fades of the same tint could only
+    drift apart, and an edge that changed colour before its panel would
+    read as a flicker at the rim."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._on_artwork_ready("t1", RED_COVER)
+
+    assert window._current_border() == ap.DARK.border  # still where it began
+    window._tint_anim.setCurrentTime(w._TINT_FADE_MS // 2)
+    APP.processEvents()
+    assert window._current_border() not in (
+        ap.DARK.border,
+        ap.tinted(ap.DARK, RED_COVER, ap.Appearance.DARK).border,
+    )
+
+    settle_tint(window)
+    assert window._current_border() == ap.tinted(
+        ap.DARK, RED_COVER, ap.Appearance.DARK
+    ).border
+
+
+def test_switching_the_layer_off_restores_the_plain_edge(make_window):
+    """The layers principle reaches the rim too: off is the app before
+    this existed, to the byte."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+    assert window._current_border() != ap.DARK.border
+
+    window._set_album_colour(False)
+    settle_tint(window)
+    assert window._current_border() == ap.DARK.border
+
+
+def test_the_edge_is_re_derived_for_the_new_appearance(make_window):
+    """The two modes want different lightnesses for the same hue — the
+    edge has to stay lighter than a dark panel and darker than a pale
+    one — so a switch cannot carry the old colour across."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+
+    set_scheme(Qt.ColorScheme.Light)
+    assert window._current_border() == ap.tinted(
+        ap.LIGHT, RED_COVER, ap.Appearance.LIGHT
+    ).border
 
 
 def test_the_shadow_is_guarded_off_cocoa(make_window):

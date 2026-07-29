@@ -75,9 +75,9 @@ class Palette:
     # The hairline around the panel, drawn one device pixel wide just
     # inside the fill. What separates a pane of glass from a rectangle:
     # light at low alpha over the dark panel, dark at low alpha over the
-    # pale one, the way macOS edges its own HUD surfaces. Deliberately
-    # NOT tinted with the album colour — a coloured hairline reads as a
-    # border, and this one is meant to read as an edge.
+    # pale one, the way macOS edges its own HUD surfaces. This is the
+    # untinted one; with a cover in hand it carries the album's hue, and
+    # carries it far harder than the panel can (see BORDER_CHROMA).
     border: RGBA
 
     # Text, in the order it appears down the window.
@@ -258,10 +258,66 @@ TINT_CHROMA = {
 }
 
 
+# -- the hairline, where contrast is not at stake -------------------------
+
+# The panel has no room left for colour and that is not a tuning failure:
+# its luminance is pinned by the 4.5:1 promise, and at the light panel's
+# 0.93 the hues that carry little luminance of their own are nearly white
+# already. Buying their colour costs brightness the floor will not give
+# up. So the colour moves to the one part of the window where the floor
+# has no opinion at all — nothing is read against the hairline, and
+# nothing is read against the shadow either.
+#
+# Freed of the luminance pin, the hairline can pin HSL LIGHTNESS instead,
+# and that is worth more than it sounds: at a fixed lightness the chroma
+# of a colour is exactly saturation x (1 - |2L - 1|) and does not depend
+# on the hue at all. The panel's chroma has to be bisected for, hue by
+# hue, and still lands anywhere from 4.7 to 14. The hairline's is the
+# same number for all 360 of them, by construction — the uniformity the
+# panel could never have.
+#
+# Stated the same way as the panel's, as the chroma the hairline colour
+# contributes to the finished edge once its own alpha has diluted it, so
+# the two numbers can be compared: this is roughly 3.5x what the panel
+# carries in dark mode and 4x in light.
+BORDER_CHROMA = 46.0
+
+# Lightness and alpha per mode, and these are the numbers that keep the
+# hairline an EDGE rather than just a coloured line: the tinted edge has
+# to stay lighter than the dark panel and darker than the pale one, for
+# every hue, over the backdrop that suits each mode least. That is what
+# fixes the two lightnesses — the constraint binds on blue in dark mode
+# and on yellow in light mode, the hues furthest from their panel in
+# luminance, and it is measured in tests/test_scrim.py rather than
+# assumed.
+BORDER_LIGHTNESS = {Appearance.DARK: 0.72, Appearance.LIGHT: 0.30}
+BORDER_ALPHA = {Appearance.DARK: 110, Appearance.LIGHT: 105}
+
+
 def chroma_of(rgb) -> int:
     """The spread between a colour's strongest and weakest channel — how
     much colour it carries, in the unit the tint is specified in."""
     return max(rgb[:3]) - min(rgb[:3])
+
+
+def tinted_border(hue: float, appearance: Appearance) -> RGBA:
+    """The hairline in the album's hue.
+
+    No bisection here, unlike the panel: with the lightness pinned the
+    chroma of an HSL colour is exactly ``saturation x (1 - |2L - 1|)``, so
+    the saturation that delivers what was asked for is arithmetic. The
+    closed form is only untrustworthy when something else is being held
+    (the panel holds luminance, which moves the lightness per hue and
+    makes the same formula answer a different question).
+    """
+    lightness = BORDER_LIGHTNESS[appearance]
+    alpha = BORDER_ALPHA[appearance]
+    # The chroma is asked for on the finished edge, so the colour itself
+    # has to carry more of it the more transparent it is — the same
+    # convention the panel's tint uses.
+    wanted = BORDER_CHROMA / (alpha / 255) / 255
+    saturation = min(1.0, wanted / (1 - abs(2 * lightness - 1)))
+    return (*hsl_to_rgb(hue, saturation, lightness), alpha)
 
 
 def _at_chroma(hue: float, target: float, luminance: float):
@@ -395,10 +451,13 @@ def usable_hue(artwork_rgb) -> Optional[float]:
 def tinted(palette: Palette, artwork_rgb, appearance: Appearance) -> Palette:
     """``palette`` recoloured towards the artwork's hue.
 
-    Only the two backgrounds move. Text keeps every value 12a measured,
-    which is what lets the contrast floor be re-checked rather than
-    re-derived: the thing behind the words changes hue at exactly the same
-    luminance, and the words do not change at all.
+    The two backgrounds move, at their own luminance, by a few units of
+    chroma. The hairline moves properly: it is the one surface with no
+    contrast obligation, so it takes the hue at four times the strength
+    and is where the album is actually felt. Text keeps every value 12a
+    measured, which is what lets the contrast floor be re-checked rather
+    than re-derived: the thing behind the words changes hue at exactly the
+    same luminance, and the words do not change at all.
 
     An unusable artwork colour returns the palette unchanged — the same
     object, so "no tint" and "tinting off" are indistinguishable
@@ -420,7 +479,12 @@ def tinted(palette: Palette, artwork_rgb, appearance: Appearance) -> Palette:
         )
         return (red, green, blue, colour[3])
 
-    return replace(palette, scrim=recolour(palette.scrim), solid=recolour(palette.solid))
+    return replace(
+        palette,
+        scrim=recolour(palette.scrim),
+        solid=recolour(palette.solid),
+        border=tinted_border(hue, appearance),
+    )
 
 
 def blend(first: RGBA, second: RGBA, mix: float) -> RGBA:

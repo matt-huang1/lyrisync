@@ -276,14 +276,18 @@ def test_an_unusable_cover_leaves_the_palette_untouched(palette, appearance):
     "palette,appearance", ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
     ids=("dark", "light"),
 )
-def test_a_tint_moves_the_background_and_nothing_else(palette, appearance):
+def test_a_tint_moves_the_backgrounds_and_the_edge_and_nothing_else(
+    palette, appearance
+):
     """Text keeps every value 12a measured. That is what lets the floor be
-    re-checked above rather than re-derived from scratch."""
+    re-checked above rather than re-derived from scratch — and it is why
+    the hairline joining the tint costs nothing: no text is read against
+    it."""
     tinted = ap.tinted(palette, (200, 40, 40), appearance)
     moved = {
         name for name, value in vars(tinted).items() if value != getattr(palette, name)
     }
-    assert moved <= {"scrim", "solid"}
+    assert moved <= {"scrim", "solid", "border"}
     assert moved, "the tint did nothing at all"
 
 
@@ -413,6 +417,128 @@ def test_light_mode_carries_less_colour_and_that_is_the_gamut_not_a_bug():
     assert max(light) < max(dark)
     # Still worth far more than the 1.6-2.1 that shipped in 13.0.
     assert max(light) > 8
+
+
+# -- the hairline, where the colour actually went --------------------------
+
+# The backdrop that suits each mode least — the one the panel is closest
+# to the edge's own lightness over, and therefore where an edge is hardest
+# to keep on the right side of its panel.
+WORST_PAGE = {ap.Appearance.DARK: WHITE, ap.Appearance.LIGHT: BLACK}
+
+APPEARANCES = pytest.mark.parametrize(
+    "palette,appearance",
+    ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
+    ids=("dark", "light"),
+)
+
+
+def flatten(top, bottom):
+    """A straight-alpha colour painted over an opaque one."""
+    colour, _ = over(top[:3], top[3] / 255, bottom)
+    return colour
+
+
+def panel_and_edge(palette, appearance, artwork):
+    """What the eye gets: the panel over the worst backdrop for this mode,
+    with no material contributing, and the hairline over that."""
+    tinted = ap.tinted(palette, artwork, appearance)
+    panel = flatten(tinted.scrim, WORST_PAGE[appearance])
+    return panel, flatten(tinted.border, panel)
+
+
+@APPEARANCES
+def test_the_hairline_carries_far_more_colour_than_the_panel(palette, appearance):
+    """The point of the whole change. The panel's luminance is pinned by
+    the 4.5:1 promise and has almost nothing left to spend on colour; the
+    hairline has no such obligation, so that is where the album goes."""
+    for hue in range(0, 360, 15):
+        artwork = ap.hsl_to_rgb(hue, 1.0, 0.5)
+        tinted = ap.tinted(palette, artwork, appearance)
+        assert panel_chroma(tinted.border) > 3 * panel_chroma(tinted.scrim), (
+            f"hue {hue}: the edge is not carrying the colour"
+        )
+
+
+def test_the_hairline_carries_the_same_colour_whatever_the_hue():
+    """What pinning LIGHTNESS buys, and the panel can never have: at a
+    fixed lightness an HSL colour's chroma is exactly saturation x
+    (1 - |2L - 1|), with no hue term at all. The panel has to bisect for
+    its chroma hue by hue and still lands anywhere between 4.7 and 14."""
+    for appearance in ap.Appearance:
+        delivered = [
+            panel_chroma(ap.tinted_border(hue, appearance))
+            for hue in range(0, 360)
+        ]
+        assert max(delivered) - min(delivered) <= 1.0, "hue changed the strength"
+        assert abs(max(delivered) - ap.BORDER_CHROMA) <= 1.5
+
+
+@APPEARANCES
+def test_the_hairline_is_still_an_edge_under_every_hue(palette, appearance):
+    """A coloured line is not automatically an edge. It has to stay
+    lighter than the dark panel and darker than the pale one — for every
+    hue, over the backdrop that leaves the panel closest to it. The
+    binding cases are blue in dark mode and yellow in light mode, the
+    hues furthest from their own panel in luminance, and they are what
+    fixes BORDER_LIGHTNESS."""
+    for hue in range(0, 360, 5):
+        panel, edge = panel_and_edge(palette, appearance, ap.hsl_to_rgb(hue, 1.0, 0.5))
+        if appearance is ap.Appearance.DARK:
+            assert luminance(edge) > luminance(panel), f"hue {hue} sank into the panel"
+        else:
+            assert luminance(edge) < luminance(panel), f"hue {hue} lifted off the panel"
+
+
+@APPEARANCES
+def test_the_hairline_takes_the_hue_it_was_given(palette, appearance):
+    """Hue-only, the same governing rule as the panel: the artwork says
+    which colour, never how much."""
+    for hue in range(0, 360, 15):
+        border = ap.tinted(palette, ap.hsl_to_rgb(hue, 1.0, 0.5), appearance).border
+        got, _, _ = ap.rgb_to_hsl(border)
+        assert min(abs(got - hue), 360 - abs(got - hue)) < 3
+
+
+@APPEARANCES
+def test_a_pale_or_hot_cover_makes_the_same_edge(palette, appearance):
+    """The failure a hue-only tint exists to prevent, checked on the
+    hairline too: four covers of one hue, one edge."""
+    edges = {
+        ap.tinted(palette, artwork, appearance).border
+        for artwork in ((255, 230, 230), (40, 6, 6), (255, 0, 0), (150, 90, 90))
+    }
+    assert len(edges) == 1
+
+
+@APPEARANCES
+def test_an_unusable_cover_leaves_the_hairline_neutral(palette, appearance):
+    """No cover, or a black-and-white one: the palette's own edge, exactly
+    as it was before album colour existed."""
+    for artwork in (None, (128, 128, 128), (200, 198, 199)):
+        assert ap.tinted(palette, artwork, appearance).border == palette.border
+
+
+@APPEARANCES
+def test_the_tinted_hairline_costs_the_contrast_floor_nothing(palette, appearance):
+    """The argument for putting the colour here rather than in the panel:
+    no text is read against the edge, so its strength is not the floor's
+    business. Every text colour, and both backgrounds, are what they were
+    — which is why the floor tests above did not have to be re-derived."""
+    tinted = ap.tinted(palette, (200, 40, 40), appearance)
+    for name in ("current", "context", "header", "pronunciation", "plain", "progress"):
+        assert getattr(tinted, name) == getattr(palette, name)
+    assert worst_over_extremes(tinted.scrim, tinted.current) >= 4.5
+    assert worst_over_extremes(tinted.solid, tinted.current) >= 4.5
+
+
+def test_the_hairline_keeps_the_alpha_its_mode_asks_for():
+    """Alpha is a knob here, not a constant to preserve: it trades against
+    saturation for the same delivered chroma, and it is what stops a
+    strongly coloured edge having to be a strongly saturated one."""
+    for appearance in ap.Appearance:
+        border = ap.tinted_border(200.0, appearance)
+        assert border[3] == ap.BORDER_ALPHA[appearance]
 
 
 # -- the colour maths itself ----------------------------------------------
