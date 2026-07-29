@@ -17,6 +17,8 @@ SPEECH_RATE = "speech_rate"
 ECHO = "echo"
 ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
+REMEMBER_POSITION = "remember_position"
+FORGET_POSITIONS = "forget_positions"
 OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
 QUIT = "quit"
@@ -34,6 +36,8 @@ MENU_ORDER = (
     ECHO,
     ALBUM_COLOUR,
     ALL_DESKTOPS,
+    REMEMBER_POSITION,
+    FORGET_POSITIONS,
     OPEN_AT_LOGIN,
     SYNC,
     SEPARATOR_BEFORE_QUIT,
@@ -51,7 +55,15 @@ MENU_ORDER = (
 # is a standing preference about how the window looks, and appearing and
 # vanishing as tracks came and went would make it hard to find at the
 # moment the user wants it, which is before the music starts.
-ALWAYS_VISIBLE = frozenset({SHOW_LYRICS, ALBUM_COLOUR, ALL_DESKTOPS, QUIT})
+#
+# Per-app position memory is here for the same reason: it is a standing
+# preference about where the window lives, answerable whether or not
+# anything is playing and whether or not any position has been learned
+# yet. Its companion — forgetting what was learned — is NOT here, because
+# that one genuinely cannot act on an empty map.
+ALWAYS_VISIBLE = frozenset(
+    {SHOW_LYRICS, ALBUM_COLOUR, ALL_DESKTOPS, REMEMBER_POSITION, QUIT}
+)
 
 
 def visible_entries(
@@ -61,6 +73,7 @@ def visible_entries(
     synced: bool,
     sync_offered: bool,
     login_item_offered: bool = False,
+    positions_remembered: bool = False,
 ) -> tuple[str, ...]:
     """The entries to show, in ``MENU_ORDER``, for this app state.
 
@@ -74,6 +87,11 @@ def visible_entries(
     rather than on what the song is: there is nothing for macOS to start
     at login when the app is running from a source checkout, so offering
     the switch there would be offering something that cannot work.
+
+    Forgetting learned positions appears once there is something to
+    forget, and disappears again the moment there is not — including when
+    the layer itself is switched off, because a bad map should be
+    clearable without turning the feature back on first.
     """
     shown = set(ALWAYS_VISIBLE)
     if has_korean_lyrics:
@@ -86,6 +104,8 @@ def visible_entries(
         shown.add(SYNC)
     if login_item_offered:
         shown.add(OPEN_AT_LOGIN)
+    if positions_remembered:
+        shown.add(FORGET_POSITIONS)
     return _with_separators(shown)
 
 

@@ -62,6 +62,13 @@ from PySide6.QtWidgets import (
 )
 
 from lyrisync import appearance
+from lyrisync.app_positions import (
+    ActivationDebounce,
+    AppPositions,
+    SETTLE_SECONDS,
+    may_learn,
+    may_move,
+)
 from lyrisync.artwork import ArtworkProvider
 from lyrisync.geometry import (
     RESIZE_MARGIN,
@@ -76,6 +83,7 @@ from lyrisync.geometry import (
     text_gutter,
 )
 from lyrisync.gestures import opacity_step, scroll_step, wheel_action
+from lyrisync import frontmost
 from lyrisync import hotkey
 from lyrisync.loop import LineLoop, LoopPhase
 from lyrisync.lyrics_provider import LyricsError, LyricsProvider
@@ -89,8 +97,10 @@ from lyrisync.menu import (
     ALBUM_COLOUR,
     ALL_DESKTOPS,
     ECHO,
+    FORGET_POSITIONS,
     OPEN_AT_LOGIN,
     QUIT,
+    REMEMBER_POSITION,
     ROMANISATION,
     SEPARATOR_AFTER_SHOW,
     SEPARATOR_BEFORE_QUIT,
@@ -216,6 +226,15 @@ _PREDICTION_LEAD_SECONDS = _FADE_OUT_LEAD_MS / 1000 + POLL_INTERVAL_SECONDS
 # one has to finish before a lyric is due, this one is scenery and a
 # 100ms colour change reads as a flicker rather than as a transition.
 _TINT_FADE_MS = 600
+
+# How long the window takes to travel to a remembered position. The same
+# duration as one phase of a line change, and sine easing for the same
+# reason 13 chose it over cubic — cubic's ends are steep enough that even
+# this reads as a snap. InOut rather than In-then-Out because this is one
+# continuous movement rather than two phases handing over: it leaves and
+# arrives in the same gesture, so both ends are eased.
+_MOVE_MS = _FADE_MS
+_MOVE_CURVE = QEasingCurve.Type.InOutSine
 
 # How long shutdown waits for the monitor thread and then for the worker
 # pool. Long enough for a poll to finish its osascript (2s timeout) or a
@@ -642,6 +661,16 @@ class LyricsWindow(QWidget):
         self._dots_frame = 0
         self._scale = 0.0
         self._all_desktops = False
+        # Per-app position memory. All off until _restore_settings says
+        # otherwise; the watcher is only started when the layer is on, so
+        # with it off nothing observes anything.
+        self._remember_position = False
+        self._positions = AppPositions()
+        self._debounce = ActivationDebounce(SETTLE_SECONDS)
+        self._frontmost: Optional[str] = None
+        self._own_bundle_id = frontmost.own_bundle_id()
+        self._watcher = frontmost.FrontmostWatcher(self._on_app_activated)
+        self._move_anim: Optional[QPropertyAnimation] = None
         # Which palette the window is painting with. Resolved from the
         # system now and re-resolved on every change for as long as the
         # app runs — reading it once at startup would be wrong by the
@@ -783,6 +812,12 @@ class LyricsWindow(QWidget):
         self._swap_timer = QTimer(self)
         self._swap_timer.setSingleShot(True)
         self._swap_timer.timeout.connect(self._predicted_swap)
+        # Restarted by every activation, so it only fires once the user has
+        # stopped switching apps. The debounce object still owns the rule —
+        # this only decides when to ask it.
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.timeout.connect(self._apply_settled_app)
 
         self._loop = LineLoop()
         self._loop_timer = QTimer(self)
@@ -1840,11 +1875,151 @@ class LyricsWindow(QWidget):
             # event; re-check once the event loop has caught up.
             QTimer.singleShot(0, self._nudge_onscreen)
             self._save_settings()
+            # Learning is implicit and this is the whole of it: the user
+            # has just said where they want the window while working in
+            # some app. Deferred by the same tick as the nudge, so what is
+            # recorded is where the window actually ended up.
+            QTimer.singleShot(0, self._learn_position)
 
     def _nudge_onscreen(self) -> None:
         target = _clamped_point(self.frameGeometry(), self._available_geometry())
         if target != self.frameGeometry().topLeft():
             self.move(target)
+
+    # -- per-app position memory -------------------------------------------
+
+    def _set_remember_position(self, enabled: bool) -> None:
+        """Turn the layer on or off.
+
+        Off stops the observing as well as the moving: the notification
+        subscription is removed, so with the layer off this app is not
+        watching what the user does at all. That is the layers principle
+        taken literally — off has to equal the app before the feature
+        existed, not the app quietly still listening.
+
+        Nothing moves on being switched on. The window is already where
+        the user last put it, and jumping the moment a menu item is ticked
+        would be the feature's first impression being a surprise.
+        """
+        self._remember_position = enabled
+        self._settings.setValue("window/remember_position", enabled)
+        if enabled:
+            self._frontmost = frontmost.current_bundle_id()
+            self._watcher.start()
+        else:
+            self._watcher.stop()
+            self._debounce.cancel()
+            self._settle_timer.stop()
+            self._stop_move()
+        self._refresh_menu()
+
+    def _forget_positions(self) -> None:
+        """Throw the whole map away. No confirmation: every entry costs one
+        drag to relearn, which is the difference between this and a
+        hand-made sync."""
+        self._positions.forget_all()
+        self._settings.setValue("window/app_positions", self._positions.to_json())
+        logger.info("forgot every remembered window position")
+        self._refresh_menu()
+
+    def _on_app_activated(self, bundle_id: str) -> None:
+        """An app came to the front. Runs on the main thread — NSWorkspace
+        posts there and the block is delivered on the posting thread — so
+        this is an ordinary UI call, same as the hotkey's.
+
+        Nothing happens yet: the arrival has to settle first, or a Cmd-Tab
+        sweep would be six separate instructions to move.
+        """
+        if not self._remember_position:
+            return
+        self._frontmost = bundle_id
+        self._debounce.observe(bundle_id, time.monotonic())
+        self._settle_timer.start(int(SETTLE_SECONDS * 1000))
+
+    def _apply_settled_app(self) -> None:
+        """The settling interval elapsed — move, if there is somewhere to
+        move to and nothing in the way."""
+        now = time.monotonic()
+        bundle_id = self._debounce.settled(now)
+        if bundle_id is None:
+            # The timer and the debounce time the same interval off two
+            # different clocks, and QTimer is entitled to fire a hair
+            # early — measured at 390ms against a 400ms rule, live. Since
+            # the timer is single-shot, treating that as "no arrival"
+            # dropped the move for good rather than by a millisecond. The
+            # rule stays authoritative; the timer just asks again.
+            remaining = self._debounce.remaining(now)
+            if remaining > 0:
+                self._settle_timer.start(max(1, int(remaining * 1000) + 1))
+            return
+        if not may_move(
+            enabled=self._remember_position,
+            visible=self._lyrics_visible,
+            dragging=self._drag_offset is not None or bool(self._resize_edges),
+            syncing=self._syncing,
+        ):
+            return
+        remembered = self._positions.recall(bundle_id)
+        if remembered is None:
+            return  # never learned here: leave the window exactly where it is
+        self._move_to(QPoint(*remembered))
+
+    def _move_to(self, target: QPoint) -> None:
+        """Travel to a remembered position, clamped and animated.
+
+        Clamped on arrival rather than only when learned: the position may
+        have been recorded on a second display that is no longer attached,
+        or before the dock moved, and a remembered position is not a
+        licence to put the window somewhere it cannot be reached.
+        """
+        clamped = _clamped_point(
+            QRect(target, self.size()), self._available_geometry()
+        )
+        if clamped == self.pos():
+            return
+        self._stop_move()
+        animation = QPropertyAnimation(self, b"pos", self)
+        animation.setDuration(_MOVE_MS)
+        animation.setEasingCurve(_MOVE_CURVE)
+        animation.setStartValue(self.pos())
+        animation.setEndValue(clamped)
+        animation.start()
+        self._move_anim = animation
+
+    def _stop_move(self) -> None:
+        """Abandon a move in flight, leaving the window wherever it got to.
+
+        A second activation mid-travel retargets from there rather than
+        from where the last one was heading — the same rule the album
+        tint's cross-fade follows, and for the same reason: the user is
+        looking at where it is, not at where it was going.
+        """
+        if self._move_anim is not None:
+            self._move_anim.stop()
+            self._move_anim = None
+
+    def _learn_position(self) -> None:
+        """Record where the window now sits for whichever app is in front.
+
+        Called when a drag or resize ends, which is the only moment the
+        user has expressed a preference about where the window goes. The
+        app in front is not this one: the window never takes focus and the
+        app is an accessory, so dragging it leaves the frontmost app
+        exactly as it was.
+        """
+        if not may_learn(
+            enabled=self._remember_position,
+            frontmost=self._frontmost,
+            own_bundle_id=self._own_bundle_id,
+        ):
+            return
+        position = self.pos()
+        self._positions.remember(self._frontmost, position.x(), position.y())
+        self._settings.setValue("window/app_positions", self._positions.to_json())
+        logger.debug(
+            "remembered (%d, %d) for %s", position.x(), position.y(), self._frontmost
+        )
+        self._refresh_menu()  # the forget entry appears with the first entry
 
     def wheelEvent(self, event) -> None:
         """Wheel over the window chrome (margins, header, synced lines).
@@ -1941,6 +2116,16 @@ class LyricsWindow(QWidget):
         all_desktops.triggered.connect(self._set_all_desktops)
         actions[ALL_DESKTOPS] = all_desktops
 
+        remember_position = self._menu.addAction("Remember position per app")
+        remember_position.setCheckable(True)
+        remember_position.triggered.connect(self._set_remember_position)
+        actions[REMEMBER_POSITION] = remember_position
+
+        # Appears only once something has been learned (see menu.py).
+        forget_positions = self._menu.addAction("Forget remembered positions")
+        forget_positions.triggered.connect(self._forget_positions)
+        actions[FORGET_POSITIONS] = forget_positions
+
         # Label swaps to name the approval case in _refresh_menu.
         open_at_login = self._menu.addAction(login_item.MENU_LABEL)
         open_at_login.setCheckable(True)
@@ -1979,6 +2164,7 @@ class LyricsWindow(QWidget):
                 login_item_offered=login_item.offered(
                     bundled=self._bundled, status=self._login_status
                 ),
+                positions_remembered=len(self._positions) > 0,
             )
         )
         for key, action in self._menu_actions.items():
@@ -1993,6 +2179,7 @@ class LyricsWindow(QWidget):
         self._menu_actions[ECHO].setChecked(self._echo_enabled)
         self._menu_actions[ALBUM_COLOUR].setChecked(self._album_colour)
         self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
+        self._menu_actions[REMEMBER_POSITION].setChecked(self._remember_position)
         # The system's answer, not ours: the tick follows what macOS says,
         # so flipping it in System Settings shows up here rather than the
         # two quietly disagreeing.
@@ -2413,6 +2600,23 @@ class LyricsWindow(QWidget):
         self._album_colour = self._settings.value(
             "window/album_colour", False, type=bool
         )
+        # The map is restored whether or not the layer is on: switching it
+        # off should not throw away what it learned, and the forget entry
+        # has to be reachable to clear a bad map without turning the
+        # feature back on first.
+        self._positions = AppPositions.from_json(
+            self._settings.value("window/app_positions", "")
+        )
+        # Assigned rather than routed through the setter, like every other
+        # layer here: restore runs BEFORE the menu is built, and the setter
+        # refreshes the menu. The one thing the setter does that matters at
+        # startup is starting the watcher, so that is done explicitly.
+        self._remember_position = self._settings.value(
+            "window/remember_position", False, type=bool
+        )
+        if self._remember_position:
+            self._frontmost = frontmost.current_bundle_id()
+            self._watcher.start()
         self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
         # Open at Login is NOT restored from here: the stored value is what
         # the user last asked for, and the system is what is actually true.
@@ -2434,6 +2638,8 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/all_desktops", self._all_desktops)
         self._settings.setValue("window/album_colour", self._album_colour)
         self._settings.setValue("window/visible", self._lyrics_visible)
+        self._settings.setValue("window/remember_position", self._remember_position)
+        self._settings.setValue("window/app_positions", self._positions.to_json())
 
     def _shutdown(self) -> None:
         """Leave nothing of ours running, before anything of ours is
@@ -2460,6 +2666,12 @@ class LyricsWindow(QWidget):
         teardown.
         """
         self._hotkey.unregister()
+        # The other thing that can still call in: NSWorkspace holds a block
+        # that moves a window being torn down. Removed beside the hotkey,
+        # and for the same reason.
+        self._watcher.stop()
+        self._settle_timer.stop()
+        self._stop_move()
         self._save_settings()
         self._monitor_thread.stop()
         # Poll may be mid-osascript (up to its 2s timeout).

@@ -164,6 +164,20 @@ def _no_real_world():
 
     patch.setattr(hotkey, "_carbon", guard_carbon)
 
+    # -- the developer's workspace ----------------------------------------
+    # An NSWorkspace activation observer would sit on whoever is running
+    # the suite for the life of the process, watching them switch apps and
+    # calling back into a window the test has since destroyed. Same shape
+    # as Carbon above: one door in the module, shut here.
+    from lyrisync import frontmost
+
+    def guard_workspace():
+        raise _violation(
+            "NSWorkspace — a test may not observe the developer's app switching"
+        )
+
+    patch.setattr(frontmost, "_workspace", guard_workspace)
+
     # -- the developer's own settings -------------------------------------
     # QSettings("lyrisync", "lyrisync") is the real ~/Library/Preferences
     # entry: the user's window position, size, opacity and every toggle.

@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-620 tests, run on every push. The interesting part is not the count — it
+709 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -25,7 +25,7 @@ than by the suite: real `QSettings` writes, real player commands, a tray
 test that never actually ran, and a live LRCLIB fetch that aborted CI
 mid-handshake.
 
-Four doors are shut for the whole session:
+Six doors are shut for the whole session:
 
 | guard | catches |
 |---|---|
@@ -33,6 +33,12 @@ Four doors are shut for the whole session:
 | `subprocess.run` / `Popen` | `osascript` to Spotify, `say` to the speakers |
 | a `LyricsProvider` on its default directories | anything that would read or write the real caches |
 | `QSettings("lyrisync", "lyrisync")` | the real `~/Library/Preferences` plist |
+| `hotkey._carbon()` | claiming ⇧⌘J from whoever is running the suite |
+| `frontmost._workspace()` | observing the developer's own app switching |
+
+The last two are the same shape for the same reason: both would outlive
+the test that started them and keep calling into a window that has since
+been destroyed.
 
 Loopback sockets are allowed — Qt and pytest use them internally.
 

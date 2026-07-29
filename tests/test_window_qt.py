@@ -35,12 +35,16 @@ pytest.importorskip(
 
 from PySide6.QtCore import (  # noqa: E402
     QEasingCurve,
+    QEvent,
+    QPoint,
+    QPointF,
     QRectF,
     QRunnable,
     QSettings,
     Qt,
     QTimer,
 )
+from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 
 try:
@@ -114,6 +118,13 @@ def no_real_world(monkeypatch):
         monkeypatch.setattr(task, "run", lambda self: None)
     monkeypatch.setattr(w, "detect_voice", lambda: True)
     monkeypatch.setattr(w.hotkey, "_carbon", lambda: None)
+    # Answered rather than blocked, for the same reason as Carbon: every
+    # window here can turn per-app position memory on, and handing back
+    # None is the branch a machine without pyobjc takes — so the real
+    # FrontmostWatcher runs its real code and finds nothing to observe.
+    # The conftest guard stays armed for anything that reaches around it.
+    monkeypatch.setattr(w.frontmost, "_workspace", lambda: None)
+    monkeypatch.setattr(w.frontmost, "own_bundle_id", lambda: None)
 
 
 @pytest.fixture
@@ -307,6 +318,7 @@ def test_bare_menu_when_every_layer_is_dormant(make_window):
         m.SEPARATOR_AFTER_SHOW,
         m.ALBUM_COLOUR,
         m.ALL_DESKTOPS,
+        m.REMEMBER_POSITION,
         m.SEPARATOR_BEFORE_QUIT,
         m.QUIT,
     )
@@ -1100,6 +1112,335 @@ def test_the_shadow_is_guarded_off_cocoa(make_window):
     window = make_window()
     window._apply_shadow()
     window._invalidate_shadow()
+
+
+# -- per-app position memory ----------------------------------------------
+
+
+VSCODE = "com.microsoft.VSCode"
+SAFARI = "com.apple.Safari"
+
+
+def remembering(make_window, frontmost_app=VSCODE):
+    """A window with the layer on and an app in front of it."""
+    window = make_window()
+    window.show()
+    window._set_remember_position(True)
+    window._frontmost = frontmost_app
+    APP.processEvents()
+    return window
+
+
+def end_a_drag(window, x, y):
+    """What the user finishing a drag looks like from here: the window is
+    somewhere new, and the release handler runs."""
+    window.move(x, y)
+    window._drag_offset = QPoint(0, 0)  # as mousePressEvent would have left it
+    window.mouseReleaseEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(1, 1),
+            QPointF(1, 1),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    APP.processEvents()  # the learn is deferred by one tick, like the nudge
+
+
+def test_the_layer_is_off_by_default(make_window):
+    """Every layer off must equal the app before this existed — including
+    not observing anything."""
+    window = make_window()
+    assert window._remember_position is False
+    assert window._menu_actions[m.REMEMBER_POSITION].isChecked() is False
+    assert not window._watcher.active
+
+
+def test_nothing_is_learned_while_the_layer_is_off(make_window):
+    window = make_window()
+    window.show()
+    window._frontmost = VSCODE
+    end_a_drag(window, 300, 200)
+    assert len(window._positions) == 0
+
+
+def test_finishing_a_drag_records_the_position_for_the_frontmost_app(make_window):
+    """Learning is implicit: there is no save action, only the drag the
+    user was going to do anyway."""
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    assert window._positions.recall(VSCODE) == (300, 200)
+
+
+def test_finishing_a_resize_records_it_too(make_window):
+    window = remembering(make_window)
+    window.move(120, 90)
+    window._resize_edges = Qt.Edge.RightEdge
+    window.mouseReleaseEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(1, 1),
+            QPointF(1, 1),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    APP.processEvents()
+    assert window._positions.recall(VSCODE) == (120, 90)
+
+
+def test_each_app_keeps_its_own_position(make_window):
+    """The acceptance test, in miniature: place it one way here, another
+    way there."""
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+
+    window._frontmost = SAFARI
+    end_a_drag(window, 60, 480)
+
+    assert window._positions.recall(VSCODE) == (300, 200)
+    assert window._positions.recall(SAFARI) == (60, 480)
+
+
+def test_the_window_moves_to_a_remembered_position_on_activation(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    window.move(10, 10)
+
+    window._on_app_activated(VSCODE)
+    window._settle_timer.stop()  # fire the settle by hand, deterministically
+    window._debounce._since -= w.SETTLE_SECONDS
+    window._apply_settled_app()
+    finish_move(window)
+
+    assert window.pos() == QPoint(300, 200)
+
+
+def finish_move(window):
+    """Run the travel animation to its end without waiting it out."""
+    if window._move_anim is not None:
+        window._move_anim.setCurrentTime(window._move_anim.duration())
+    APP.processEvents()
+
+
+def settle(window, bundle_id):
+    """An activation that has been frontmost long enough to act on."""
+    window._on_app_activated(bundle_id)
+    window._settle_timer.stop()
+    window._debounce._since -= w.SETTLE_SECONDS
+    window._apply_settled_app()
+
+
+def test_a_timer_that_fires_early_asks_again_rather_than_dropping_the_move(
+    make_window,
+):
+    """Found live, not here: QTimer fired at 390ms against the 400ms rule,
+    the debounce said "not yet", and because the timer is single-shot the
+    arrival was dropped for good. The rule stays authoritative and the
+    timer re-arms for what is left."""
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    window.move(10, 10)
+
+    window._on_app_activated(VSCODE)
+    window._settle_timer.stop()
+    window._apply_settled_app()  # asked immediately: far too early
+
+    assert window._move_anim is None, "moved before the app had settled"
+    assert window._settle_timer.isActive(), "the arrival was dropped"
+    assert window._debounce.pending == VSCODE
+
+    # And when it is genuinely due, the same arrival still lands.
+    window._debounce._since -= w.SETTLE_SECONDS
+    window._apply_settled_app()
+    finish_move(window)
+    assert window.pos() == QPoint(400, 300)
+
+
+def test_an_app_with_no_remembered_position_leaves_the_window_alone(make_window):
+    """Doing nothing is the right answer: a default would move the window
+    somewhere the user never put it."""
+    window = remembering(make_window)
+    window.move(123, 456)
+
+    settle(window, "com.apple.Notes")
+    finish_move(window)
+
+    assert window.pos() == QPoint(123, 456)
+
+
+def test_the_move_is_animated_rather_than_a_teleport(make_window):
+    """Consistent with the motion work in 13: eased, and sine rather than
+    cubic."""
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    window.move(10, 10)
+
+    settle(window, VSCODE)
+
+    assert window._move_anim is not None
+    assert window._move_anim.duration() == w._MOVE_MS
+    assert window._move_anim.easingCurve().type() == w._MOVE_CURVE
+    assert window.pos() != QPoint(400, 300)  # not there yet
+    finish_move(window)
+    assert window.pos() == QPoint(400, 300)
+
+
+def test_a_second_activation_mid_travel_retargets_from_where_it_got_to(make_window):
+    """The same rule the tint cross-fade follows: the user is looking at
+    where it is, not at where it was going."""
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    window._frontmost = SAFARI
+    end_a_drag(window, 80, 500)
+    window.move(10, 10)
+
+    settle(window, VSCODE)
+    first = window._move_anim
+    first.setCurrentTime(first.duration() // 2)
+    APP.processEvents()
+    midway = window.pos()
+
+    settle(window, SAFARI)
+    assert window._move_anim is not first
+    assert window._move_anim.startValue() == midway
+    finish_move(window)
+    assert window.pos() == QPoint(80, 500)
+
+
+def test_cmd_tabbing_through_apps_does_not_move_the_window(make_window):
+    """The debounce, on the path a real Cmd-Tab sweep takes: several
+    activations in quick succession, none of them settled."""
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    window.move(10, 10)
+
+    for app in (VSCODE, SAFARI, "com.apple.Notes", VSCODE):
+        window._on_app_activated(app)
+
+    assert window._move_anim is None
+    assert window.pos() == QPoint(10, 10)
+    assert window._settle_timer.isActive()  # still waiting for things to stop
+
+
+@pytest.mark.parametrize("obstacle", ("dragging", "syncing", "hidden"))
+def test_the_window_is_not_moved_while_the_user_is_busy(make_window, obstacle):
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    window.move(10, 10)
+
+    if obstacle == "dragging":
+        window._drag_offset = QPoint(5, 5)
+    elif obstacle == "syncing":
+        load(window, PLAIN, track_id="t2")
+        window._frontmost = VSCODE
+        window._begin_sync()
+        window.move(10, 10)
+    else:
+        window._set_lyrics_visible(False)
+
+    settle(window, VSCODE)
+    finish_move(window)
+
+    assert window.pos() == QPoint(10, 10)
+
+
+def test_a_remembered_position_is_still_clamped_on_arrival(make_window):
+    """The screen it was learned on may be gone. A remembered position is
+    not a licence to put the window somewhere unreachable."""
+    window = remembering(make_window)
+    window._positions.remember(VSCODE, 100_000, 100_000)
+
+    settle(window, VSCODE)
+    finish_move(window)
+
+    available = window._available_geometry()
+    assert window.pos().x() < available.right()
+    assert window.pos().y() < available.bottom()
+
+
+def test_switching_the_layer_off_stops_observing_and_moving(make_window):
+    """Off means off: the subscription goes, not just the acting on it."""
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    window.move(10, 10)
+
+    window._set_remember_position(False)
+
+    assert not window._watcher.active
+    assert not window._settle_timer.isActive()
+    settle(window, VSCODE)
+    finish_move(window)
+    assert window.pos() == QPoint(10, 10)
+
+
+def test_switching_it_off_keeps_what_it_learned(make_window):
+    """So that turning it back on does not start from nothing — and so the
+    forget entry still has something to clear."""
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    window._set_remember_position(False)
+    assert window._positions.recall(VSCODE) == (400, 300)
+
+
+def test_forgetting_clears_the_map_and_the_setting(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 400, 300)
+    assert m.FORGET_POSITIONS in visible_keys(window)
+
+    window._menu_actions[m.FORGET_POSITIONS].trigger()
+
+    assert len(window._positions) == 0
+    assert m.FORGET_POSITIONS not in visible_keys(window)
+    assert window._settings.value("window/app_positions") == "[]"
+
+
+def test_the_layer_and_the_map_are_persisted_and_restored(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    window._save_settings()
+    window._settings.sync()
+
+    reopened = make_window()
+    assert reopened._remember_position is True
+    assert reopened._positions.recall(VSCODE) == (300, 200)
+    assert reopened._menu_actions[m.REMEMBER_POSITION].isChecked() is True
+
+
+def test_a_corrupt_stored_map_does_not_stop_the_app_starting(make_window):
+    window = make_window()
+    window._settings.setValue("window/app_positions", "{not json")
+    window._settings.setValue("window/remember_position", True)
+    window._settings.sync()
+
+    reopened = make_window()
+    assert len(reopened._positions) == 0
+    assert reopened._remember_position is True
+
+
+def test_the_window_never_learns_a_position_against_itself(make_window):
+    """It should never be frontmost — the window is unfocusable and the
+    app is an accessory — but an entry keyed on us could never be recalled
+    and would evict a real one."""
+    window = remembering(make_window)
+    window._own_bundle_id = "com.lyrisync.lyrisync"
+    window._frontmost = "com.lyrisync.lyrisync"
+
+    end_a_drag(window, 300, 200)
+
+    assert len(window._positions) == 0
+
+
+def test_shutdown_stops_observing(make_window):
+    """NSWorkspace holds a block that moves a window being torn down —
+    the same hazard as the hotkey, released beside it."""
+    window = remembering(make_window)
+    window._shutdown()
+    assert not window._watcher.active
+    assert not window._settle_timer.isActive()
 
 
 # -- album colour ---------------------------------------------------------

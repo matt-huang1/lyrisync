@@ -12,6 +12,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 - **⇧⌘J from anywhere** shows and hides the lyrics without switching away from what you were doing. No Accessibility permission.
 - **Album colour** — an optional layer that colours the window from the current cover's hue.
 - **Show on all desktops** — an optional mode that keeps the window visible across Spaces and over full-screen apps.
+- **Remember position per app** — an optional layer that puts the window back where you last left it for whichever app you switch to. It learns by watching you drag it; there is nothing to save.
 - **Korean romanisation** — an optional pronunciation line under the current lyric.
 - **Spoken reference** — pause the music and hear the current line read slowly, then carry on.
 - **Line looping and echo practice** — repeat a line, or alternate hearing it with a silent turn to sing it yourself.
@@ -65,7 +66,7 @@ Two terminal tools exist for debugging: `lyrisync-monitor` and `lyrisync-lyrics`
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 620 tests run headless on Linux CI without touching the network, your settings or your Spotify.
+A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 709 tests run headless on Linux CI without touching the network, your settings or your Spotify.
 
 ## Documentation
 
@@ -80,7 +81,7 @@ The reasoning, the trade-offs and the measurements live in **[docs/](docs/)** �
 | [Testing and CI](docs/testing-and-ci.md) | the guards that keep the suite off your Spotify |
 | [Changelog](CHANGELOG.md) | the milestones in order |
 
-Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), and [packaging](docs/packaging.md).
+Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [per-app window position](docs/per-app-position.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), and [packaging](docs/packaging.md).
 
 ## Credits
 

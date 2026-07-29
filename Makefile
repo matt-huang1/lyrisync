@@ -26,4 +26,5 @@ test:
 	$(PYTHON) -m pytest -q
 
 clean:
-	rm -rf build dist packaging/LyriSync.iconset packaging/LyriSync.icns
+	rm -rf build packaging/LyriSync.icns
+	mkdir -p dist && find dist -mindepth 1 -delete

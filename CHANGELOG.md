@@ -3,6 +3,16 @@
 Milestones in the order they happened. Dates are commit dates; the deeper
 reasoning behind each is in [docs/](docs/).
 
+## Milestone 14 — per-app window position
+
+The window returns to wherever you last put it for whichever app just
+came to the front, learned implicitly by watching you drag it — there is
+no save action. Frontmost apps come from an `NSWorkspace` notification
+that needs no permission; an app must hold the front for 400 ms before
+the window follows, so a Cmd-Tab sweep does not drag it across the
+screen. Off by default, and off removes the subscription rather than
+ignoring it.
+
 ## Milestone 13 — the feel pass (and 13.1, 13.2)
 
 No new behaviour; four changes to how the window reads. Lines **rise** as

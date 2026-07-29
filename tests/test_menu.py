@@ -7,6 +7,7 @@ ALL_LAYERS = dict(
     synced=True,
     sync_offered=True,
     login_item_offered=True,
+    positions_remembered=True,
 )
 NO_LAYERS = dict(
     has_korean_lyrics=False,
@@ -14,6 +15,7 @@ NO_LAYERS = dict(
     synced=False,
     sync_offered=False,
     login_item_offered=False,
+    positions_remembered=False,
 )
 
 
@@ -51,12 +53,15 @@ def test_quit_is_last_and_show_lyrics_first():
 
 
 def test_bare_menu_with_every_layer_dormant():
-    """Layers off must equal the original core app: show/hide, the two
-    standing choices about how the window looks, and quit."""
+    """Layers off must equal the original core app: show/hide, the three
+    standing choices about how the window looks and where it lives, and
+    quit. Forgetting learned positions is not among them — there is
+    nothing to forget until something has been learned."""
     assert without_separators(entries()) == (
         m.SHOW_LYRICS,
         m.ALBUM_COLOUR,
         m.ALL_DESKTOPS,
+        m.REMEMBER_POSITION,
         m.QUIT,
     )
 
@@ -124,10 +129,40 @@ def test_open_at_login_defaults_to_hidden():
 
 
 def test_open_at_login_sits_with_the_window_behaviour_entries():
-    """Next to Show on all desktops: both are about how the app behaves,
-    not about the song, and neither belongs among the learning layers."""
+    """Grouped with the other entries about how the app behaves rather
+    than about the song: Spaces, then where the window lives per app, then
+    login. None of them belongs among the learning layers."""
     shown = without_separators(m.visible_entries(**ALL_LAYERS))
-    assert shown.index(m.OPEN_AT_LOGIN) == shown.index(m.ALL_DESKTOPS) + 1
+    behaviour = (
+        m.ALL_DESKTOPS,
+        m.REMEMBER_POSITION,
+        m.FORGET_POSITIONS,
+        m.OPEN_AT_LOGIN,
+    )
+    positions = [shown.index(key) for key in behaviour]
+    assert positions == list(range(positions[0], positions[0] + len(behaviour)))
+
+
+def test_forgetting_is_offered_only_once_there_is_something_to_forget():
+    """The other half of the layers principle: an entry that cannot act is
+    an entry that should not be there. It appears with the first learned
+    position and goes again when the map is cleared."""
+    assert m.FORGET_POSITIONS not in entries()
+    assert m.FORGET_POSITIONS in entries(positions_remembered=True)
+
+
+def test_forgetting_stays_reachable_with_the_layer_switched_off():
+    """A bad map must be clearable without turning the feature back on to
+    reach the control that clears it. The entry follows the map, not the
+    toggle — visible_entries is never told whether the layer is on."""
+    assert m.FORGET_POSITIONS in entries(positions_remembered=True)
+
+
+def test_remembering_is_offered_before_anything_has_been_learned():
+    """Like album colour: a standing preference about the window, so it
+    cannot appear and vanish with what the app happens to know. The moment
+    a user goes looking for it is before it has ever been used."""
+    assert m.REMEMBER_POSITION in entries()
 
 
 def test_layers_gate_independently():
