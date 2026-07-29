@@ -108,6 +108,41 @@ def test_an_injected_provider_is_fine(escapes, tmp_path):
     assert escapes.drain() == []
 
 
+def test_a_bare_artwork_provider_refuses_the_repo_directory(escapes):
+    """Same hazard as the lyrics provider one directory along: a default
+    ArtworkProvider writes derived cover colours into the repo, and every
+    cache miss it takes is a request to Spotify's CDN."""
+    from lyrisync import artwork
+
+    with pytest.raises(RuntimeError, match="test escape"):
+        artwork.ArtworkProvider()
+    assert any(".artwork_cache" in e for e in escapes.drain())
+
+
+def test_an_injected_artwork_provider_is_fine(escapes, tmp_path):
+    from lyrisync import artwork
+
+    provider = artwork.ArtworkProvider(cache_dir=tmp_path / "art")
+    assert provider.cache_dir == tmp_path / "art"
+    assert escapes.drain() == []
+
+
+def test_album_artwork_cannot_be_downloaded(escapes):
+    """The cover fetch is a real HTTP request to a CDN. Blocked at the
+    socket like every other, and recorded so the test that reached for it
+    fails rather than quietly getting no tint."""
+    from lyrisync import artwork
+
+    # The guard's own RuntimeError, not an ArtworkError: it is raised
+    # below the layer that translates network failures, exactly as the
+    # lyrics fetch guard above behaves. colour_for() then swallows it
+    # broadly — which is why recording the escape, not raising it, is
+    # what makes the offending test fail.
+    with pytest.raises(RuntimeError, match="test escape"):
+        artwork._download("https://i.scdn.co/image/whatever")
+    assert any("outbound network" in e for e in escapes.drain())
+
+
 def test_a_test_cannot_claim_a_system_wide_hotkey(escapes):
     """RegisterEventHotKey takes the combination from every other app for
     as long as the process lives — including the developer's, mid-run. The

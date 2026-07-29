@@ -179,6 +179,157 @@ def test_the_reported_backdrops_all_clear_the_floor(palette):
         assert ratio >= 4.5, f"{page} -> {ratio:.2f}:1"
 
 
+# -- the album-colour tint ------------------------------------------------
+
+# Maximally saturated artwork of every hue. Real covers are gentler than
+# this; the point is that none of them can be worse.
+HOSTILE_HUES = tuple(range(0, 360, 3))
+
+
+def hostile_artwork(hue):
+    return ap.hsl_to_rgb(hue, 1.0, 0.5)
+
+
+@pytest.mark.parametrize(
+    "palette,appearance", ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
+    ids=("dark", "light"),
+)
+def test_the_floor_holds_under_every_hue(palette, appearance):
+    """THE claim the tint rests on. A hue-only tint is only safe if it
+    really is hue-only, and the way that goes wrong is subtle: HSL's
+    lightness is not relative luminance, and pinning the wrong one moves
+    the contrast floor by hue. This sweeps every hue at full saturation
+    against both extreme backdrops, which is more covers than anyone
+    could think to try."""
+    for hue in HOSTILE_HUES:
+        tinted = ap.tinted(palette, hostile_artwork(hue), appearance)
+        for background in (tinted.scrim, tinted.solid):
+            ratio = worst_over_extremes(background, palette.current)
+            assert ratio >= 4.5, f"hue {hue} -> {ratio:.2f}:1"
+
+
+@pytest.mark.parametrize(
+    "palette,appearance", ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
+    ids=("dark", "light"),
+)
+def test_a_tint_barely_moves_the_luminance_it_was_given(palette, appearance):
+    """The mechanism, checked directly rather than only through its
+    consequence. What is left is 8-bit quantisation, not drift."""
+    base = ap.relative_luminance(palette.scrim)
+    for hue in HOSTILE_HUES:
+        tinted = ap.tinted(palette, hostile_artwork(hue), appearance)
+        moved = abs(ap.relative_luminance(tinted.scrim) - base) / base
+        assert moved < 0.10, f"hue {hue} moved luminance by {moved:.1%}"
+
+
+@pytest.mark.parametrize(
+    "palette,appearance", ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
+    ids=("dark", "light"),
+)
+def test_the_cross_fade_never_dips_below_the_floor(palette, appearance):
+    """Every frame between two covers is a colour the user reads lyrics
+    against, so the promise covers the journey as well as the ends."""
+    first = ap.tinted(palette, hostile_artwork(20), appearance).scrim
+    second = ap.tinted(palette, hostile_artwork(200), appearance).scrim
+    for step in range(0, 11):
+        mixed = ap.blend(first, second, step / 10)
+        assert worst_over_extremes(mixed, palette.current) >= 4.5
+    # And fading in from untinted, which is what enabling the layer does.
+    for step in range(0, 11):
+        mixed = ap.blend(palette.scrim, second, step / 10)
+        assert worst_over_extremes(mixed, palette.current) >= 4.5
+
+
+@pytest.mark.parametrize(
+    "palette,appearance", ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
+    ids=("dark", "light"),
+)
+def test_a_pale_or_hot_cover_does_not_make_a_pale_or_hot_window(palette, appearance):
+    """THE GOVERNING RULE, stated as a test. The artwork supplies a hue;
+    its own lightness and saturation are discarded. Near-white, near-black
+    and neon covers of the same hue must all produce the same window."""
+    windows = {
+        ap.tinted(palette, artwork, appearance).scrim
+        for artwork in (
+            (255, 230, 230),   # a nearly white sleeve
+            (40, 6, 6),        # a nearly black one
+            (255, 0, 0),       # neon
+            (150, 90, 90),     # muted
+        )
+    }
+    assert len(windows) == 1, f"the same hue produced {len(windows)} windows"
+
+
+@pytest.mark.parametrize(
+    "palette,appearance", ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
+    ids=("dark", "light"),
+)
+def test_an_unusable_cover_leaves_the_palette_untouched(palette, appearance):
+    """Greyscale covers, and no cover at all. "Off" and "nothing to tint
+    with" have to be the same pixels, or the layer would be visible while
+    doing nothing."""
+    for artwork in (None, (128, 128, 128), (0, 0, 0), (255, 255, 255), (200, 198, 199)):
+        assert ap.tinted(palette, artwork, appearance) is palette
+
+
+@pytest.mark.parametrize(
+    "palette,appearance", ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)),
+    ids=("dark", "light"),
+)
+def test_a_tint_moves_the_background_and_nothing_else(palette, appearance):
+    """Text keeps every value 12a measured. That is what lets the floor be
+    re-checked above rather than re-derived from scratch."""
+    tinted = ap.tinted(palette, (200, 40, 40), appearance)
+    moved = {
+        name for name, value in vars(tinted).items() if value != getattr(palette, name)
+    }
+    assert moved <= {"scrim", "solid"}
+    assert moved, "the tint did nothing at all"
+
+
+def test_a_tint_keeps_the_alpha_it_was_given():
+    """The scrim's alpha is the measured constant from 12a; a tint that
+    changed it would be re-deciding the contrast floor by accident."""
+    for palette, appearance in ((DARK, ap.Appearance.DARK), (LIGHT, ap.Appearance.LIGHT)):
+        tinted = ap.tinted(palette, (200, 40, 40), appearance)
+        assert tinted.scrim[3] == palette.scrim[3]
+        assert tinted.solid[3] == palette.solid[3]
+
+
+# -- the colour maths itself ----------------------------------------------
+
+
+def test_hsl_round_trips():
+    for rgb in ((200, 40, 40), (40, 200, 90), (10, 20, 200), (128, 128, 128), (0, 0, 0)):
+        hue, saturation, lightness = ap.rgb_to_hsl(rgb)
+        assert ap.hsl_to_rgb(hue, saturation, lightness) == rgb
+
+
+def test_relative_luminance_matches_the_reference_points():
+    assert ap.relative_luminance((255, 255, 255)) == pytest.approx(1.0)
+    assert ap.relative_luminance((0, 0, 0)) == pytest.approx(0.0)
+    # Green carries most of the weight, blue least — the whole reason a
+    # hue shift at constant HSL lightness would not have been safe.
+    assert ap.relative_luminance((0, 255, 0)) > ap.relative_luminance((255, 0, 0))
+    assert ap.relative_luminance((255, 0, 0)) > ap.relative_luminance((0, 0, 255))
+
+
+def test_an_achromatic_colour_has_no_hue_to_take():
+    assert ap.usable_hue((128, 128, 128)) is None
+    assert ap.usable_hue((10, 10, 11)) is None
+    assert ap.usable_hue(None) is None
+    assert ap.usable_hue((200, 40, 40)) is not None
+
+
+def test_blending_stays_inside_its_endpoints():
+    assert ap.blend((0, 0, 0, 100), (100, 200, 40, 100), 0.0) == (0, 0, 0, 100)
+    assert ap.blend((0, 0, 0, 100), (100, 200, 40, 100), 1.0) == (100, 200, 40, 100)
+    assert ap.blend((0, 0, 0, 100), (100, 200, 40, 100), 0.5) == (50, 100, 20, 100)
+    # Out-of-range progress is clamped rather than extrapolated.
+    assert ap.blend((0, 0, 0, 100), (100, 200, 40, 100), 5.0) == (100, 200, 40, 100)
+    assert ap.blend((0, 0, 0, 100), (100, 200, 40, 100), -5.0) == (0, 0, 0, 100)
+
+
 # -- opacity --------------------------------------------------------------
 
 

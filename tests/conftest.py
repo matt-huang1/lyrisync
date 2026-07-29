@@ -121,6 +121,24 @@ def _no_real_world():
 
     patch.setattr(LyricsProvider, "__init__", guard_init)
 
+    # ArtworkProvider is the same hazard one directory along: its default
+    # writes derived cover colours into the repo's .artwork_cache/, and a
+    # test that built one bare would also be a test reaching the CDN,
+    # because a cache miss is a download.
+    from lyrisync.artwork import ArtworkProvider
+
+    real_artwork_init = ArtworkProvider.__init__
+
+    def guard_artwork_init(self, cache_dir=missing):
+        if cache_dir is missing:
+            raise _violation(
+                "ArtworkProvider built on its default directory "
+                "(.artwork_cache/) — inject a tmp_path"
+            )
+        real_artwork_init(self, cache_dir)
+
+    patch.setattr(ArtworkProvider, "__init__", guard_artwork_init)
+
     # -- the developer's own login items ----------------------------------
     # SMAppService registers the app to launch at login for the real user,
     # and nothing about that is scoped to a test run: a stray call here

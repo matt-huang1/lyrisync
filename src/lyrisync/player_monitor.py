@@ -28,7 +28,14 @@ _OSASCRIPT_TIMEOUT = 2.0
 
 # One call, newline-separated output: either "not_running", or the player
 # state alone (no track loaded — the try block leaves output untouched when
-# any track field errors), or state followed by the six track fields.
+# any track field errors), or state followed by the six track fields, or
+# those plus the artwork URL.
+#
+# The artwork gets a try of its own INSIDE the first one, deliberately.
+# Appended to the same statement, a Spotify build that does not answer
+# `artwork url` would fail the whole expression and take the six fields
+# with it — the app would show a running player and never find a song,
+# for the sake of a colour. Nested, the cost of that is one missing line.
 _SNAPSHOT_SCRIPT = '''
 if application "Spotify" is not running then return "not_running"
 tell application "Spotify"
@@ -38,6 +45,9 @@ tell application "Spotify"
 & linefeed & (name of current track) & linefeed & (artist of current track) \
 & linefeed & (album of current track) & linefeed & (duration of current track) \
 & linefeed & (player position)
+		try
+			set output to output & linefeed & (artwork url of current track)
+		end try
 	end try
 	return output
 end tell
@@ -77,6 +87,10 @@ class PlayerSnapshot:
     album: Optional[str] = None
     duration_ms: Optional[int] = None
     position_seconds: Optional[float] = None
+    # The album cover, if this Spotify build reports one. Deliberately not
+    # part of track_key: a cover appearing a poll later than the metadata
+    # must not read as a different song.
+    artwork_url: Optional[str] = None
     # Monotonic clock reading from the moment this poll's answer came back.
     # Consumers that need a fresher position than the poll interval (the
     # tap-to-sync stamper) interpolate forward from here instead of running
@@ -182,15 +196,17 @@ def read_snapshot() -> PlayerSnapshot:
         return PlayerSnapshot(state=PlaybackState.NOT_RUNNING, polled_at=polled_at)
 
     state = _parse_state(lines[0])
-    # Anything but exactly 7 lines means no track loaded, or a track field
-    # itself contained a newline (rare enough to degrade gracefully).
-    if len(lines) != 7:
+    # 7 lines is a track whose artwork URL was not reported, 8 is one with
+    # it. Anything else means no track loaded, or a track field itself
+    # contained a newline (rare enough to degrade gracefully).
+    if len(lines) not in (7, 8):
         logger.debug("snapshot (no track): state=%r lines=%r", lines[0], lines[1:])
         return PlayerSnapshot(state=state, polled_at=polled_at)
     url, title, artist, album, duration_raw, position_raw = lines[1:7]
+    artwork_url = lines[7].strip() if len(lines) == 8 else ""
     logger.debug(
-        "snapshot: state=%r url=%r title=%r artist=%r album=%r dur=%r pos=%r",
-        lines[0], url, title, artist, album, duration_raw, position_raw,
+        "snapshot: state=%r url=%r title=%r artist=%r album=%r dur=%r pos=%r art=%r",
+        lines[0], url, title, artist, album, duration_raw, position_raw, artwork_url,
     )
     try:
         # Locale-dependent decimal separator: some systems print "12,34".
@@ -208,6 +224,7 @@ def read_snapshot() -> PlayerSnapshot:
         album=album,
         duration_ms=duration_ms,
         position_seconds=position_seconds,
+        artwork_url=artwork_url or None,
         polled_at=polled_at,
     )
 

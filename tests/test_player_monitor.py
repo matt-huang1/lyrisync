@@ -420,3 +420,56 @@ def test_run_stops_when_asked(monkeypatch):
     started = time.monotonic()
     monitor.run()
     assert time.monotonic() - started < 5.0  # not the 30s interval
+
+
+# -- album artwork --------------------------------------------------------
+
+
+def test_the_artwork_url_comes_back_with_the_track(monkeypatch):
+    use_output(monkeypatch, batched_output() + "\nhttps://i.scdn.co/image/abc")
+    snapshot = pm.read_snapshot()
+    assert snapshot.artwork_url == "https://i.scdn.co/image/abc"
+    assert snapshot.title == "Song"  # the rest still parsed
+
+
+def test_a_track_without_artwork_still_parses(monkeypatch):
+    """The artwork line sits in a try of its own inside the script, so a
+    Spotify build that will not answer `artwork url` costs one field
+    rather than the whole track."""
+    use_output(monkeypatch, batched_output())
+    snapshot = pm.read_snapshot()
+    assert snapshot.artwork_url is None
+    assert snapshot.title == "Song"
+    assert snapshot.track_id == "4uLU6hMCjMI75M1A2tKUQC"
+    assert snapshot.position_seconds == 42.5
+
+
+def test_an_empty_artwork_line_is_no_artwork(monkeypatch):
+    use_output(monkeypatch, batched_output() + "\n   ")
+    assert pm.read_snapshot().artwork_url is None
+
+
+def test_the_script_keeps_artwork_in_a_try_of_its_own():
+    """Structural, because the failure it prevents is invisible in a
+    passing suite: appended to the same statement, a build that does not
+    answer `artwork url` would fail the whole expression and the app would
+    show a running player that never finds a song."""
+    body = pm._SNAPSHOT_SCRIPT
+
+    def open_trys(text):
+        # "end try" contains "try", so opens are the difference.
+        return text.count("try") - 2 * text.count("end try")
+
+    assert open_trys(body) == 0, "the script's trys are unbalanced"
+    before_artwork = body[: body.index("artwork url")]
+    assert open_trys(before_artwork) == 2, "artwork is not nested inside both trys"
+
+
+def test_artwork_is_not_part_of_track_identity():
+    """A cover arriving a poll after the metadata must not read as a
+    different song and restart the lyrics lookup."""
+    without = pm.PlayerSnapshot(state=pm.PlaybackState.PLAYING, track_id="t1")
+    with_art = pm.PlayerSnapshot(
+        state=pm.PlaybackState.PLAYING, track_id="t1", artwork_url="http://cover"
+    )
+    assert without.track_key == with_art.track_key

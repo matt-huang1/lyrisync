@@ -15,6 +15,7 @@ ROMANISATION = "romanisation"
 SPOKEN = "spoken"
 SPEECH_RATE = "speech_rate"
 ECHO = "echo"
+ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
 OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
@@ -31,6 +32,7 @@ MENU_ORDER = (
     SPOKEN,
     SPEECH_RATE,
     ECHO,
+    ALBUM_COLOUR,
     ALL_DESKTOPS,
     OPEN_AT_LOGIN,
     SYNC,
@@ -39,9 +41,17 @@ MENU_ORDER = (
 )
 
 # Always offered: the window can always be shown or hidden, the overlay can
-# always change how it treats Spaces, and quit must never be unreachable —
-# it is the only way out of an app with no Dock icon.
-ALWAYS_VISIBLE = frozenset({SHOW_LYRICS, ALL_DESKTOPS, QUIT})
+# always change how it treats Spaces and how it takes its colour, and quit
+# must never be unreachable — it is the only way out of an app with no Dock
+# icon.
+#
+# Album colour is here rather than gated on a cover being available, unlike
+# the learning layers below. Those hide because they cannot act — there is
+# nothing to romanise without hangul. This one can always be answered: it
+# is a standing preference about how the window looks, and appearing and
+# vanishing as tracks came and went would make it hard to find at the
+# moment the user wants it, which is before the music starts.
+ALWAYS_VISIBLE = frozenset({SHOW_LYRICS, ALBUM_COLOUR, ALL_DESKTOPS, QUIT})
 
 
 def visible_entries(

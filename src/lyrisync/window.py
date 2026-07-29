@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     QThread,
     QThreadPool,
     QTimer,
+    QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import QActionGroup, QColor, QFontDatabase, QIcon, QPainter
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from lyrisync import appearance
+from lyrisync.artwork import ArtworkProvider
 from lyrisync.geometry import (
     RESIZE_MARGIN,
     button_margin,
@@ -72,6 +74,7 @@ from lyrisync.macspaces import (
 )
 from lyrisync import login_item
 from lyrisync.menu import (
+    ALBUM_COLOUR,
     ALL_DESKTOPS,
     ECHO,
     OPEN_AT_LOGIN,
@@ -175,6 +178,11 @@ def _qcolor(colour: appearance.RGBA) -> QColor:
 _FADE_OUT_LEAD_MS = 200
 _SWAP_LEAD_MS = 100
 _FADE_MS = 100
+
+# The album-colour cross-fade. Slower than the line fade on purpose: that
+# one has to finish before a lyric is due, this one is scenery and a
+# 100ms colour change reads as a flicker rather than as a transition.
+_TINT_FADE_MS = 600
 
 # How long shutdown waits for the monitor thread and then for the worker
 # pool. Long enough for a poll to finish its osascript (2s timeout) or a
@@ -436,6 +444,38 @@ class SaveSyncTask(QRunnable):
             pass  # app tore down the signal object mid-save
 
 
+class _ArtworkSignals(QObject):
+    finished = Signal(str, object)  # track_id, (r, g, b) | None
+
+
+class ArtworkTask(QRunnable):
+    """One album-cover colour lookup, off the UI thread.
+
+    Downloads and decodes an image, which is exactly the kind of work the
+    UI thread must never do — and unlike the lyrics fetch, nothing waits
+    on the answer. A cover that never arrives leaves the window the colour
+    it already was, so there is no error state to report and no retry.
+    """
+
+    def __init__(self, provider: ArtworkProvider, track_id: str, url: Optional[str]) -> None:
+        super().__init__()
+        self.signals = _ArtworkSignals()
+        self._provider = provider
+        self._track_id = track_id
+        self._url = url
+
+    def run(self) -> None:
+        colour = None
+        try:
+            colour = self._provider.colour_for(self._track_id, self._url)
+        except Exception:
+            logger.exception("album colour failed for %s", self._track_id)
+        try:
+            self.signals.finished.emit(self._track_id, colour)
+        except RuntimeError:
+            pass  # app tore down the signal object mid-fetch
+
+
 class _FetchSignals(QObject):
     finished = Signal(str, object, bool)  # track_id, TrackLyrics | None, ok
 
@@ -471,9 +511,11 @@ class LyricsWindow(QWidget):
         self,
         provider: Optional[LyricsProvider] = None,
         settings: Optional[QSettings] = None,
+        artwork_provider: Optional[ArtworkProvider] = None,
     ) -> None:
         super().__init__()
         self._provider = provider or LyricsProvider()
+        self._artwork = artwork_provider or ArtworkProvider()
         self._view_model = LyricsViewModel()
         self._pool = QThreadPool.globalInstance()
         # Injectable so tests and scratch runs write somewhere of their own:
@@ -519,6 +561,17 @@ class LyricsWindow(QWidget):
         # The NSVisualEffectView once installed; None means the painted
         # background is carrying the window on its own.
         self._material = None
+        # Album colour. `_tint_rgb` is the cover colour being painted
+        # towards; the background colours either side of the cross-fade are
+        # cached because working one out costs a luminance bisection per
+        # field and paintEvent runs on every frame of the fade. Set up
+        # after _material, which decides scrim versus solid.
+        self._album_colour = False  # restored from settings below
+        self._tint_rgb: Optional[tuple] = None
+        self._tint_mix = 1.0
+        self._tint_from = self._background_for(None)
+        self._tint_to = self._tint_from
+        self._tint_anim: Optional[QVariantAnimation] = None
         self._family_stack = font_stack(
             QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
         )
@@ -734,6 +787,7 @@ class LyricsWindow(QWidget):
             self._card_key = None
         if self._view_model.track_changed(snapshot):
             self._start_fetch(snapshot)
+            self._request_artwork(snapshot)
         self._render()
 
     def _on_fetch_finished(self, track_id: str, lyrics: object, ok: bool) -> None:
@@ -1212,19 +1266,113 @@ class LyricsWindow(QWidget):
         self._plain_scroll.setVisible(plain)
         self._synced_box.setVisible(not plain)
 
+    # -- album colour ------------------------------------------------------
+
+    def _background_for(self, tint_rgb) -> appearance.RGBA:
+        """The window's background for this cover colour: the scrim when
+        there is a material to sit on, the solid fill when there is not.
+
+        ``tinted`` hands back the palette unchanged for an unusable colour
+        (and None is one), so "no cover", "a grey cover" and "the feature
+        is off" all land on exactly the same pixels.
+        """
+        palette = appearance.tinted(self._palette, tint_rgb, self._appearance)
+        return palette.scrim if self._material is not None else palette.solid
+
+    def _current_background(self) -> appearance.RGBA:
+        """What is on screen right now, mid-fade included."""
+        return appearance.blend(self._tint_from, self._tint_to, self._tint_mix)
+
+    def _set_tint(self, tint_rgb, animate: bool = True) -> None:
+        """Cross-fade the panel to a new cover colour.
+
+        The fade starts from whatever is on screen rather than from the
+        previous target, so a track changed halfway through the last fade
+        moves on from where it had got to instead of jumping back.
+        """
+        if tint_rgb == self._tint_rgb:
+            return
+        self._tint_rgb = tint_rgb
+        start = self._current_background()
+        end = self._background_for(tint_rgb)
+        if self._tint_anim is not None:
+            self._tint_anim.stop()
+            self._tint_anim = None
+        if start == end or not animate:
+            self._tint_from = self._tint_to = end
+            self._tint_mix = 1.0
+            self.update()
+            return
+        self._tint_from, self._tint_to, self._tint_mix = start, end, 0.0
+        animation = QVariantAnimation(self)
+        animation.setDuration(_TINT_FADE_MS)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.valueChanged.connect(self._on_tint_step)
+        animation.start()
+        self._tint_anim = animation
+
+    def _on_tint_step(self, value) -> None:
+        self._tint_mix = float(value)
+        self.update()
+
+    def _resnap_tint(self) -> None:
+        """Recompute the painted background without a fade.
+
+        For the two things that change what a tint LOOKS like rather than
+        which tint it is: the system appearance flipping, and the material
+        arriving. Fading either would be animating the wrong thing.
+        """
+        if self._tint_anim is not None:
+            self._tint_anim.stop()
+            self._tint_anim = None
+        self._tint_from = self._tint_to = self._background_for(self._tint_rgb)
+        self._tint_mix = 1.0
+        self.update()
+
+    def _request_artwork(self, snapshot: Optional[PlayerSnapshot]) -> None:
+        """Start a cover lookup, if there is any point.
+
+        Nothing is fetched while the layer is off — a disabled feature
+        does not get to make network requests — and nothing is fetched for
+        DJ narration or ads, which reuse other tracks' identity.
+        """
+        if not self._album_colour:
+            return
+        if snapshot is None or not snapshot.is_music_track:
+            return
+        task = ArtworkTask(self._artwork, snapshot.track_id, snapshot.artwork_url)
+        task.signals.finished.connect(self._on_artwork_ready)
+        self._pool.start(task)
+
+    def _on_artwork_ready(self, track_id: str, colour) -> None:
+        # Stale answers are dropped: covers arrive out of order when tracks
+        # are skipped through, and the last one to land is not the one on
+        # screen. Also drops everything in flight when the layer is
+        # switched off mid-fetch.
+        if not self._album_colour or track_id != self._view_model.track_id:
+            return
+        self._set_tint(tuple(colour) if colour else None)
+
+    def _set_album_colour(self, enabled: bool) -> None:
+        self._album_colour = enabled
+        self._settings.setValue("window/album_colour", enabled)
+        if enabled:
+            self._request_artwork(self._current_snapshot)
+        else:
+            # Back to the untinted palette, exactly. Faded rather than
+            # snapped so switching it off looks like the same gesture as
+            # switching it on.
+            self._set_tint(None)
+        self._refresh_menu()
+
     def paintEvent(self, event) -> None:
         """Rounded background at the same radius as the material behind it,
         so the two corners coincide rather than one clipping the other."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(
-            _qcolor(
-                self._palette.scrim
-                if self._material is not None
-                else self._palette.solid
-            )
-        )
+        painter.setBrush(_qcolor(self._current_background()))
         painter.drawRoundedRect(self.rect(), _CORNER_RADIUS, _CORNER_RADIUS)
 
     def resizeEvent(self, event) -> None:
@@ -1507,6 +1655,11 @@ class LyricsWindow(QWidget):
         echo.triggered.connect(self._set_echo_practice)
         actions[ECHO] = echo
 
+        album_colour = self._menu.addAction("Album colour")
+        album_colour.setCheckable(True)
+        album_colour.triggered.connect(self._set_album_colour)
+        actions[ALBUM_COLOUR] = album_colour
+
         all_desktops = self._menu.addAction("Show on all desktops")
         all_desktops.setCheckable(True)
         all_desktops.triggered.connect(self._set_all_desktops)
@@ -1562,6 +1715,7 @@ class LyricsWindow(QWidget):
         )
         self._menu_actions[SPOKEN].setChecked(self._spoken_enabled)
         self._menu_actions[ECHO].setChecked(self._echo_enabled)
+        self._menu_actions[ALBUM_COLOUR].setChecked(self._album_colour)
         self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
         # The system's answer, not ours: the tick follows what macOS says,
         # so flipping it in System Settings shows up here rather than the
@@ -1706,7 +1860,9 @@ class LyricsWindow(QWidget):
         self.setStyleSheet(_style_for(self._scale, self._family_stack, self._palette))
         self._apply_material_appearance()
         self._apply_speak_icon(button_side(self._scale))
-        self.update()  # the scrim is painted, not styled
+        # The cover colour survives the switch; what it derives from does
+        # not. Re-derived against the new palette, without a fade.
+        self._resnap_tint()
         self._render()  # the armed discard prompt carries its colour inline
 
     def _apply_material_appearance(self) -> None:
@@ -1852,7 +2008,9 @@ class LyricsWindow(QWidget):
             int(effect.state()),
             float(effect.layer().cornerRadius()),
         )
-        self.update()  # repaint with the scrim rather than the solid fill
+        # Repaint with the scrim rather than the solid fill — which is a
+        # different background, so any tint has to be re-derived for it.
+        self._resnap_tint()
         return True
 
     def _apply_all_desktops(self, enabled: bool) -> None:
@@ -1933,6 +2091,11 @@ class LyricsWindow(QWidget):
             "lyrics/echo_practice", False, type=bool
         )
         self._loop.echo = self._echo_enabled
+        # Off by default, like every other layer: the plain window is what
+        # the app is, and the cover colour is something asked for.
+        self._album_colour = self._settings.value(
+            "window/album_colour", False, type=bool
+        )
         self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
         # Open at Login is NOT restored from here: the stored value is what
         # the user last asked for, and the system is what is actually true.
@@ -1952,6 +2115,7 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/size", self.size())
         self._settings.setValue("window/opacity", self._opacity)
         self._settings.setValue("window/all_desktops", self._all_desktops)
+        self._settings.setValue("window/album_colour", self._album_colour)
         self._settings.setValue("window/visible", self._lyrics_visible)
 
     def _shutdown(self) -> None:

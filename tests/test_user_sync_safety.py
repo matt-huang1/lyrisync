@@ -127,17 +127,37 @@ def test_a_saved_sync_survives_every_provider_code_path(provider, monkeypatch):
 
 def test_only_save_user_sync_ever_writes_to_the_directory():
     """One writer, one entry point. A second place writing user-sync files
-    would be a second place that could truncate one."""
+    would be a second place that could truncate one.
+
+    artwork.py writes too — derived cover colours — and is allowed here
+    only because it is held to something stronger below: it must not so
+    much as name the user-sync directory. Any module beyond these two
+    that learns to write is a new way to lose a sync, and has to argue
+    for itself here first.
+    """
     source = (PACKAGE_DIR / "lyrics_provider.py").read_text(encoding="utf-8")
     body = source.split("def save_user_sync", 1)
     assert len(body) == 2, "save_user_sync is gone or renamed"
-    writes = [
+    writes = {
         path.name
         for path in source_files()
         if "write_text" in path.read_text(encoding="utf-8")
-    ]
-    assert writes == ["lyrics_provider.py"]
+    }
+    assert writes == {"lyrics_provider.py", "artwork.py"}
     assert source.count("write_text") == 2  # the cache entry, and this one
+
+
+def test_the_artwork_cache_cannot_reach_the_user_sync_directory():
+    """The cover-colour cache is cache: its own directory, its own name,
+    and no knowledge that .user_syncs/ exists. Clearing either of the two
+    caches must stay a safe reset."""
+    from lyrisync import artwork
+
+    source = (PACKAGE_DIR / "artwork.py").read_text(encoding="utf-8")
+    assert "user_sync" not in source
+    assert ".lrc" not in source
+    assert artwork.DEFAULT_ARTWORK_CACHE_DIR != lp.DEFAULT_USER_SYNC_DIR
+    assert artwork.DEFAULT_ARTWORK_CACHE_DIR != lp.DEFAULT_CACHE_DIR
 
 
 def test_completing_a_resync_overwrites_the_previous_one(provider):

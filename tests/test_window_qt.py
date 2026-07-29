@@ -47,10 +47,15 @@ from lyrisync import login_item  # noqa: E402
 from lyrisync import menu as m  # noqa: E402
 from lyrisync import vibrancy  # noqa: E402
 from lyrisync import window as w  # noqa: E402
+from lyrisync.artwork import ArtworkProvider  # noqa: E402
 from lyrisync.lyrics_provider import LyricsProvider, TrackLyrics  # noqa: E402
 from lyrisync.player_monitor import PlaybackState, PlayerSnapshot  # noqa: E402
 from lyrisync.view_model import Mode  # noqa: E402
 
+
+# Captured before any fixture stubs it, so the one test that needs the
+# real worker body can still reach it.
+REAL_ARTWORK_RUN = w.ArtworkTask.run
 
 PLAIN = TrackLyrics(plain="first line\nsecond line\nthird line")
 SYNCED = TrackLyrics(synced=[(1.0, "one"), (5.0, "two")])
@@ -97,7 +102,8 @@ def no_real_world(monkeypatch):
             self.msleep(5)
 
     monkeypatch.setattr(w.MonitorThread, "run", fake_run)
-    for task in (w.PlayerCommandTask, w.SeekTask, w.SpeakTask, w.FetchTask):
+    for task in (w.PlayerCommandTask, w.SeekTask, w.SpeakTask, w.FetchTask,
+                 w.ArtworkTask):
         monkeypatch.setattr(task, "run", lambda self: None)
     monkeypatch.setattr(w, "detect_voice", lambda: True)
     monkeypatch.setattr(w.hotkey, "_carbon", lambda: None)
@@ -120,7 +126,11 @@ def make_window(tmp_path):
             cache_dir=tmp_path / "cache", user_sync_dir=tmp_path / "syncs"
         )
         settings = QSettings(str(settings_path), QSettings.Format.IniFormat)
-        window = w.LyricsWindow(provider=provider, settings=settings)
+        window = w.LyricsWindow(
+            provider=provider,
+            settings=settings,
+            artwork_provider=ArtworkProvider(cache_dir=tmp_path / "art"),
+        )
         window.resize(460, 220)
         windows.append(window)
         return window
@@ -286,6 +296,7 @@ def test_bare_menu_when_every_layer_is_dormant(make_window):
     assert visible_keys(window) == (
         m.SHOW_LYRICS,
         m.SEPARATOR_AFTER_SHOW,
+        m.ALBUM_COLOUR,
         m.ALL_DESKTOPS,
         m.SEPARATOR_BEFORE_QUIT,
         m.QUIT,
@@ -603,6 +614,267 @@ def test_there_is_no_appearance_setting(make_window):
     window._save_settings()
     keys = window._settings.allKeys()
     assert not any("appearance" in k or "theme" in k for k in keys)
+
+
+# -- album colour ---------------------------------------------------------
+
+
+RED_COVER = (200, 40, 40)
+
+
+def art_snapshot(track_id="t1", url="http://cover", kind="track"):
+    return PlayerSnapshot(
+        state=PlaybackState.PLAYING,
+        track_id=track_id,
+        track_kind=kind,
+        title="Song",
+        artist="Artist",
+        album="Album",
+        duration_ms=200000,
+        position_seconds=0.0,
+        artwork_url=url,
+    )
+
+
+@pytest.fixture
+def artwork_tasks(monkeypatch):
+    """Record the cover lookups the window starts.
+
+    A recording subclass rather than a patched thread pool: _pool is
+    QThreadPool.globalInstance(), a process-wide singleton, so assigning
+    to its start() leaks into every test that runs afterwards.
+    """
+    started = []
+    real = w.ArtworkTask
+
+    class Recording(real):
+        def __init__(self, provider, track_id, url):
+            super().__init__(provider, track_id, url)
+            started.append((track_id, url))
+
+    monkeypatch.setattr(w, "ArtworkTask", Recording)
+    return started
+
+
+def painted_background(window):
+    """The colour paintEvent actually reaches for, mid-fade included."""
+    return window._current_background()
+
+
+def settle_tint(window):
+    """Run the cross-fade to its end without waiting out the animation."""
+    if window._tint_anim is not None:
+        window._tint_anim.setCurrentTime(w._TINT_FADE_MS)
+    APP.processEvents()
+
+
+def test_album_colour_is_off_by_default(make_window):
+    """The layers principle: the plain window is what the app is."""
+    window = make_window()
+    assert window._album_colour is False
+    assert window._menu_actions[m.ALBUM_COLOUR].isChecked() is False
+    assert painted_background(window) == ap.DARK.solid
+
+
+def test_nothing_is_fetched_while_the_layer_is_off(make_window, artwork_tasks):
+    """A disabled feature does not get to make network requests."""
+    window = make_window()
+    window._on_track_change(art_snapshot())
+    assert artwork_tasks == []
+
+
+def test_enabling_it_asks_for_the_current_track(make_window, artwork_tasks):
+    """Switched on mid-song, it must not wait for the next track."""
+    window = make_window()
+    window._on_track_change(art_snapshot())
+    assert artwork_tasks == []
+
+    window._menu_actions[m.ALBUM_COLOUR].trigger()
+    assert window._album_colour is True
+    assert artwork_tasks == [("t1", "http://cover")]
+
+
+def test_a_cover_colour_tints_the_background(make_window):
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+
+    expected = ap.tinted(ap.DARK, RED_COVER, ap.Appearance.DARK).solid
+    assert painted_background(window) == expected
+    assert painted_background(window) != ap.DARK.solid
+
+
+def test_switching_it_off_restores_the_previous_look_exactly(make_window):
+    """The acceptance criterion, and the layers principle: off must equal
+    the app before this feature existed, to the byte."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+    assert painted_background(window) != ap.DARK.solid
+
+    window._menu_actions[m.ALBUM_COLOUR].trigger()  # off
+    settle_tint(window)
+    assert window._album_colour is False
+    assert painted_background(window) == ap.DARK.solid
+    assert window._menu_actions[m.ALBUM_COLOUR].isChecked() is False
+
+
+def test_a_cover_landing_after_the_layer_is_off_changes_nothing(make_window):
+    """Covers are in flight when the toggle is clicked."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._set_album_colour(False)
+
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+    assert painted_background(window) == ap.DARK.solid
+
+
+def test_a_cover_for_a_track_that_has_moved_on_is_dropped(make_window):
+    """Skipping through tracks puts several lookups in flight at once, and
+    the last to land is not the one on screen."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot(track_id="t2"))
+
+    window._on_artwork_ready("t1", RED_COVER)  # the previous track's cover
+    settle_tint(window)
+    assert painted_background(window) == ap.DARK.solid
+
+
+def test_a_cover_with_no_usable_colour_leaves_the_window_alone(make_window):
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+
+    window._on_artwork_ready("t1", None)
+    settle_tint(window)
+    assert painted_background(window) == ap.DARK.solid
+
+
+def test_the_setting_is_persisted_and_restored(make_window):
+    window = make_window()
+    window._set_album_colour(True)
+    window._settings.sync()
+
+    reopened = make_window()
+    assert reopened._album_colour is True
+    assert reopened._menu_actions[m.ALBUM_COLOUR].isChecked() is True
+
+
+def test_the_tint_cross_fades_rather_than_snapping(make_window):
+    """A colour that changed in one frame reads as a glitch, not as the
+    song changing."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+
+    window._on_artwork_ready("t1", RED_COVER)
+    assert window._tint_anim is not None
+    assert window._tint_anim.duration() == w._TINT_FADE_MS
+    assert painted_background(window) == ap.DARK.solid  # still where it began
+
+    window._tint_anim.setCurrentTime(w._TINT_FADE_MS // 2)
+    APP.processEvents()
+    midway = painted_background(window)
+    assert midway not in (ap.DARK.solid,)
+
+    settle_tint(window)
+    assert painted_background(window) == ap.tinted(
+        ap.DARK, RED_COVER, ap.Appearance.DARK
+    ).solid
+
+
+def test_a_second_cover_fades_on_from_where_the_first_had_got_to(make_window):
+    """Tracks skipped quickly interrupt a fade in progress; restarting
+    from the old target would jump backwards first."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._on_artwork_ready("t1", RED_COVER)
+    window._tint_anim.setCurrentTime(w._TINT_FADE_MS // 2)
+    APP.processEvents()
+    midway = painted_background(window)
+
+    window._on_track_change(art_snapshot(track_id="t2"))
+    window._on_artwork_ready("t2", (40, 60, 200))
+    assert window._tint_from == midway
+
+
+def test_the_tint_survives_an_appearance_switch(make_window):
+    """The cover colour is kept; what it derives from is not. It must come
+    out re-derived against the new palette, not carried across."""
+    window = make_window()
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+
+    set_scheme(Qt.ColorScheme.Light)
+    assert window._tint_rgb == RED_COVER
+    assert painted_background(window) == ap.tinted(
+        ap.LIGHT, RED_COVER, ap.Appearance.LIGHT
+    ).solid
+
+
+def test_the_tint_never_touches_the_text(make_window):
+    """Contrast is a promise about the sung line, and the stylesheet is
+    where the sung line's colour lives."""
+    window = make_window()
+    window._set_album_colour(True)
+    load(window, SYNCED)
+    before = window.styleSheet()
+
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+    assert window.styleSheet() == before
+    assert ap.rgba(ap.DARK.current) in window.styleSheet()
+
+
+def test_non_music_items_are_never_looked_up(make_window, artwork_tasks):
+    """DJ narration and ads reuse other tracks' identity, so a cover
+    fetched for one would be cached against the wrong song."""
+    window = make_window()
+    window._set_album_colour(True)
+    artwork_tasks.clear()
+
+    window._on_track_change(art_snapshot(track_id="t9", kind="media"))
+    assert artwork_tasks == []
+
+
+def test_a_track_without_a_cover_is_still_looked_up_from_cache(
+    make_window, artwork_tasks
+):
+    """No URL is not the same as no answer: the colour may already be
+    known from a previous play."""
+    window = make_window()
+    window._set_album_colour(True)
+    artwork_tasks.clear()
+
+    window._on_track_change(art_snapshot(url=None))
+    assert artwork_tasks == [("t1", None)]
+
+
+def test_the_artwork_task_never_raises_into_the_pool(make_window):
+    """It runs on a pool thread where an exception would be swallowed
+    somewhere unhelpful, so it has to catch its own."""
+
+    class Exploding:
+        def colour_for(self, track_id, url):
+            raise RuntimeError("boom")
+
+    reported = []
+    task = w.ArtworkTask(Exploding(), "t1", "http://cover")
+    task.signals.finished.connect(lambda tid, colour: reported.append((tid, colour)))
+    REAL_ARTWORK_RUN(task)  # the fixture stubs run(); this test is about it
+    APP.processEvents()
+    assert reported == [("t1", None)]
 
 
 # -- the global hotkey ----------------------------------------------------

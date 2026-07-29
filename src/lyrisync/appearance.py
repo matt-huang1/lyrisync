@@ -26,8 +26,9 @@ both to the floor over both extremes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
+from typing import Optional
 
 # Straight-alpha RGBA, 0-255 per channel. Tuples rather than QColor so
 # nothing here needs Qt; window.py converts at the point of use.
@@ -207,3 +208,157 @@ def rgba(colour: RGBA) -> str:
     """One colour as a Qt stylesheet function call."""
     red, green, blue, alpha = colour
     return f"rgba({red}, {green}, {blue}, {alpha})"
+
+
+# -- tinting the panel with the album's colour ---------------------------
+
+# THE GOVERNING RULE: the artwork supplies a HUE and nothing else. Its
+# luminance and its saturation are discarded and replaced with ours, per
+# mode, so a near-white cover cannot produce a pale window and a hot pink
+# one cannot produce a hot pink window. The failure this prevents is the
+# obvious way to do it — sampling a colour and painting with it — which
+# works beautifully for three albums and then meets a neon cover.
+#
+# How much colour a tint carries. Saturation behaves very differently at
+# the two ends of the lightness range: a near-black panel and a near-white
+# one both compress it hard, so these sit high and still produce a cast
+# rather than a colour — a fully saturated cyan cover makes a pale mint
+# panel, which is the whole point.
+#
+# They are this high because pinning the luminance made them free. Sweeping
+# 0.60 to 1.00 moves the worst-case contrast across every hue by 0.01,
+# from 4.68 to 4.67 — so the usual trade of character against legibility
+# is not being made here, and there was no reason to be timid. Short of
+# 1.00 only because full saturation pins a channel to 0 or 255 and starts
+# to read as electric. test_scrim.py holds both to the floor across every
+# hue, not the few anyone would think to try.
+TINT_SATURATION = {Appearance.DARK: 0.85, Appearance.LIGHT: 0.95}
+
+# An artwork colour flatter than this has no hue worth taking — a black
+# and white cover would otherwise be assigned whatever hue its noise
+# happened to lean towards.
+MIN_ARTWORK_SATURATION = 0.10
+
+
+def relative_luminance(rgb) -> float:
+    """WCAG relative luminance. The quantity the contrast floor is written
+    in, and therefore the one a tint must not move."""
+    def channel(value: float) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (channel(c) for c in rgb[:3])
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def rgb_to_hsl(rgb) -> tuple[float, float, float]:
+    """(hue 0-360, saturation 0-1, lightness 0-1)."""
+    red, green, blue = (c / 255 for c in rgb[:3])
+    high, low = max(red, green, blue), min(red, green, blue)
+    lightness = (high + low) / 2
+    if high == low:
+        return 0.0, 0.0, lightness  # achromatic: no hue exists
+    span = high - low
+    saturation = (
+        span / (high + low) if lightness <= 0.5 else span / (2.0 - high - low)
+    )
+    if high == red:
+        hue = ((green - blue) / span) % 6
+    elif high == green:
+        hue = (blue - red) / span + 2
+    else:
+        hue = (red - green) / span + 4
+    return hue * 60, saturation, lightness
+
+
+def hsl_to_rgb(hue: float, saturation: float, lightness: float) -> tuple[int, int, int]:
+    if saturation <= 0:
+        value = round(lightness * 255)
+        return value, value, value
+    high = (
+        lightness * (1 + saturation)
+        if lightness < 0.5
+        else lightness + saturation - lightness * saturation
+    )
+    low = 2 * lightness - high
+
+    def component(offset: float) -> int:
+        t = ((hue / 360) + offset) % 1.0
+        if t < 1 / 6:
+            value = low + (high - low) * 6 * t
+        elif t < 1 / 2:
+            value = high
+        elif t < 2 / 3:
+            value = low + (high - low) * (2 / 3 - t) * 6
+        else:
+            value = low
+        return max(0, min(255, round(value * 255)))
+
+    return component(1 / 3), component(0), component(-1 / 3)
+
+
+def _at_luminance(hue: float, saturation: float, target: float) -> tuple[int, int, int]:
+    """The colour of this hue and saturation whose relative luminance
+    matches ``target``.
+
+    Bisection rather than a formula: relative luminance is not HSL's
+    lightness and the two disagree badly across hues — pure yellow and
+    pure blue sit at the same HSL lightness and nowhere near the same
+    luminance. Holding HSL lightness constant would therefore have moved
+    the contrast floor by hue, which is exactly the bug a hue-only tint
+    is supposed to avoid. Luminance rises monotonically with lightness at
+    fixed hue and saturation, so this always converges.
+    """
+    low, high = 0.0, 1.0
+    for _ in range(24):
+        middle = (low + high) / 2
+        if relative_luminance(hsl_to_rgb(hue, saturation, middle)) < target:
+            low = middle
+        else:
+            high = middle
+    return hsl_to_rgb(hue, saturation, (low + high) / 2)
+
+
+def usable_hue(artwork_rgb) -> Optional[float]:
+    """The hue to tint with, or None when the artwork has none worth
+    taking. Callers treat None as "leave the palette alone"."""
+    if artwork_rgb is None:
+        return None
+    hue, saturation, _ = rgb_to_hsl(artwork_rgb)
+    if saturation < MIN_ARTWORK_SATURATION:
+        return None
+    return hue
+
+
+def tinted(palette: Palette, artwork_rgb, appearance: Appearance) -> Palette:
+    """``palette`` recoloured towards the artwork's hue.
+
+    Only the two backgrounds move. Text keeps every value 12a measured,
+    which is what lets the contrast floor be re-checked rather than
+    re-derived: the thing behind the words changes hue at exactly the same
+    luminance, and the words do not change at all.
+
+    An unusable artwork colour returns the palette unchanged — the same
+    object, so "no tint" and "tinting off" are indistinguishable
+    downstream.
+    """
+    hue = usable_hue(artwork_rgb)
+    if hue is None:
+        return palette
+    saturation = TINT_SATURATION[appearance]
+
+    def recolour(colour: RGBA) -> RGBA:
+        red, green, blue = _at_luminance(
+            hue, saturation, relative_luminance(colour)
+        )
+        return (red, green, blue, colour[3])
+
+    return replace(palette, scrim=recolour(palette.scrim), solid=recolour(palette.solid))
+
+
+def blend(first: RGBA, second: RGBA, mix: float) -> RGBA:
+    """``first`` towards ``second``, for the cross-fade between two tints."""
+    mix = max(0.0, min(1.0, mix))
+    return tuple(  # type: ignore[return-value]
+        round(a + (b - a) * mix) for a, b in zip(first, second)
+    )

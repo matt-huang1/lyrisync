@@ -51,12 +51,23 @@ def test_quit_is_last_and_show_lyrics_first():
 
 
 def test_bare_menu_with_every_layer_dormant():
-    """Layers off must equal the original core app: show/hide, Spaces, quit."""
+    """Layers off must equal the original core app: show/hide, the two
+    standing choices about how the window looks, and quit."""
     assert without_separators(entries()) == (
         m.SHOW_LYRICS,
+        m.ALBUM_COLOUR,
         m.ALL_DESKTOPS,
         m.QUIT,
     )
+
+
+def test_album_colour_is_offered_before_any_music_has_played():
+    """Unlike the learning layers it is not gated on the song. It is a
+    standing preference about the window, and one that appeared and
+    vanished with each track would be hardest to find at the moment the
+    user goes looking — before the music starts."""
+    assert m.ALBUM_COLOUR in entries()
+    assert m.ALBUM_COLOUR in m.visible_entries(**ALL_LAYERS)
 
 
 def test_show_hide_spaces_and_quit_are_always_offered():
