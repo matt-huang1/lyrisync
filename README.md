@@ -27,30 +27,48 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 
 ## Install
 
+### Build it yourself
+
 ```sh
 git clone git@github.com:matt-huang1/lyrisync.git
 cd lyrisync
 python3 -m venv .venv
 .venv/bin/pip install -e ".[build]"
 make app
+mv dist/LyriSync.app /Applications/
 ```
 
-That produces `dist/LyriSync.app`. Drag it to `/Applications`.
+An app you build on your own Mac is never marked as downloaded, so macOS has no reason to question it: **it opens with an ordinary double-click and there is no security warning to click through.** No certificate, keychain or Xcode needed either — `make app` renders the icon, freezes the bundle and signs it ad-hoc in one step.
 
-**First launch: right-click the app and choose Open**, then confirm. Double-clicking a fresh copy is refused, because the app is signed only ad-hoc — there is no Apple Developer certificate behind it, so macOS has nobody to check it against. It is needed once; every launch after that is a normal double-click.
+This is also the route that requires trusting nobody: you can read what you are about to run.
 
-Then, on its first poll, macOS asks for **Automation** permission ("LyriSync wants to control Spotify"). Grant it — that is how the app reads the current track and position. Moving the app afterwards can make macOS ask again, so put it where you want it first.
+### Or download the release
+
+[**LyriSync-1.0.0.zip**](https://github.com/matt-huang1/lyrisync/releases/download/v1.0.0/LyriSync-1.0.0.zip) (36 MB) — built from the `v1.0.0` tag. Check it before opening it:
+
+```sh
+shasum -a 256 ~/Downloads/LyriSync-1.0.0.zip
+# 52f7ac2bb5665d9b787d27c6a1c92d8cd22d0eadf21da677d52a1a15cba9482e
+```
+
+The app is signed **ad-hoc, not with an Apple Developer ID, and it is not notarised.** macOS will therefore refuse to open a downloaded copy on first launch. That is Gatekeeper working as intended, and getting past it is a decision to make deliberately rather than a step to follow — [docs/gatekeeper.md](docs/gatekeeper.md) explains what the block means, the two ways round it, and what notarisation would and would not have told you.
+
+### Either way
+
+On its first poll, macOS asks for **Automation** permission ("LyriSync wants to control Spotify"). This one is not a trust warning but a capability grant, and the app genuinely needs it: it is how the current track and playback position are read. Moving the app afterwards can make macOS ask again, so put it where you want it first.
 
 For the spoken-reference feature, install the Korean system voice **Yuna** (System Settings → Accessibility → Spoken Content → System Voice → Manage Voices…). Without it, that one feature quietly disables itself.
 
-To run from the checkout instead — which is what development uses:
+### Running from a checkout
+
+What development uses:
 
 ```sh
 .venv/bin/pip install -e .
 .venv/bin/lyrisync
 ```
 
-Both share the same settings, so window position and every toggle carry over. More in [docs/packaging.md](docs/packaging.md).
+It shares settings with the bundled app, so window position and every toggle carry over. More in [docs/packaging.md](docs/packaging.md).
 
 ## Usage
 
@@ -81,7 +99,7 @@ The reasoning, the trade-offs and the measurements live in **[docs/](docs/)** �
 | [Testing and CI](docs/testing-and-ci.md) | the guards that keep the suite off your Spotify |
 | [Changelog](CHANGELOG.md) | the milestones in order |
 
-Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [per-app window position](docs/per-app-position.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), and [packaging](docs/packaging.md).
+Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [per-app window position](docs/per-app-position.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), [packaging](docs/packaging.md), and [Gatekeeper](docs/gatekeeper.md).
 
 ## Credits
 

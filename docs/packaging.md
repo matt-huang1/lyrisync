@@ -92,21 +92,32 @@ refuses the AppleScript calls *silently*, and the app looks broken in the
 most confusing way available — window up, menu bar item present, never
 finds a song.
 
-## Ad-hoc signing, and Gatekeeper
+## Ad-hoc signing
 
 Ad-hoc signing is what lets the bundle run at all on Apple silicon, where
-unsigned code is refused outright. It is **not** a Developer ID signature
-and says nothing about who built it.
+unsigned code is refused outright. It also means the bundle has not been
+altered since it was signed. What it is **not** is a Developer ID
+signature: it carries no identity, so it says nothing about who built it.
 
-So a fresh copy needs **right-click → Open** once. There is no Apple
-Developer certificate behind this app and it has not been notarised, so
-macOS has nobody to check it against; right-click → Open is how you say
-you vouch for it yourself. Every launch after that is a normal
-double-click.
+```
+$ codesign -dv /Applications/LyriSync.app
+Signature=adhoc
+TeamIdentifier=not set
+```
+
+That has no effect on a copy you built yourself — it is not marked as
+downloaded, so macOS never asks Gatekeeper about it and it opens
+normally. It matters only for the release zip, which is quarantined by
+whichever browser fetched it and is therefore blocked on first launch.
+What that block means and what to do about it is
+[its own page](gatekeeper.md), deliberately: it is a decision for the
+reader rather than a step in a build guide.
 
 The first time it polls, macOS asks for **Automation** permission
-("LyriSync wants to control Spotify"). Moving the app afterwards can make
-macOS ask again, so put it where you want it before granting.
+("LyriSync wants to control Spotify"). That one is a capability grant
+rather than a trust warning, and the app genuinely needs it. Moving the
+app afterwards can make macOS ask again, so put it where you want it
+before granting.
 
 ## Running from a checkout instead
 

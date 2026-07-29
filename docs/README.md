@@ -40,6 +40,7 @@ the reasoning: what was decided, why, and what was measured to check it.
 - [The menu, and living in the system](menu-and-system-integration.md)
 - [Testing, and the guards that make it safe](testing-and-ci.md)
 - [Packaging](packaging.md)
+- [Gatekeeper, and why a downloaded build is blocked](gatekeeper.md)
 
 `CLAUDE.md` in the repository root is the raw working decision log — every
 decision in the order it was made, including the ones these pages
