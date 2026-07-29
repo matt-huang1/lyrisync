@@ -55,18 +55,39 @@ def test_no_source_file_mentions_clearing_the_user_sync_directory():
                 ), f"{path.name}: {line.strip()}"
 
 
-def test_readme_cleanup_advice_never_points_at_user_syncs():
-    """The README tells users to delete .lyrics_cache/ to reset. No
-    sentence anywhere may say the same of .user_syncs/."""
+def prose_files():
+    """Every page a user could take cleanup advice from.
+
+    The README used to carry all of it; the depth now lives in docs/, so
+    the guard follows it there. CLAUDE.md is deliberately excluded — it is
+    the working decision log, where the rule itself is written down and
+    naming the thing that must not happen is the point.
+    """
+    return [
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "DESIGN_PHILOSOPHY.md",
+        REPO_ROOT / "CHANGELOG.md",
+        *sorted((REPO_ROOT / "docs").glob("*.md")),
+    ]
+
+
+def test_cleanup_advice_never_points_at_user_syncs():
+    """The docs tell users that clearing .lyrics_cache/ is a safe reset. No
+    sentence in any of them may say the same of .user_syncs/."""
     name = lp.DEFAULT_USER_SYNC_DIR.name
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    sentences = re.split(r"(?<=[.!?])\s+", readme)
-    mentions = [s for s in sentences if name in s]
-    assert mentions, "the README should say where hand-made syncs live"
-    for sentence in mentions:
-        assert not re.search(
-            r"\b(delete|remove|clear|wipe|purge)\b", sentence.lower()
-        ), sentence
+    seen = 0
+    for path in prose_files():
+        if not path.exists():
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", path.read_text(encoding="utf-8"))
+        for sentence in sentences:
+            if name not in sentence:
+                continue
+            seen += 1
+            assert not re.search(
+                r"\b(delete|remove|clear|wipe|purge)\b", sentence.lower()
+            ), f"{path.name}: {sentence}"
+    assert seen, "the docs should say where hand-made syncs live"
 
 
 def test_user_sync_directory_is_gitignored():
