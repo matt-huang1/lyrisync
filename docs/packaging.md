@@ -16,6 +16,35 @@ keychain, no Xcode.
 PySide6 and pyobjc are both covered by hooks PyInstaller maintains
 upstream. py2app needs hand-written recipes for the same bundle.
 
+## The version is never written in the spec
+
+Both version keys in `Info.plist` — `CFBundleShortVersionString`, which
+Finder shows, and `CFBundleVersion`, which macOS compares — come from
+`importlib.metadata.version("lyrisync")`.
+
+The **installed** distribution, deliberately, rather than a re-read of
+`pyproject.toml`: the installed package is what PyInstaller freezes into
+the bundle, so it is the only thing that knows what is actually going
+inside. Reading the file would describe the source tree, which is the same
+thing right up until it is not.
+
+That leaves one way to be wrong, and the build refuses on it. An editable
+install's metadata is a snapshot taken at install time, so editing
+`pyproject.toml` without reinstalling leaves it stale — and the bundle
+would quietly claim the older version. The spec compares the two and stops:
+
+```
+version drift: pyproject.toml declares 1.0.1, the installed lyrisync is
+1.0.0. The bundle would claim 1.0.0. Reinstall first: pip install -e '.[build]'
+```
+
+The test suite carries the same comparison, so the mismatch surfaces at
+`pytest` rather than at release time. `tests/test_packaging.py` also reads
+the spec as an AST — a spec cannot be imported, since PyInstaller injects
+`Analysis`, `BUNDLE` and `SPECPATH` into its globals — and asserts where
+the number comes *from*. Pinning the value in a test would just be the
+second copy of the version again.
+
 ## The bundle identifier is the settings contract
 
 `com.lyrisync.lyrisync` is exactly what `QSettings("lyrisync",

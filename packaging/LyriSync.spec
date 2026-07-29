@@ -7,20 +7,46 @@ plugin, the pyobjc framework tangle), where py2app's PySide6 story still
 needs hand-written recipes to get the same bundle. One tool, one command,
 and ad-hoc signing built into the same run.
 
-Read the version from pyproject.toml rather than repeating it: a bundle
-that claims a different version from the package inside it is a bug that
-nobody notices until someone reports one.
+The version is never written here. A bundle that claims a different
+version from the package inside it is a bug nobody notices until someone
+reports one, so both Info.plist keys come from the one place that knows
+what is actually being frozen.
 """
 
 import sys
 import tomllib
+from importlib.metadata import PackageNotFoundError, version as installed_version
 from pathlib import Path
 
 PROJECT = Path(SPECPATH).parent
 PACKAGING = PROJECT / "packaging"
 
+# The INSTALLED distribution's version, not pyproject.toml's — because the
+# installed package is what PyInstaller freezes into the bundle. Reading
+# the file instead would describe the source tree, which is the same thing
+# right up until it is not.
+try:
+    VERSION = installed_version("lyrisync")
+except PackageNotFoundError:  # pragma: no cover - build-time only
+    raise SystemExit(
+        "lyrisync is not installed in this environment, so there is no "
+        "version to stamp the bundle with. Run: pip install -e '.[build]'"
+    )
+
+# And the one way that can be wrong: an editable install's metadata is a
+# snapshot taken at install time, so editing pyproject.toml without
+# reinstalling leaves it stale. That failure is invisible in the finished
+# app — the bundle simply claims the old version — so the build refuses
+# rather than shipping a bundle that misstates itself.
 with open(PROJECT / "pyproject.toml", "rb") as handle:
-    VERSION = tomllib.load(handle)["project"]["version"]
+    DECLARED = tomllib.load(handle)["project"]["version"]
+
+if VERSION != DECLARED:
+    raise SystemExit(
+        f"version drift: pyproject.toml declares {DECLARED}, the installed "
+        f"lyrisync is {VERSION}. The bundle would claim {VERSION}. "
+        "Reinstall first: pip install -e '.[build]'"
+    )
 
 # The plist key that decides whether the AppleScript calls work at all.
 # macOS shows this sentence in the Automation prompt on first poll, and an
