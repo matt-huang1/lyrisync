@@ -63,10 +63,12 @@ def current_bundle_id() -> Optional[str]:
         return None
     try:
         app = workspace.frontmostApplication()
-        return str(app.bundleIdentifier()) if app is not None else None
+        bundle_id = str(app.bundleIdentifier()) if app is not None else None
     except Exception:
         logger.debug("could not read the frontmost application", exc_info=True)
         return None
+    logger.debug("asked macOS for the frontmost app: %s", bundle_id)
+    return bundle_id
 
 
 def own_bundle_id() -> Optional[str]:
@@ -149,6 +151,8 @@ class FrontmostWatcher:
             centre.removeObserver_(observer)
         except Exception:
             logger.debug("could not remove the activation observer", exc_info=True)
+            return
+        logger.debug("stopped watching for application activations")
 
     def _handle(self, notification) -> None:
         """Pull the bundle identifier out of a notification and hand it on.
@@ -166,7 +170,12 @@ class FrontmostWatcher:
             logger.debug("unreadable activation notification", exc_info=True)
             return
         if not bundle_id:
-            return  # a process with no bundle identifier is nothing to key on
+            # A process with no bundle identifier is nothing to key on. Said
+            # out loud, because from further up the chain this is
+            # indistinguishable from no notification having arrived at all.
+            logger.debug("activation notification with no bundle identifier")
+            return
+        logger.debug("activation notification: %s", bundle_id)
         try:
             self._on_activate(str(bundle_id))
         except Exception:

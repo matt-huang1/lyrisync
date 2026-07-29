@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-709 tests, run on every push. The interesting part is not the count — it
+737 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule

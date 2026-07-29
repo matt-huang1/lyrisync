@@ -8,6 +8,7 @@ ALL_LAYERS = dict(
     sync_offered=True,
     login_item_offered=True,
     positions_remembered=True,
+    remembering_positions=True,
 )
 NO_LAYERS = dict(
     has_korean_lyrics=False,
@@ -16,6 +17,7 @@ NO_LAYERS = dict(
     sync_offered=False,
     login_item_offered=False,
     positions_remembered=False,
+    remembering_positions=False,
 )
 
 
@@ -136,6 +138,7 @@ def test_open_at_login_sits_with_the_window_behaviour_entries():
     behaviour = (
         m.ALL_DESKTOPS,
         m.REMEMBER_POSITION,
+        m.POSITION_STATUS,
         m.FORGET_POSITIONS,
         m.OPEN_AT_LOGIN,
     )
@@ -156,6 +159,26 @@ def test_forgetting_stays_reachable_with_the_layer_switched_off():
     reach the control that clears it. The entry follows the map, not the
     toggle — visible_entries is never told whether the layer is on."""
     assert m.FORGET_POSITIONS in entries(positions_remembered=True)
+
+
+def test_the_position_readout_appears_with_the_layer_and_not_the_map():
+    """Learning is implicit, so this line is the only thing in the app that
+    says what has been learned — and it is needed most when nothing has
+    been, which is exactly when a user cannot tell the feature from a
+    broken one. So it follows the toggle, not the map."""
+    assert m.POSITION_STATUS not in entries()
+    assert m.POSITION_STATUS in entries(remembering_positions=True)
+    assert m.POSITION_STATUS in entries(
+        remembering_positions=True, positions_remembered=True
+    )
+
+
+def test_the_position_readout_goes_when_the_layer_goes():
+    """Unlike the forget entry, which follows the map so a bad one stays
+    clearable. This one names the frontmost app, and with the layer off
+    nothing is watching which app that is — a stale line is worse than no
+    line, and going to look would be the watching that "off" ends."""
+    assert m.POSITION_STATUS not in entries(positions_remembered=True)
 
 
 def test_remembering_is_offered_before_anything_has_been_learned():

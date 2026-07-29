@@ -18,6 +18,7 @@ ECHO = "echo"
 ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
 REMEMBER_POSITION = "remember_position"
+POSITION_STATUS = "position_status"
 FORGET_POSITIONS = "forget_positions"
 OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
@@ -37,6 +38,7 @@ MENU_ORDER = (
     ALBUM_COLOUR,
     ALL_DESKTOPS,
     REMEMBER_POSITION,
+    POSITION_STATUS,
     FORGET_POSITIONS,
     OPEN_AT_LOGIN,
     SYNC,
@@ -74,6 +76,7 @@ def visible_entries(
     sync_offered: bool,
     login_item_offered: bool = False,
     positions_remembered: bool = False,
+    remembering_positions: bool = False,
 ) -> tuple[str, ...]:
     """The entries to show, in ``MENU_ORDER``, for this app state.
 
@@ -92,6 +95,13 @@ def visible_entries(
     forget, and disappears again the moment there is not — including when
     the layer itself is switched off, because a bad map should be
     clearable without turning the feature back on first.
+
+    The position readout is shown only while the layer is ON, and unlike
+    every other entry here that is not about whether it could act. It is
+    about what the app is entitled to say: with the layer off nothing is
+    watching which app is in front, so a line naming the frontmost app
+    would either be stale or would mean going and looking — and going and
+    looking with the layer off is exactly what "off" promises not to do.
     """
     shown = set(ALWAYS_VISIBLE)
     if has_korean_lyrics:
@@ -106,6 +116,8 @@ def visible_entries(
         shown.add(OPEN_AT_LOGIN)
     if positions_remembered:
         shown.add(FORGET_POSITIONS)
+    if remembering_positions:
+        shown.add(POSITION_STATUS)
     return _with_separators(shown)
 
 

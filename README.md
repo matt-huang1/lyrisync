@@ -12,7 +12,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 - **⇧⌘J from anywhere** shows and hides the lyrics without switching away from what you were doing. No Accessibility permission.
 - **Album colour** — an optional layer that colours the window from the current cover's hue.
 - **Show on all desktops** — an optional mode that keeps the window visible across Spaces and over full-screen apps.
-- **Remember position per app** — an optional layer that puts the window back where you last left it for whichever app you switch to. It learns by watching you drag it; there is nothing to save.
+- **Remember position per app** — an optional layer that puts the window back where you last left it for whichever app you switch to. It learns by watching you drag it; there is nothing to save. The menu shows what it has learned and where the app you are in is placed, so there is no guessing whether it took.
 - **Korean romanisation** — an optional pronunciation line under the current lyric.
 - **Spoken reference** — pause the music and hear the current line read slowly, then carry on.
 - **Line looping and echo practice** — repeat a line, or alternate hearing it with a silent turn to sing it yourself.
@@ -83,11 +83,11 @@ Play something in Spotify and the window follows along.
 - **↻** repeats the current line; the **speech bubble** speaks it aloud.
 - **Sync this song** (right-click) times a song by hand: the track restarts, and you tap the wide bar as each line begins. ↩ undoes a tap, ✕ abandons the pass. Finish the last line and it saves itself. Once a song has your sync, the entry becomes **Re-sync this song**.
 
-Two terminal tools exist for debugging: `lyrisync-monitor` and `lyrisync-lyrics`.
+Two terminal tools exist for debugging: `lyrisync-monitor` and `lyrisync-lyrics`. `LYRISYNC_LOG=DEBUG` makes the running app explain itself line by line — which app came to the front, what was remembered for it, and why anything it declined to do was declined.
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 709 tests run headless on Linux CI without touching the network, your settings or your Spotify.
+A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 737 tests run headless on Linux CI without touching the network, your settings or your Spotify.
 
 ## Documentation
 

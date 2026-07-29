@@ -3,6 +3,22 @@
 Milestones in the order they happened. Dates are commit dates; the deeper
 reasoning behind each is in [docs/](docs/).
 
+## Milestone 14.1 — making it visible, and finding out why it was not
+
+Reported as not working, and — the more useful half — as impossible to
+tell apart from working. Dragging the window turns out to **activate
+LyriSync**, so our own identifier arrived as the frontmost app and the
+self-filter refused to learn from every drag; the map could never gain an
+entry. Our own activation is now dropped rather than believed, so a drag
+records against the last app that was not us.
+
+The rest is feedback, because implicit learning with nothing to see is
+indistinguishable from a broken feature. The menu carries a live readout —
+how many apps are remembered, and where the app in front is placed — and
+`LYRISYNC_LOG=DEBUG` prints the whole chain, one line per decision, with
+every refusal naming itself. Verified with real mouse events against the
+built bundle, including switching between full-screen Spaces.
+
 ## Milestone 14 — per-app window position
 
 The window returns to wherever you last put it for whichever app just

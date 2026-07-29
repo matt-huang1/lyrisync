@@ -126,6 +126,149 @@ of whichever JSON reader loads it back. A file somebody edited by hand
 degrades rather than taking the feature down: unreadable text yields an
 empty map, and one bad entry costs only itself.
 
+## The bug that made all of this look broken
+
+Shipped, and reported as not working — with the second half of the report
+being that the user could not tell whether they were using it right. That
+second half is the more important one: **implicit learning with no
+feedback is indistinguishable from a broken feature**, so it has to be
+possible to tell the two apart before either can be fixed.
+
+The evidence was in the settings file: the layer was on, the window had
+plainly been dragged (its saved position had moved), and
+`window.app_positions` was `[]`. So drags were happening and nothing was
+being recorded, which narrows it to the three refusals in
+`learn_refusal` — and only one of them could hold with the layer on and a
+window being dragged.
+
+**Dragging the window activates LyriSync.** The feature's founding
+assumption was that it does not: the window is unfocusable and the app is
+an accessory, so a drag was thought to leave the frontmost app alone.
+Unfocusable is about *key focus*; app activation is a separate thing, and
+an accessory app can be frontmost. Measured, in both a source run and the
+built bundle:
+
+```
+… activation notification: com.lyrisync.lyrisync     ← the drag
+… learn: nothing recorded, LyriSync itself is frontmost
+```
+
+So every drag replaced the app the user was working in with ourselves,
+after which the self-filter — which exists for exactly this and was
+right to fire — refused to learn. The map could never gain an entry.
+
+The fix is one branch, and it belongs where the assumption failed rather
+than where the symptom appeared: **our own activation is dropped instead
+of becoming the frontmost app**, so what a drag records against is the
+last app that was not us. The self-filter in `learn_refusal` stays as
+well; it is now a second line rather than the only one, and it is what
+would catch this class of thing again.
+
+Reproduced before it was fixed, not inferred. The verification harness
+takes a `--without-filter` flag that puts the old handler back: with it,
+two real drags in two real applications leave `map=[]` and the window
+never follows — the reported symptom, on demand.
+
+### And the thing that hid it for a whole milestone
+
+Milestone 14's harness learned positions by calling `_learn_position`
+directly, which is the one step that cannot see this: no click, no
+activation, no bug. It is also why the earlier note in this file reads as
+though the accessory policy had settled the question — with the policy
+applied our own activation stopped arriving *at show()*, and nothing was
+ever clicked afterwards to make it arrive again.
+
+The harness now posts real `CGEvent` mouse presses, drags and releases at
+the window. That is the difference between testing the gesture and
+testing the function the gesture calls.
+
+## Seeing that it works
+
+Two answers, for two different questions.
+
+**"Is it recording anything, and does it know about the app I am in?"** —
+the menu says so, in words, whenever it is opened:
+
+```
+Remember position per app            ✓
+No positions remembered · com.apple.Safari not placed yet
+Forget remembered positions
+```
+
+A count and the app in front, because there are two ways to doubt an
+implicit feature: whether anything has been learned at all, and whether
+*this* app — the one a drag would record against — is one of the ones
+that has. A count alone leaves "is it working here?" unanswered; the
+position alone hides an empty map behind one app that happens to have no
+entry.
+
+It shows the bundle identifier rather than a friendly name. That is what
+the map is keyed on and what the log lines say, so someone comparing the
+two is comparing the same string — and asking macOS to localise it would
+mean reading something about the other app beyond the identifier it
+advertises, which this feature does not do.
+
+It is disabled, because it is a readout and not a control, and its
+`menuRole` is `NoRole` rather than Qt's default `TextHeuristicRole`: it
+is the one entry whose text the app does not write, and the heuristic
+that relocates "Preferences…" into the application menu matches
+substrings — `com.apple.systempreferences` would trip it. A diagnostic
+that moves itself depending on which app you switched to would vanish
+exactly when read.
+
+The readout follows the *toggle*, not the map, and unlike the forget
+entry that is not about whether it could act. It names the frontmost app,
+and with the layer off nothing is watching which app that is: a stale
+line would be worse than no line, and going to look would be the
+watching that "off" promises to end.
+
+**"What exactly happened just now?"** — `LYRISYNC_LOG=DEBUG` prints the
+whole chain, one line per decision, from the notification to the pixels:
+
+```
+per-app positions restored on: frontmost=com.apple.Safari watching=True remembered=2 own=com.lyrisync.lyrisync
+activation notification: com.microsoft.VSCode
+activation: com.microsoft.VSCode (arrival)
+settling: com.microsoft.VSCode has 12ms left — asking again
+settled: com.microsoft.VSCode — remembered at 900, 120
+move: 150, 600 → 900, 120
+learn: 396, 495 recorded for com.apple.Safari (1 apps remembered)
+```
+
+Every refusal names itself, and the reasons are not written twice:
+`learn_refusal` and `move_refusal` return the reason, `may_learn` and
+`may_move` are derived from them. A log line assembled separately from
+the rule it describes is a log line that can disagree with what the code
+did — which, in a feature whose whole problem was not being able to tell
+working from broken, would be worse than no line at all.
+
+`ActivationDebounce.observe` returns which of `ARRIVAL`, `REPEAT` and
+`UNKEYABLE` an announcement was, for the same reason: the alternative is
+asking the debounce about its own state afterwards and reconstructing the
+answer.
+
+### No on-window acknowledgement
+
+Considered and declined. A flash on the window at the moment a position
+is recorded would answer the question at exactly the right time, and it
+was rejected on three counts:
+
+- The only surface a transient line could take is the sung-line row —
+  the title card is the sole precedent for borrowing it, and that is
+  *about the song*. Covering a lyric to talk about the window is the
+  wrong trade in an ambient window.
+- To say anything the user could not already guess it would have to name
+  the app, which means printing a bundle identifier in the middle of the
+  lyrics. That is diagnostic text; it belongs in the menu and the log.
+- The wordless version — pulsing the hairline once — would be a second
+  animation of the album tint's edge, and
+  [13.2](appearance-and-materials.md) gave that edge a single owner
+  deliberately: the tint and the panel ride one cross-fade because two
+  animations of the same thing can only drift apart.
+
+The menu is refreshed at the moment of learning as well as on every
+opening, so the answer is one click away and always current.
+
 ## The toggle
 
 **Remember position per app** is always offered — a standing preference
@@ -167,8 +310,49 @@ Two things that harness got wrong first, both worth knowing:
 - It must call `apply_accessory_policy()` before creating the window, as
   `main()` does. Without it the process is a Regular app, `show()`
   activates it, and **our own bundle identifier arrives as the frontmost
-  app** — which the self-filter in `may_learn` correctly refused, so the
-  symptom was positions silently not being learned rather than anything
-  looking broken.
+  app** — which the self-filter in `learn_refusal` correctly refused, so
+  the symptom was positions silently not being learned rather than
+  anything looking broken.
 - It must pump the Qt event loop rather than sleeping in it, or no
   notification is ever delivered.
+
+### Re-verified with real gestures, and in the artefact
+
+The harness now drives the gesture rather than the function under it:
+real app switches with `osascript`, real mouse presses, drags and
+releases posted as `CGEvent`s, and a second independent watcher recording
+every activation macOS announces — including ours — so the raw stream can
+be compared with what the window did with it.
+
+Run against a source checkout (`org.python.python`) and then against the
+built bundle (`com.lyrisync.lyrisync`), because a source tree that is
+right and a bundle that is stale look identical from the outside. In the
+bundle: two real drags in two real applications recorded
+`[["com.microsoft.VSCode", 672, 260], ["com.apple.Safari", 396, 495]]`,
+and three switches between them moved the window to the right place three
+times out of three.
+
+### Full-screen Spaces are the same path, measured
+
+The most likely place for this to fail silently, and the case the author
+actually lives in — so it is asked of the artefact rather than inferred
+from the windowed case. It is not a separate path:
+
+- Entering full screen announces **nothing**, and that is correct: Safari
+  was already frontmost, so no activation happened.
+- Leaving that Space for a windowed app announces an ordinary activation.
+- Coming *back* into the full-screen Space announces an ordinary
+  activation too, 400 ms later the window follows, and it arrives at the
+  remembered position.
+
+Confirmed from pixels as well as from the log: a screen capture taken
+inside Safari's full-screen Space has the window sitting at the position
+learned for Safari. (With **Show on all desktops** off it would not be
+visible there at all — a Space switch would still be learned from and
+still be followed, but the result would be waiting on the desktop.)
+
+The scripted click on the menu bar item announced no activation at all.
+Whether that is because a status-item click does not activate an
+accessory app, or because the synthetic click never landed on it, cannot
+be told from the log — so the self-activation branch is justified by the
+drag, which *is* measured, and not by the menu.

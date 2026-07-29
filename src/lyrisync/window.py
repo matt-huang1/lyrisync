@@ -40,6 +40,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtCore import Property  # noqa: E402  (grouped separately: it is a class helper)
 from PySide6.QtGui import (
+    QAction,
     QActionGroup,
     QColor,
     QFont,
@@ -66,8 +67,9 @@ from lyrisync.app_positions import (
     ActivationDebounce,
     AppPositions,
     SETTLE_SECONDS,
-    may_learn,
-    may_move,
+    learn_refusal,
+    move_refusal,
+    status_summary,
 )
 from lyrisync.artwork import ArtworkProvider
 from lyrisync.geometry import (
@@ -99,6 +101,7 @@ from lyrisync.menu import (
     ECHO,
     FORGET_POSITIONS,
     OPEN_AT_LOGIN,
+    POSITION_STATUS,
     QUIT,
     REMEMBER_POSITION,
     ROMANISATION,
@@ -1904,14 +1907,39 @@ class LyricsWindow(QWidget):
         self._remember_position = enabled
         self._settings.setValue("window/remember_position", enabled)
         if enabled:
-            self._frontmost = frontmost.current_bundle_id()
-            self._watcher.start()
+            self._frontmost = self._read_frontmost()
+            started = self._watcher.start()
+            logger.info(
+                "per-app positions on: frontmost=%s watching=%s remembered=%d own=%s",
+                self._frontmost,
+                started,
+                len(self._positions),
+                self._own_bundle_id,
+            )
         else:
+            logger.info("per-app positions off: no longer watching activations")
             self._watcher.stop()
             self._debounce.cancel()
             self._settle_timer.stop()
             self._stop_move()
         self._refresh_menu()
+
+    def _read_frontmost(self) -> Optional[str]:
+        """Ask macOS which app is in front, refusing ourselves.
+
+        The same rule as the activation handler, at the other door. Asking
+        while LyriSync happens to be frontmost — the layer switched on from
+        a menu opened over our own window — would seed the frontmost app as
+        us, and the first drag would be refused for a reason the user could
+        not act on. None is the honest answer: unknown until the next
+        activation says otherwise, which the readout shows as much.
+        """
+        bundle_id = frontmost.current_bundle_id()
+        ours = self._own_bundle_id
+        if bundle_id and ours is not None and bundle_id == ours:
+            logger.debug("frontmost app is us — treating it as unknown for now")
+            return None
+        return bundle_id
 
     def _forget_positions(self) -> None:
         """Throw the whole map away. No confirmation: every entry costs one
@@ -1929,11 +1957,28 @@ class LyricsWindow(QWidget):
 
         Nothing happens yet: the arrival has to settle first, or a Cmd-Tab
         sweep would be six separate instructions to move.
+
+        Our own activation is noted and then dropped rather than becoming
+        the frontmost app. Opening the menu bar item can bring an accessory
+        app forward, and taking that at face value would replace the app
+        the user is actually working in with ourselves — after which a drag
+        would be refused by the self-filter in ``learn_refusal`` and the
+        user would see nothing being learned for no visible reason. What
+        the window follows is the last app that was not us.
         """
         if not self._remember_position:
+            logger.debug("activation: %s ignored, the layer is off", bundle_id)
+            return
+        if self._own_bundle_id is not None and bundle_id == self._own_bundle_id:
+            logger.debug(
+                "activation: %s is us — keeping %s as the frontmost app",
+                bundle_id,
+                self._frontmost,
+            )
             return
         self._frontmost = bundle_id
-        self._debounce.observe(bundle_id, time.monotonic())
+        outcome = self._debounce.observe(bundle_id, time.monotonic())
+        logger.debug("activation: %s (%s)", bundle_id, outcome)
         self._settle_timer.start(int(SETTLE_SECONDS * 1000))
 
     def _apply_settled_app(self) -> None:
@@ -1950,18 +1995,30 @@ class LyricsWindow(QWidget):
             # rule stays authoritative; the timer just asks again.
             remaining = self._debounce.remaining(now)
             if remaining > 0:
+                logger.debug(
+                    "settling: %s has %.0fms left — asking again",
+                    self._debounce.pending,
+                    remaining * 1000,
+                )
                 self._settle_timer.start(max(1, int(remaining * 1000) + 1))
             return
-        if not may_move(
+        refusal = move_refusal(
             enabled=self._remember_position,
             visible=self._lyrics_visible,
             dragging=self._drag_offset is not None or bool(self._resize_edges),
             syncing=self._syncing,
-        ):
+        )
+        if refusal is not None:
+            logger.debug("settled: %s — not moving, %s", bundle_id, refusal)
             return
         remembered = self._positions.recall(bundle_id)
         if remembered is None:
-            return  # never learned here: leave the window exactly where it is
+            # Never learned here: leave the window exactly where it is.
+            logger.debug(
+                "settled: %s — no position remembered, leaving the window", bundle_id
+            )
+            return
+        logger.debug("settled: %s — remembered at %d, %d", bundle_id, *remembered)
         self._move_to(QPoint(*remembered))
 
     def _move_to(self, target: QPoint) -> None:
@@ -1975,8 +2032,24 @@ class LyricsWindow(QWidget):
         clamped = _clamped_point(
             QRect(target, self.size()), self._available_geometry()
         )
+        if clamped != target:
+            logger.debug(
+                "move: %d, %d is off this screen — clamped to %d, %d",
+                target.x(),
+                target.y(),
+                clamped.x(),
+                clamped.y(),
+            )
         if clamped == self.pos():
+            logger.debug("move: already at %d, %d", clamped.x(), clamped.y())
             return
+        logger.debug(
+            "move: %d, %d → %d, %d",
+            self.pos().x(),
+            self.pos().y(),
+            clamped.x(),
+            clamped.y(),
+        )
         self._stop_move()
         animation = QPropertyAnimation(self, b"pos", self)
         animation.setDuration(_MOVE_MS)
@@ -2007,17 +2080,23 @@ class LyricsWindow(QWidget):
         app is an accessory, so dragging it leaves the frontmost app
         exactly as it was.
         """
-        if not may_learn(
+        refusal = learn_refusal(
             enabled=self._remember_position,
             frontmost=self._frontmost,
             own_bundle_id=self._own_bundle_id,
-        ):
+        )
+        if refusal is not None:
+            logger.debug("learn: nothing recorded, %s", refusal)
             return
         position = self.pos()
         self._positions.remember(self._frontmost, position.x(), position.y())
         self._settings.setValue("window/app_positions", self._positions.to_json())
         logger.debug(
-            "remembered (%d, %d) for %s", position.x(), position.y(), self._frontmost
+            "learn: %d, %d recorded for %s (%d apps remembered)",
+            position.x(),
+            position.y(),
+            self._frontmost,
+            len(self._positions),
         )
         self._refresh_menu()  # the forget entry appears with the first entry
 
@@ -2121,6 +2200,25 @@ class LyricsWindow(QWidget):
         remember_position.triggered.connect(self._set_remember_position)
         actions[REMEMBER_POSITION] = remember_position
 
+        # What the layer knows, in words, because nothing else in the app
+        # says it: learning is implicit, so without this the only evidence
+        # the feature works is the window happening to move. Disabled
+        # because it is a readout and not a control — there is nothing to
+        # click, and a clickable line would imply there were. Its text is
+        # set in _refresh_menu, which runs on every opening, so it is
+        # current whenever it can be seen.
+        position_status = self._menu.addAction("")
+        position_status.setEnabled(False)
+        # NoRole rather than Qt's default TextHeuristicRole, and not
+        # defensively: this is the one entry whose text the app does not
+        # write. It contains whatever bundle identifier is in front, and the
+        # heuristic that moves "Preferences…" into the application menu
+        # matches on substrings — com.apple.systempreferences would trip it.
+        # An entry that relocates itself depending on which app you switched
+        # to would be a diagnostic that vanishes exactly when read.
+        position_status.setMenuRole(QAction.MenuRole.NoRole)
+        actions[POSITION_STATUS] = position_status
+
         # Appears only once something has been learned (see menu.py).
         forget_positions = self._menu.addAction("Forget remembered positions")
         forget_positions.triggered.connect(self._forget_positions)
@@ -2165,12 +2263,23 @@ class LyricsWindow(QWidget):
                     bundled=self._bundled, status=self._login_status
                 ),
                 positions_remembered=len(self._positions) > 0,
+                remembering_positions=self._remember_position,
             )
         )
         for key, action in self._menu_actions.items():
             action.setVisible(key in visible)
         if sync_label is not None:
             self._menu_actions[SYNC].setText(sync_label)
+        # peek, not recall: a glance at the menu is not evidence the user
+        # still switches to that app, and letting it refresh recency would
+        # make the eviction order describe where they have been looking.
+        self._menu_actions[POSITION_STATUS].setText(
+            status_summary(
+                count=len(self._positions),
+                frontmost=self._frontmost,
+                position=self._positions.peek(self._frontmost),
+            )
+        )
         self._menu_actions[SHOW_LYRICS].setChecked(self._lyrics_visible)
         self._menu_actions[ROMANISATION].setChecked(
             self._view_model.romanisation_enabled
@@ -2615,8 +2724,21 @@ class LyricsWindow(QWidget):
             "window/remember_position", False, type=bool
         )
         if self._remember_position:
-            self._frontmost = frontmost.current_bundle_id()
-            self._watcher.start()
+            self._frontmost = self._read_frontmost()
+            started = self._watcher.start()
+            logger.info(
+                "per-app positions restored on: frontmost=%s watching=%s "
+                "remembered=%d own=%s",
+                self._frontmost,
+                started,
+                len(self._positions),
+                self._own_bundle_id,
+            )
+        else:
+            logger.info(
+                "per-app positions off (%d remembered) — not watching activations",
+                len(self._positions),
+            )
         self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
         # Open at Login is NOT restored from here: the stored value is what
         # the user last asked for, and the system is what is actually true.

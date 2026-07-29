@@ -20,6 +20,12 @@ Three things shaped this:
   with no remembered position leaves the window exactly where it is,
   rather than guessing a default and moving it somewhere nobody asked for.
 
+Everything a decision here refuses, it can also *name*. Implicit learning
+with no feedback is indistinguishable from a broken feature, so each gate
+returns its reason and the caller logs it — one rule, phrased once, doing
+duty as both the answer and the explanation. A second copy of the rule
+inside a log line would be a second copy of the rule.
+
 Pure and Qt-free, so the rules can be tested without a display, a
 notification centre, or a second application to switch to.
 """
@@ -38,6 +44,15 @@ logger = logging.getLogger(__name__)
 # anybody has to think about. Well past the number of apps a person
 # switches between in a day.
 MAX_ENTRIES = 50
+
+# What an announced activation was taken to be. Returned by
+# ActivationDebounce.observe so the caller can say which of the three
+# happened without asking the debounce a second question about its own
+# state — a diagnostic log line that reconstructs the decision is a log
+# line that can disagree with it.
+ARRIVAL = "arrival"  # a new app; its settling clock starts now
+REPEAT = "repeat"  # the app already settling, announced again
+UNKEYABLE = "unkeyable"  # nothing to key on, so nothing to settle
 
 # How long an app must stay frontmost before the window follows it.
 #
@@ -95,6 +110,19 @@ class AppPositions:
             return None
         self._entries.move_to_end(bundle_id)
         return position
+
+    def peek(self, bundle_id: Optional[str]) -> Optional[tuple[int, int]]:
+        """The remembered position without counting a use.
+
+        For showing what is known — the menu's readout, a log line — where
+        ``recall`` would be wrong: opening a menu to look at an entry is
+        not evidence you still switch to that app, and letting a glance
+        refresh recency would make the eviction order describe where the
+        user has been looking rather than where they have been working.
+        """
+        if not bundle_id:
+            return None
+        return self._entries.get(bundle_id)
 
     def forget(self, bundle_id: str) -> bool:
         return self._entries.pop(bundle_id, None) is not None
@@ -176,14 +204,21 @@ class ActivationDebounce:
         """The app currently settling, if any."""
         return self._pending
 
-    def observe(self, bundle_id: Optional[str], now: float) -> None:
-        """A new frontmost app. Starts (or continues) its settling clock."""
+    def observe(self, bundle_id: Optional[str], now: float) -> str:
+        """A new frontmost app. Starts (or continues) its settling clock.
+
+        Answers which of ARRIVAL, REPEAT and UNKEYABLE this was, so a
+        caller can log what became of an announcement it passed in. The
+        return value is advisory — nothing here behaves differently for
+        being asked.
+        """
         if not bundle_id:
-            return
+            return UNKEYABLE
         if bundle_id == self._pending:
-            return  # already settling; a repeat is not a new arrival
+            return REPEAT  # already settling; a repeat is not a new arrival
         self._pending = bundle_id
         self._since = now
+        return ARRIVAL
 
     def remaining(self, now: float) -> float:
         """How much longer the pending app must stay in front, in seconds.
@@ -221,14 +256,16 @@ class ActivationDebounce:
 # -- the two gates --------------------------------------------------------
 
 
-def may_learn(
+def learn_refusal(
     *, enabled: bool, frontmost: Optional[str], own_bundle_id: Optional[str]
-) -> bool:
-    """Whether finishing a drag should record a position.
+) -> Optional[str]:
+    """Why finishing a drag should NOT record a position, or None if it
+    should.
 
     The window is unfocusable and the app is an accessory, so dragging it
     does not change which app is frontmost — that is exactly what makes
-    implicit learning work, and it is why the answer is almost always yes.
+    implicit learning work, and it is why the answer is almost always
+    None.
 
     Our own identifier is refused anyway. If anything ever does make
     LyriSync frontmost (a future menu, a debugger attaching), a position
@@ -236,13 +273,33 @@ def may_learn(
     recalled, quietly evicting a real one. ``own_bundle_id`` is None for a
     source run, which has no bundle and therefore nothing to collide with.
     """
-    if not enabled or not frontmost:
-        return False
-    return own_bundle_id is None or frontmost != own_bundle_id
+    if not enabled:
+        return "the layer is off"
+    if not frontmost:
+        return "no frontmost app is known"
+    if own_bundle_id is not None and frontmost == own_bundle_id:
+        return "LyriSync itself is frontmost"
+    return None
 
 
-def may_move(*, enabled: bool, visible: bool, dragging: bool, syncing: bool) -> bool:
-    """Whether the window may be moved to a remembered position.
+def may_learn(
+    *, enabled: bool, frontmost: Optional[str], own_bundle_id: Optional[str]
+) -> bool:
+    """Whether finishing a drag should record a position. The refusal
+    without its reason, for callers that only need the answer."""
+    return (
+        learn_refusal(
+            enabled=enabled, frontmost=frontmost, own_bundle_id=own_bundle_id
+        )
+        is None
+    )
+
+
+def move_refusal(
+    *, enabled: bool, visible: bool, dragging: bool, syncing: bool
+) -> Optional[str]:
+    """Why the window may NOT be moved to a remembered position, or None
+    if it may.
 
     Each refusal is a different kind of "the user is in the middle of
     something":
@@ -253,5 +310,65 @@ def may_move(*, enabled: bool, visible: bool, dragging: bool, syncing: bool) -> 
       target; the tap bar moving mid-pass would cost stamps.
     - **hidden** — there is nothing to move, and moving it anyway would
       mean it reappears somewhere it was never seen to go.
+
+    Ordered most specific first, because the reason a user is most likely
+    to be surprised by is the one they are in the middle of doing.
     """
-    return enabled and visible and not dragging and not syncing
+    if not enabled:
+        return "the layer is off"
+    if dragging:
+        return "the window is being dragged"
+    if syncing:
+        return "a sync pass is running"
+    if not visible:
+        return "the window is hidden"
+    return None
+
+
+def may_move(*, enabled: bool, visible: bool, dragging: bool, syncing: bool) -> bool:
+    """Whether the window may be moved to a remembered position. The
+    refusal without its reason."""
+    return (
+        move_refusal(
+            enabled=enabled, visible=visible, dragging=dragging, syncing=syncing
+        )
+        is None
+    )
+
+
+# -- saying what is known -------------------------------------------------
+
+
+def status_summary(
+    *,
+    count: int,
+    frontmost: Optional[str],
+    position: Optional[tuple[int, int]],
+) -> str:
+    """One line naming what the layer knows, for the menu to show.
+
+    Two facts, because there are two ways to doubt an implicit feature:
+    how much has been learned at all, and whether *this* app — the one in
+    front, the one a drag would record against — is one of the ones that
+    has been. A count alone would leave "is it working here?" unanswered,
+    and the position alone would hide an empty map behind one app that
+    happens to have no entry.
+
+    The bundle identifier is shown rather than a friendly name. It is what
+    the map is keyed on and what the log lines say, so a reader comparing
+    the two is comparing the same string; asking macOS to localise it
+    would be a second name for one thing, and would mean reading something
+    about the other app beyond the identifier it advertises.
+    """
+    if count == 0:
+        learned = "No positions remembered"
+    elif count == 1:
+        learned = "1 app remembered"
+    else:
+        learned = f"{count} apps remembered"
+    if not frontmost:
+        return f"{learned} · frontmost app unknown"
+    if position is None:
+        return f"{learned} · {frontmost} not placed yet"
+    x, y = position
+    return f"{learned} · {frontmost} at {x}, {y}"

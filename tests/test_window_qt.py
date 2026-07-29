@@ -18,6 +18,7 @@ import logging
 import os
 import threading
 import time
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -44,7 +45,7 @@ from PySide6.QtCore import (  # noqa: E402
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QMouseEvent  # noqa: E402
+from PySide6.QtGui import QAction, QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 
 try:
@@ -1432,6 +1433,133 @@ def test_the_window_never_learns_a_position_against_itself(make_window):
     end_a_drag(window, 300, 200)
 
     assert len(window._positions) == 0
+
+
+def test_our_own_activation_does_not_become_the_frontmost_app(make_window):
+    """Opening the menu bar item can bring an accessory app forward. Taken
+    at face value that would replace the app the user is working in with
+    ourselves, after which every drag would be refused by the self-filter
+    and nothing would be learned for no visible reason. The window follows
+    the last app that was not us."""
+    window = remembering(make_window, frontmost_app=VSCODE)
+    window._own_bundle_id = "com.lyrisync.lyrisync"
+
+    window._on_app_activated("com.lyrisync.lyrisync")
+
+    assert window._frontmost == VSCODE
+    end_a_drag(window, 300, 200)
+    assert window._positions.recall(VSCODE) == (300, 200)
+
+
+def test_our_own_activation_does_not_disturb_an_app_that_is_settling(make_window):
+    """It is dropped before the debounce, not through it: an arrival that
+    was almost due must not be restarted, or reaching for the menu bar
+    would cost the move the user was waiting for."""
+    window = remembering(make_window)
+    window._own_bundle_id = "com.lyrisync.lyrisync"
+    window._positions.remember(SAFARI, 400, 300)
+    window.move(10, 10)
+
+    window._on_app_activated(SAFARI)
+    window._on_app_activated("com.lyrisync.lyrisync")
+
+    assert window._debounce.pending == SAFARI
+    window._settle_timer.stop()
+    window._debounce._since -= w.SETTLE_SECONDS
+    window._apply_settled_app()
+    finish_move(window)
+    assert window.pos() == QPoint(400, 300)
+
+
+def test_asking_who_is_in_front_refuses_ourselves(make_window):
+    """The same rule at the other door: switching the layer on from a menu
+    opened over our own window must not seed the frontmost app as us, or the
+    first drag would be refused for a reason the user cannot act on."""
+    window = make_window()
+    window._own_bundle_id = "com.lyrisync.lyrisync"
+    with patch.object(
+        w.frontmost, "current_bundle_id", return_value="com.lyrisync.lyrisync"
+    ):
+        window._set_remember_position(True)
+    assert window._frontmost is None
+
+    with patch.object(w.frontmost, "current_bundle_id", return_value=VSCODE):
+        window._set_remember_position(False)
+        window._set_remember_position(True)
+    assert window._frontmost == VSCODE
+
+
+def test_the_menu_says_what_has_been_learned_and_where_we_are(make_window):
+    """The feedback half of the milestone: learning is implicit, so without
+    this the only evidence it works is the window happening to move."""
+    window = remembering(make_window)
+    window._refresh_menu()  # what opening the menu does
+    assert m.POSITION_STATUS in visible_keys(window)
+    status = window._menu_actions[m.POSITION_STATUS]
+    assert "No positions remembered" in status.text()
+    assert VSCODE in status.text()
+
+    end_a_drag(window, 300, 200)
+
+    assert "1 app remembered" in status.text()
+    assert "300, 200" in status.text()
+
+
+def test_the_readout_is_a_readout_and_not_a_control(make_window):
+    window = remembering(make_window)
+    assert not window._menu_actions[m.POSITION_STATUS].isEnabled()
+
+
+def test_the_readout_cannot_be_relocated_by_its_own_text(make_window):
+    """The only entry whose text the app does not write: it carries whatever
+    bundle identifier is in front. Qt's default text heuristic matches
+    substrings, so com.apple.systempreferences would move this item into the
+    application menu — a diagnostic that disappears when you go to read it."""
+    window = remembering(make_window)
+    status = window._menu_actions[m.POSITION_STATUS]
+    assert status.menuRole() == QAction.MenuRole.NoRole
+
+    window._frontmost = "com.apple.systempreferences"
+    window._refresh_menu()
+    assert status.menuRole() == QAction.MenuRole.NoRole
+    assert "com.apple.systempreferences" in status.text()
+
+
+def test_the_readout_follows_the_frontmost_app(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+
+    window._on_app_activated(SAFARI)
+    window._refresh_menu()
+
+    status = window._menu_actions[m.POSITION_STATUS].text()
+    assert SAFARI in status and "not placed yet" in status
+    assert "1 app remembered" in status  # what is known has not changed
+
+
+def test_reading_the_menu_is_not_using_a_position(make_window):
+    """peek, not recall. A glance must not refresh recency, or the eviction
+    order would describe where the user has been looking."""
+    window = remembering(make_window)
+    window._positions = w.AppPositions(limit=2)
+    window._positions.remember(VSCODE, 1, 1)
+    window._positions.remember(SAFARI, 2, 2)
+    window._frontmost = VSCODE
+
+    window._refresh_menu()
+    window._positions.remember("com.apple.Notes", 3, 3)
+
+    assert window._positions.peek(VSCODE) is None  # still the oldest
+
+
+def test_the_readout_goes_with_the_layer(make_window):
+    """It names the frontmost app, and with the layer off nothing is
+    watching which app that is."""
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    window._set_remember_position(False)
+    assert m.POSITION_STATUS not in visible_keys(window)
+    assert m.FORGET_POSITIONS in visible_keys(window)  # the map is still clearable
 
 
 def test_shutdown_stops_observing(make_window):
