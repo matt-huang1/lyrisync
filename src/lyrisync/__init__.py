@@ -27,14 +27,20 @@ except PackageNotFoundError:
 
 # One outbound identity, built from that one version. LRCLIB asks callers
 # to identify themselves; the same string goes to whoever is hosting the
-# album art. The URL is carried over unchanged from the two constants this
-# replaces — only the version was in question here.
-USER_AGENT = f"lyrisync/{__version__} (https://github.com/matthewhuang/lyrisync)"
+# album art.
+#
+# The URL has to RESOLVE — it is the whole point of sending one. This app
+# spent its first thirteen milestones pointing at github.com/matthewhuang,
+# which is not where it lives, so LRCLIB had a contact address that 404s.
+# It is checked against the repository the README tells people to clone.
+REPOSITORY_URL = "https://github.com/matt-huang1/lyrisync"
+USER_AGENT = f"lyrisync/{__version__} ({REPOSITORY_URL})"
 
 __all__ = [
     "PlaybackState",
     "PlayerMonitor",
     "PlayerSnapshot",
+    "REPOSITORY_URL",
     "SpotifyQueryError",
     "USER_AGENT",
     "__version__",

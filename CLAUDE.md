@@ -116,6 +116,11 @@ Decision log so far
 - The missing-metadata fallback is the string "unknown", deliberately not a number. A fallback version literal is precisely the drift being removed, and an app that cannot tell you its version is better than one that tells you the wrong one. It is only reachable from an uninstalled source tree.
 - Scanning for a hardcoded version means scanning for a SUBSTRING, not a whole-string literal: the copy was buried mid-sentence in "lyrisync/0.1.0 (…)", exactly where a whole-string check walks past it. Docstrings are excluded from that scan, because the LRC parser documents "[00:12.00][00:55.30] chorus" and a scan that counted that would be satisfiable only by deleting the documentation.
 
+- The contact URL in the User-Agent was WRONG for thirteen milestones — github.com/matthewhuang, where the repository is github.com/matt-huang1 — so LRCLIB was being handed an address that 404s, which is the one thing a contact URL exists to not do. It survived that long because nothing compared it to anything; consolidating the User-Agent into one definition is what made it a single edit rather than a hunt.
+- It is now pinned against the README's `git clone` line, deliberately not `git remote`: a remote passes on anybody's fork and is not reliably available in a CI checkout, while the clone line is the address a real person is told to use and therefore the one that gets noticed when it breaks. The URL is its own constant (REPOSITORY_URL) so the test has something to compare that is not a substring search of a sentence.
+- Verified in the artefact, not just the source: the frozen bytecode was read back out of the rebuilt bundle's embedded PYZ (PyInstaller 6 puts it inside the executable) and its lyrisync/__init__ carries the corrected URL. A source tree that is right and a bundle that is stale look identical from the outside.
+- `make app` fails intermittently with "rm: dist: Directory not empty" — Finder recreating .DS_Store between rm's unlink pass and its rmdir, whenever the folder is open in a window. It has happened twice. A retry always works; the clean step is simply not atomic against Finder.
+
 Parked
 - Album-art background (the tint shipped in 12b; the artwork itself as a background did not)
 - Multiple colours or gradients from one cover, per-song colour overrides

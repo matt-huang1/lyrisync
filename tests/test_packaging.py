@@ -273,6 +273,30 @@ def test_every_user_agent_is_the_same_string_and_carries_the_version():
     assert f"lyrisync/{__version__}" in USER_AGENT
 
 
+def test_the_contact_url_names_the_repository_the_readme_clones():
+    """A User-Agent URL exists so somebody at LRCLIB can find whoever is
+    making the requests. This one pointed at github.com/matthewhuang for
+    thirteen milestones — a 404 — because nothing compared it to anything.
+
+    The README's clone line is the check: it is the address a real person
+    is told to use, so it is the one that gets noticed when it breaks.
+    Comparing against `git remote` instead would pass on a developer's
+    fork and is unavailable in some CI checkouts.
+    """
+    from lyrisync import REPOSITORY_URL, USER_AGENT
+
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    clone = re.search(r"git clone git@github\.com:([\w.-]+)/([\w.-]+)\.git", readme)
+    assert clone, "the README no longer shows a clone URL to check against"
+    owner, repo = clone.group(1), clone.group(2)
+
+    assert REPOSITORY_URL == f"https://github.com/{owner}/{repo}", (
+        f"the contact URL is {REPOSITORY_URL} but the README clones "
+        f"{owner}/{repo}"
+    )
+    assert f"({REPOSITORY_URL})" in USER_AGENT
+
+
 def test_the_bundle_carries_the_metadata_that_answer_depends_on(spec_tree):
     """__init__.py asks importlib.metadata for the version, and PyInstaller
     freezes the package WITHOUT its .dist-info unless the spec says
