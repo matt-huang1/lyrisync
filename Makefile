@@ -14,7 +14,7 @@ help:
 	@echo "make app    build dist/LyriSync.app (ad-hoc signed)"
 	@echo "make icon   regenerate packaging/LyriSync.icns from appicon.svg"
 	@echo "make test   run the test suite"
-	@echo "make clean  remove build/, dist/ and the generated icon"
+	@echo "make clean  remove build/ and the generated icon, empty dist/"
 
 app:
 	PYTHON=$(PYTHON) packaging/make_app.sh
@@ -25,6 +25,11 @@ icon:
 test:
 	$(PYTHON) -m pytest -q
 
+# dist/ is emptied rather than removed, for the reason make_app.sh spells
+# out: `rm -rf dist` races Finder recreating .DS_Store inside it and dies
+# on the rmdir with "Directory not empty". A comment out here rather than
+# in the recipe, or make echoes it at the shell.
 clean:
-	rm -rf build packaging/LyriSync.icns
-	mkdir -p dist && find dist -mindepth 1 -delete
+	rm -rf build packaging/LyriSync.iconset packaging/LyriSync.icns
+	mkdir -p dist
+	find dist -mindepth 1 -delete

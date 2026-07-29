@@ -63,8 +63,13 @@ Whichever you use, check the download first:
 
 ```sh
 shasum -a 256 ~/Downloads/LyriSync-1.0.0.zip
-# 52f7ac2bb5665d9b787d27c6a1c92d8cd22d0eadf21da677d52a1a15cba9482e
 ```
+
+Compare what that prints against the hash published beside the download
+link in the [README](../README.md#or-download-the-release). That is the
+only place the value is written down — a hash copied into two files is a
+hash that will eventually disagree with itself, and the first person to
+notice would be someone deciding whether to trust a binary.
 
 ## Notarisation is the real fix, and it is not in place
 
@@ -96,7 +101,7 @@ than on the presence or absence of a dialog.
 Three things you can check without trusting a claim on this page:
 
 - **The hash.** The command above is the whole of it. If it does not match
-  the value published here and in the README, do not open the file.
+  the value in the README, do not open the file.
 - **The provenance.** The release is built from the `v1.0.0` tag, and that
   tag is in this repository. The zip contains one thing, `LyriSync.app`,
   which is the PyInstaller output described in

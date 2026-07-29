@@ -51,6 +51,9 @@ shasum -a 256 ~/Downloads/LyriSync-1.0.0.zip
 # 52f7ac2bb5665d9b787d27c6a1c92d8cd22d0eadf21da677d52a1a15cba9482e
 ```
 
+That hash is written down here and nowhere else; it changes with every
+re-upload ([how a release is made](docs/releasing.md)).
+
 The app is signed **ad-hoc, not with an Apple Developer ID, and it is not notarised.** macOS will therefore refuse to open a downloaded copy on first launch. That is Gatekeeper working as intended, and getting past it is a decision to make deliberately rather than a step to follow â€” [docs/gatekeeper.md](docs/gatekeeper.md) explains what the block means, the two ways round it, and what notarisation would and would not have told you.
 
 ### Either way
@@ -99,7 +102,7 @@ The reasoning, the trade-offs and the measurements live in **[docs/](docs/)** â€
 | [Testing and CI](docs/testing-and-ci.md) | the guards that keep the suite off your Spotify |
 | [Changelog](CHANGELOG.md) | the milestones in order |
 
-Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [per-app window position](docs/per-app-position.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), [packaging](docs/packaging.md), and [Gatekeeper](docs/gatekeeper.md).
+Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [per-app window position](docs/per-app-position.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), [packaging](docs/packaging.md), [releasing](docs/releasing.md), and [Gatekeeper](docs/gatekeeper.md).
 
 ## Credits
 

@@ -28,7 +28,17 @@ echo "==> icon"
 echo "==> bundle"
 # Clean every time: a stale build/ directory is how a bundle ends up
 # shipping a file that is no longer in the source tree.
-rm -rf "$PROJECT/build" "$PROJECT/dist"
+rm -rf "$PROJECT/build"
+
+# dist/ is EMPTIED, never removed. `rm -rf dist` unlinks the contents and
+# then the directory, and Finder recreates .DS_Store inside it in that
+# gap whenever the folder is open in a window — so the rmdir fails with
+# "Directory not empty" and the whole build stops. Hit twice, both times
+# with dist open on screen. Emptying has no such gap: a .DS_Store written
+# a microsecond later lands in a directory we are keeping anyway, and
+# PyInstaller overwrites what it needs to.
+mkdir -p "$PROJECT/dist"
+find "$PROJECT/dist" -mindepth 1 -delete
 "$PYTHON" -m PyInstaller \
   --noconfirm \
   --clean \
@@ -48,4 +58,7 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "==> built $APP ($(du -sh "$APP" | cut -f1))"
 echo "    move it: mv \"$APP\" /Applications/"
-echo "    first launch: right-click → Open (unsigned; see README)"
+# A bundle built here is not quarantined, so it just opens. The old line
+# said "right-click → Open", which recent macOS no longer honours as a
+# Gatekeeper override anyway — and which the README stopped saying.
+echo "    it opens normally: a bundle you built is not marked as downloaded"
