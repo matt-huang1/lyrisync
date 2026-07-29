@@ -72,6 +72,13 @@ class Palette:
     # `solid` is the whole background when no material could be installed.
     scrim: RGBA
     solid: RGBA
+    # The hairline around the panel, drawn one device pixel wide just
+    # inside the fill. What separates a pane of glass from a rectangle:
+    # light at low alpha over the dark panel, dark at low alpha over the
+    # pale one, the way macOS edges its own HUD surfaces. Deliberately
+    # NOT tinted with the album colour — a coloured hairline reads as a
+    # border, and this one is meant to read as an edge.
+    border: RGBA
 
     # Text, in the order it appears down the window.
     header: RGBA
@@ -123,6 +130,7 @@ class Palette:
 DARK = Palette(
     scrim=(14, 15, 20, 150),
     solid=(18, 18, 24, 232),
+    border=(255, 255, 255, 30),
     header=(255, 255, 255, 130),
     context=(255, 255, 255, 148),
     current=(255, 255, 255, 250),
@@ -167,6 +175,7 @@ DARK = Palette(
 LIGHT = Palette(
     scrim=(246, 247, 250, 134),
     solid=(248, 249, 252, 236),
+    border=(0, 0, 0, 38),
     header=(18, 19, 26, 140),
     context=(18, 19, 26, 165),
     current=(18, 19, 26, 250),
@@ -219,20 +228,28 @@ def rgba(colour: RGBA) -> str:
 # obvious way to do it — sampling a colour and painting with it — which
 # works beautifully for three albums and then meets a neon cover.
 #
-# How much colour a tint carries. Saturation behaves very differently at
-# the two ends of the lightness range: a near-black panel and a near-white
-# one both compress it hard, so these sit high and still produce a cast
-# rather than a colour — a fully saturated cyan cover makes a pale mint
-# panel, which is the whole point.
+# How much colour a tint carries, per mode.
 #
-# They are this high because pinning the luminance made them free. Sweeping
-# 0.60 to 1.00 moves the worst-case contrast across every hue by 0.01,
-# from 4.68 to 4.67 — so the usual trade of character against legibility
-# is not being made here, and there was no reason to be timid. Short of
-# 1.00 only because full saturation pins a channel to 0 or 255 and starts
-# to read as electric. test_scrim.py holds both to the floor across every
-# hue, not the few anyone would think to try.
-TINT_SATURATION = {Appearance.DARK: 0.85, Appearance.LIGHT: 0.95}
+# These were 0.85 and 0.95, picked because measurement showed saturation
+# was nearly free: pinning the luminance means sweeping 0.18 to 1.00 moves
+# the worst-case contrast by about 0.01. That reasoning was sound and the
+# conclusion was wrong — CONTRAST HEADROOM IS NOT AESTHETIC HEADROOM. What
+# the floor permits and what looks like a pane of glass are different
+# questions, and a near-fully-saturated wash answers only the first: it
+# reads as a coloured panel rather than as the window quietly taking on
+# the record's colour.
+#
+# So they are now set by eye at the point where the colour is FELT rather
+# than noticed, and the floor is simply re-checked afterwards rather than
+# used to justify the value. Light carries slightly more because a pale
+# panel compresses saturation harder than a near-black one does.
+TINT_SATURATION_DARK = 0.18
+TINT_SATURATION_LIGHT = 0.22
+
+TINT_SATURATION = {
+    Appearance.DARK: TINT_SATURATION_DARK,
+    Appearance.LIGHT: TINT_SATURATION_LIGHT,
+}
 
 # An artwork colour flatter than this has no hue worth taking — a black
 # and white cover would otherwise be assigned whatever hue its noise

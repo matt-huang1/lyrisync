@@ -6,8 +6,10 @@ from lyrisync.typography import (
     BOTTOM_MARGIN,
     CONTEXT,
     CURRENT,
+    CURRENT_SPACING,
     HEADER,
     PRONUNCIATION,
+    PRONUNCIATION_SPACING,
     ROW_SPACING,
     TOP_MARGIN,
     base_size,
@@ -32,6 +34,8 @@ _ROW_FONTS_PX = tuple(
 )
 _LINE_HEIGHT_FACTOR = 1.45
 _ROW_SPACING = ROW_SPACING
+_PRONUNCIATION_SPACING = PRONUNCIATION_SPACING
+_CURRENT_SPACING = CURRENT_SPACING
 _TOP_MARGIN = TOP_MARGIN
 _BOTTOM_MARGIN = BOTTOM_MARGIN
 _MIN_HEIGHT_FLOOR = 120
@@ -98,7 +102,13 @@ def min_window_height(scale: float, sync_bar: bool = False) -> int:
     rows = sum(
         round(font * scale * _LINE_HEIGHT_FACTOR) for font in _ROW_FONTS_PX
     )
-    spacing = round(_ROW_SPACING * scale) * 4 + 2  # 4 row gaps + pron gap
+    # 4 row gaps, the tighter pronunciation gap inside the current block,
+    # and the extra air reserved above and below that block.
+    spacing = (
+        round(_ROW_SPACING * scale) * 4
+        + round(_PRONUNCIATION_SPACING * scale)
+        + round(_CURRENT_SPACING * scale) * 2
+    )
     margins = round(_TOP_MARGIN * scale) + round(_BOTTOM_MARGIN * scale)
     height = max(_MIN_HEIGHT_FLOOR, rows + spacing + margins)
     return height + sync_bar_reserve(scale) if sync_bar else height

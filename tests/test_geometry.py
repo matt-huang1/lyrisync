@@ -99,8 +99,25 @@ def test_text_gutter_grows_with_scale():
 
 
 def test_min_height_default_scale():
-    # rows 16+20+26+17+20=99, spacing 8*4+2=34, margins 13+15=28
-    assert min_window_height(1.0) == 161
+    # rows 16+19+29+17+19=100, spacing 10*4+3+5*2=53, margins 14+16=30
+    assert min_window_height(1.0) == 183
+
+
+def test_the_floor_counts_every_gap_the_window_actually_leaves():
+    """Derived, not eyeballed: each of the three vertical rhythm constants
+    has to appear in the floor, or a more generous layout would silently
+    let the bottom row fall off a short window."""
+    from lyrisync import geometry, typography
+
+    base = min_window_height(1.0)
+    for name in ("ROW_SPACING", "PRONUNCIATION_SPACING", "CURRENT_SPACING"):
+        original = getattr(typography, name)
+        monkey = original + 4
+        setattr(geometry, f"_{name}", monkey)
+        try:
+            assert min_window_height(1.0) > base, f"{name} is not in the floor"
+        finally:
+            setattr(geometry, f"_{name}", original)
 
 
 def test_min_height_is_derived_from_the_type_scale():

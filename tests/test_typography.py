@@ -118,3 +118,52 @@ def test_a_platform_family_that_is_already_a_fallback_is_not_repeated():
 
 def test_a_missing_platform_family_still_leaves_a_usable_stack():
     assert t.font_stack("") == '"Apple SD Gothic Neo", "Helvetica Neue"'
+
+
+# -- hierarchy and tracking (the feel pass) -------------------------------
+
+
+def test_the_sung_line_stands_well_clear_of_its_neighbours():
+    """The whole hierarchy. At 18/600 against 14/400 the eye had to read
+    the window to find the current line; the separation is deliberately
+    wider than that on both axes now."""
+    current = t.style_for(t.CURRENT)
+    context = t.style_for(t.CONTEXT)
+    assert current.size_px / context.size_px >= 1.4
+    assert current.weight - context.weight >= 200
+
+
+def test_only_the_large_text_is_tracked():
+    """Tightening body-size type costs legibility and buys nothing; it is
+    display sizes that look loose at default tracking."""
+    assert t.style_for(t.CURRENT).tracking < 0
+    for role in (t.HEADER, t.CONTEXT, t.PRONUNCIATION, t.PLAIN, t.PROGRESS):
+        assert t.style_for(role).tracking == 0
+
+
+def test_tracking_scales_with_its_type():
+    """It is a proportion of the type, not a fixed nudge — a line at half
+    scale needs half the correction."""
+    assert t.style_for(t.CURRENT, 2.0).tracking == pytest.approx(
+        t.style_for(t.CURRENT, 1.0).tracking * 2
+    )
+
+
+def test_tracking_survives_a_small_scale_without_rounding_to_nothing():
+    """Rounded to whole pixels it would be zero everywhere below scale 2,
+    which is every real window."""
+    assert t.style_for(t.CURRENT, 0.65).tracking != 0
+
+
+def test_the_current_line_gets_more_air_than_the_rows_around_it():
+    """The pronunciation stays welded to the line above it; the block as a
+    whole gets room the context lines do not."""
+    assert t.PRONUNCIATION_SPACING < t.ROW_SPACING
+    assert t.CURRENT_SPACING > 0
+    assert t.CURRENT_SPACING < t.ROW_SPACING
+
+
+def test_line_travel_is_a_hint_not_a_transition():
+    """Small enough that nobody watching the lyrics notices it happening,
+    and never zero — zero would be the old in-place fade."""
+    assert 0 < t.LINE_TRAVEL <= 12

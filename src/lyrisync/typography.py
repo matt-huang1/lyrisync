@@ -33,28 +33,53 @@ PROGRESS = "progress"
 class Style:
     size_px: int
     weight: int
+    # Letter-spacing in base px at scale 1.0, negative to tighten. Only
+    # the large text carries any: type set at display size looks loose at
+    # the tracking that suits body text, which is why every type foundry
+    # ships optical sizes and why the system font tightens as it grows.
+    # The small roles stay at 0 — tightening them costs legibility and
+    # buys nothing.
+    tracking: float = 0.0
 
 
-# (base px at scale 1.0, weight). Weights are stated for every role rather
-# than left to inherit: the contrast between the current line and its
-# neighbours is the whole hierarchy, and a default would put it at the
-# mercy of whatever Qt picks per platform.
+# (base px at scale 1.0, weight, tracking). Weights are stated for every
+# role rather than left to inherit: the contrast between the current line
+# and its neighbours is the whole hierarchy, and a default would put it at
+# the mercy of whatever Qt picks per platform.
+#
+# The sung line is deliberately far away from its neighbours on both axes
+# — 20/700 against 13/400 is a 1.54x size ratio and three weight steps,
+# where it used to be 18/600 against 14/400 (1.29x and one step). At the
+# old separation the eye had to read the window to find the current line;
+# at this one it lands on it.
 _ROLES = {
     HEADER: Style(11, 500),
-    CONTEXT: Style(14, 400),
-    CURRENT: Style(18, 600),
+    CONTEXT: Style(13, 400),
+    CURRENT: Style(20, 700, tracking=-0.35),
     PRONUNCIATION: Style(12, 400),
     PLAIN: Style(14, 400),
     PROGRESS: Style(11, 500),
 }
 
-# Vertical rhythm, base px at scale 1.0. The gap between the current line
-# and its pronunciation is deliberately far tighter than the gap between
-# rows, so the pair reads as one block instead of three separate lines.
-ROW_SPACING = 8
-PRONUNCIATION_SPACING = 2
-TOP_MARGIN = 13
-BOTTOM_MARGIN = 15
+# Vertical rhythm, base px at scale 1.0.
+#
+# The gap between the current line and its pronunciation is deliberately
+# far tighter than the gap between rows, so the pair reads as one block
+# instead of three separate lines. CURRENT_SPACING is extra room ABOVE
+# AND BELOW that block on top of the row gap: the sung line is what the
+# window is for, and it needs air around it that the context lines do
+# not. geometry.py's height floor accounts for all of these.
+ROW_SPACING = 10
+PRONUNCIATION_SPACING = 3
+CURRENT_SPACING = 5
+TOP_MARGIN = 14
+BOTTOM_MARGIN = 16
+
+# How far a line travels vertically as it is replaced, base px at scale
+# 1.0. Small on purpose: this is a hint of motion in the direction the
+# song is going, not a transition. Big enough to be felt at a glance and
+# small enough that nobody watching the lyrics notices it happening.
+LINE_TRAVEL = 7
 
 # Korean first, because the UI family carries no hangul of its own and this
 # is the face CoreText falls back to anyway — naming it makes the fallback
@@ -64,10 +89,18 @@ _FALLBACK_FAMILIES = ("Apple SD Gothic Neo", "Helvetica Neue")
 
 
 def style_for(role: str, scale: float = 1.0) -> Style:
-    """Pixel size and weight for a row at this window scale. Sizes floor at
-    1px so an absurd scale can never produce an invisible or invalid font."""
+    """Pixel size, weight and tracking for a row at this window scale.
+    Sizes floor at 1px so an absurd scale can never produce an invisible
+    or invalid font. Tracking scales with the type it belongs to, and is
+    not rounded — Qt takes a fractional letter-spacing, and rounding a
+    third of a pixel to zero would delete the whole effect at small
+    scales."""
     base = _ROLES[role]
-    return Style(size_px=max(1, round(base.size_px * scale)), weight=base.weight)
+    return Style(
+        size_px=max(1, round(base.size_px * scale)),
+        weight=base.weight,
+        tracking=round(base.tracking * scale, 3),
+    )
 
 
 def base_size(role: str) -> int:

@@ -20,11 +20,14 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
+    QEasingCurve,
     QEvent,
     QObject,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QRunnable,
     QSettings,
     QSize,
@@ -35,11 +38,20 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QActionGroup, QColor, QFontDatabase, QIcon, QPainter
+from PySide6.QtCore import Property  # noqa: E402  (grouped separately: it is a class helper)
+from PySide6.QtGui import (
+    QActionGroup,
+    QColor,
+    QFont,
+    QFontDatabase,
+    QIcon,
+    QPainter,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
-    QGraphicsOpacityEffect,
+    QGraphicsEffect,
     QLabel,
     QMenu,
     QPushButton,
@@ -116,7 +128,9 @@ from lyrisync.typography import (
     BOTTOM_MARGIN,
     CONTEXT,
     CURRENT,
+    CURRENT_SPACING,
     HEADER,
+    LINE_TRAVEL,
     PLAIN,
     PRONUNCIATION,
     PRONUNCIATION_SPACING,
@@ -312,6 +326,77 @@ def _clamped_point(frame: QRect, available: QRect) -> QPoint:
         (available.x(), available.y(), available.width(), available.height()),
     )
     return QPoint(x, y)
+
+
+class LineFade(QGraphicsEffect):
+    """Fades the sung line and slides it, off one animatable number.
+
+    ``progress`` runs -1 .. +1 and says where the line is in its own
+    replacement:
+
+    - ``0``  in place, fully opaque — the resting state
+    - ``-1`` gone, drifted UP: where a line ends up when it is replaced
+    - ``+1`` not yet arrived, sitting BELOW: where a line starts from
+
+    One property rather than separate opacity and offset ones because
+    they are not independent — a line half faded is half travelled, by
+    definition — and because one QPropertyAnimation per line change is
+    cheaper than a parallel group of two.
+
+    A QGraphicsEffect rather than moving the widget: ``_current_box``
+    lives in a QVBoxLayout, so anything that moved it would be undone by
+    the next layout pass and would ripple into the rows above and below.
+    Drawing the source pixmap at an offset touches no geometry at all,
+    which is also why the rest of the window cannot feel this happening.
+    """
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._progress = 0.0
+        self._travel = 0.0
+
+    @property
+    def travel(self) -> float:
+        return self._travel
+
+    @travel.setter
+    def travel(self, value: float) -> None:
+        self._travel = float(value)
+        self.updateBoundingRect()
+
+    def _get_progress(self) -> float:
+        return self._progress
+
+    def _set_progress(self, value: float) -> None:
+        self._progress = float(value)
+        self.update()
+
+    # Declared as a Qt property so QPropertyAnimation can drive it.
+    progress = Property(float, _get_progress, _set_progress)
+
+    def boundingRectFor(self, rect):
+        """Room to draw outside the source, or the travel would be
+        clipped to the widget's own box and the line would appear to
+        dissolve at the edge instead of leaving."""
+        return QRectF(rect).adjusted(0, -self._travel, 0, self._travel)
+
+    def draw(self, painter) -> None:
+        # sourcePixmap returns the pixmap and writes where to put it into
+        # the QPoint it is handed — an out-parameter, not a second return
+        # value. Ignoring it would draw the block at the widget's origin
+        # instead of its own.
+        offset = QPoint()
+        pixmap = self.sourcePixmap(
+            Qt.CoordinateSystem.LogicalCoordinates,
+            offset,
+            QGraphicsEffect.PixmapPadMode.NoPad,
+        )
+        if pixmap.isNull():
+            return
+        painter.setOpacity(max(0.0, 1.0 - abs(self._progress)))
+        painter.drawPixmap(
+            QPointF(offset) + QPointF(0.0, self._progress * self._travel), pixmap
+        )
 
 
 class MonitorThread(QThread):
@@ -602,15 +687,16 @@ class LyricsWindow(QWidget):
         self._upcoming = self._make_label("dim")
 
         # Current line + its pronunciation share one container so the
-        # anticipatory fade covers both with a single opacity effect.
+        # anticipatory fade and the rise carry both as one block. Its
+        # contents margins are the extra air around the sung line, set
+        # per scale in _apply_scale.
         self._current_box = QWidget()
         self._current_layout = QVBoxLayout(self._current_box)
         self._current_layout.setContentsMargins(0, 0, 0, 0)
         self._current_layout.setSpacing(PRONUNCIATION_SPACING)
         self._current_layout.addWidget(self._current)
         self._current_layout.addWidget(self._pron)
-        self._current_fx = QGraphicsOpacityEffect(self._current_box)
-        self._current_fx.setOpacity(1.0)
+        self._current_fx = LineFade(self._current_box)
         self._current_box.setGraphicsEffect(self._current_fx)
 
         # Scrollable full-lyrics view for PLAIN mode. The label lives inside
@@ -1103,10 +1189,13 @@ class LyricsWindow(QWidget):
         self._swap_timer.start(max(0, eta_ms - _SWAP_LEAD_MS))
 
     def _begin_fade_out(self) -> None:
+        """The outgoing line leaves upward, in the direction the song is
+        going. Eased IN — it accelerates away, which reads as departure
+        rather than as something being switched off."""
         if self._view_model.timeline() is None or self._card_active():
             return
         if self._last_state is PlaybackState.PLAYING:
-            self._animate_current_opacity(0.0)
+            self._animate_line(-1.0, QEasingCurve.Type.InCubic)
 
     def _predicted_swap(self) -> None:
         timeline = self._view_model.timeline()
@@ -1122,25 +1211,35 @@ class LyricsWindow(QWidget):
             return
         self._set_lines(lines, target)
         self._displayed_index = target
-        self._current_fx.setOpacity(0.0)
-        self._animate_current_opacity(1.0)
+        # The new line starts below and rises into place, eased OUT so it
+        # decelerates onto its mark. The schedule is unchanged and still
+        # authoritative: this animation ENDS at the line's timestamp, so
+        # the motion completes on time rather than starting on time.
+        self._current_fx.progress = 1.0
+        self._animate_line(0.0, QEasingCurve.Type.OutCubic)
 
-    def _animate_current_opacity(self, end: float) -> None:
+    def _animate_line(self, end: float, curve: QEasingCurve.Type) -> None:
         if self._fade_anim is not None:
             self._fade_anim.stop()
-        animation = QPropertyAnimation(self._current_fx, b"opacity", self)
+        animation = QPropertyAnimation(self._current_fx, b"progress", self)
         animation.setDuration(_FADE_MS)
+        animation.setEasingCurve(curve)
         animation.setEndValue(end)
         animation.start()
         self._fade_anim = animation
 
     def _cancel_line_schedule(self) -> None:
+        """Back to rest, instantly. Every path that means "the world moved"
+        — a seek, a pause, a loop wrap, entering sync mode, a track change,
+        any render at all — comes through here, so no animation can outlive
+        the situation it was describing or leave a line parked off its
+        mark."""
         self._fadeout_timer.stop()
         self._swap_timer.stop()
         if self._fade_anim is not None:
             self._fade_anim.stop()
             self._fade_anim = None
-        self._current_fx.setOpacity(1.0)
+        self._current_fx.progress = 0.0
 
     def _set_lines(self, lines: list, index: int) -> None:
         current = lines[index][1] if index >= 0 else ""
@@ -1368,17 +1467,44 @@ class LyricsWindow(QWidget):
 
     def paintEvent(self, event) -> None:
         """Rounded background at the same radius as the material behind it,
-        so the two corners coincide rather than one clipping the other."""
+        so the two corners coincide rather than one clipping the other,
+        then a hairline just inside that edge.
+
+        The hairline is one DEVICE pixel, not one logical pixel: on a
+        Retina screen those differ by a factor of two, and a two-pixel
+        line is a border rather than an edge. It is inset by half its own
+        width so it lands inside the fill instead of straddling the
+        boundary — straddling would put half the stroke outside the
+        material's mask and read as a second, softer edge beside the
+        first.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(_qcolor(self._current_background()))
-        painter.drawRoundedRect(self.rect(), _CORNER_RADIUS, _CORNER_RADIUS)
+        painter.drawRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
+
+        width = 1.0 / max(1.0, self.devicePixelRatioF())
+        inset = width / 2
+        pen = QPen(_qcolor(self._palette.border))
+        pen.setWidthF(width)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(
+            rect.adjusted(inset, inset, -inset, -inset),
+            _CORNER_RADIUS - inset,
+            _CORNER_RADIUS - inset,
+        )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_scale()
         self._place_buttons()
+        # macOS caches the shadow's silhouette; without this a resized
+        # window keeps the shadow of the shape it used to be.
+        self._invalidate_shadow()
 
     def _apply_scale(self) -> None:
         """Fonts, margins, spacing, and button boxes track window width
@@ -1400,11 +1526,37 @@ class LyricsWindow(QWidget):
             self._current_layout.setSpacing(
                 max(1, round(PRONUNCIATION_SPACING * scale))
             )
+            # Extra air above and below the sung line, on top of the row
+            # gap. It is what stops the three lyric rows reading as an
+            # evenly spaced list with one of them in bold.
+            current_air = max(1, round(CURRENT_SPACING * scale))
+            self._current_layout.setContentsMargins(0, current_air, 0, current_air)
+            # How far a line travels as it is replaced, at this scale.
+            self._current_fx.travel = max(1.0, LINE_TRAVEL * scale)
+            self._apply_tracking()
             side = button_side(scale)
             for button in (self._loop_button, self._speak_button, self._attempt_button):
                 button.setFixedSize(side, side)
             self._apply_speak_icon(side)
             self._place_buttons()
+
+    def _apply_tracking(self) -> None:
+        """Tighten the sung line's letter-spacing.
+
+        Qt stylesheets have no letter-spacing property, so this is the one
+        type setting that cannot live in the stylesheet with the others.
+        The font is read back AFTER the stylesheet has been applied and
+        polished, so size, weight and family still come from there and
+        typography.py stays the single source — this only adds the one
+        thing the stylesheet cannot say.
+        """
+        style = style_for(CURRENT, self._scale)
+        self._current.ensurePolished()
+        font = self._current.font()
+        font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing, style.tracking
+        )
+        self._current.setFont(font)
 
     def _apply_speak_icon(self, side: int) -> None:
         """Draw the speak button as its SF Symbol, at this scale.
@@ -1827,6 +1979,7 @@ class LyricsWindow(QWidget):
         if not self._native_applied:
             self._native_applied = True
             self._apply_vibrancy()
+            self._apply_shadow()
             self._apply_all_desktops(self._all_desktops)
 
     def _on_color_scheme_changed(self, scheme) -> None:
@@ -1864,6 +2017,43 @@ class LyricsWindow(QWidget):
         # not. Re-derived against the new palette, without a fade.
         self._resnap_tint()
         self._render()  # the armed discard prompt carries its colour inline
+
+    def _apply_shadow(self) -> None:
+        """Ask macOS for the window's own shadow.
+
+        The native one rather than a painted one: macOS derives the shape
+        from the window's alpha channel, so it follows the rounded corners
+        for free, sits OUTSIDE the window's bounds (a painted shadow would
+        have to live inside them and eat into the panel), and costs the
+        compositor nothing per frame.
+
+        The catch is that it is cached, not recomputed: macOS keeps the
+        shape it last derived, so a resize leaves the old silhouette
+        behind until invalidateShadow tells it otherwise (see
+        resizeEvent). Verified by screenshot rather than assumed — a
+        translucent frameless window is exactly the case where a native
+        shadow might have been refused.
+        """
+        nswindow = self._nswindow()
+        if nswindow is None:
+            return
+        try:
+            nswindow.setHasShadow_(True)
+            nswindow.invalidateShadow()
+            logger.debug("native shadow: hasShadow=%s", bool(nswindow.hasShadow()))
+        except Exception:
+            logger.exception("failed to enable the native window shadow")
+
+    def _invalidate_shadow(self) -> None:
+        """Tell macOS the silhouette moved. Cheap, and skipped entirely
+        off cocoa."""
+        nswindow = self._nswindow()
+        if nswindow is None:
+            return
+        try:
+            nswindow.invalidateShadow()
+        except Exception:
+            logger.debug("could not invalidate the window shadow", exc_info=True)
 
     def _apply_material_appearance(self) -> None:
         """Point the NSVisualEffectView at the same mode the scrim is
@@ -2069,7 +2259,10 @@ class LyricsWindow(QWidget):
         if isinstance(size, QSize):
             self.resize(size.expandedTo(_MIN_SIZE).boundedTo(available.size()))
         else:
-            self.resize(_BASE_WIDTH, 170)
+            # Comfortably above min_window_height at scale 1.0 (183),
+            # so a first run opens at a shape it chose rather than at
+            # the floor it was clamped to.
+            self.resize(_BASE_WIDTH, 200)
         position = self._settings.value("window/pos")
         if isinstance(position, QPoint):
             self.move(_clamped_point(QRect(position, self.size()), available))

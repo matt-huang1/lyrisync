@@ -33,7 +33,14 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
-from PySide6.QtCore import Qt, QRunnable, QSettings, QTimer  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    QEasingCurve,
+    QRectF,
+    QRunnable,
+    QSettings,
+    Qt,
+    QTimer,
+)
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
 
 try:
@@ -486,13 +493,16 @@ def test_the_scrim_follows_the_palette(make_window, monkeypatch):
         w, "_qcolor", lambda colour: (painted.append(colour), real_qcolor(colour))[1]
     )
 
+    # painted[0] is the fill; painted[1] is the hairline drawn over it.
     window.grab()  # a real paintEvent, into a pixmap
-    assert painted[-1] == ap.DARK.solid
+    assert painted[0] == ap.DARK.solid
+    assert painted[1] == ap.DARK.border
 
     set_scheme(Qt.ColorScheme.Light)
     painted.clear()
     window.grab()
-    assert painted[-1] == ap.LIGHT.solid
+    assert painted[0] == ap.LIGHT.solid
+    assert painted[1] == ap.LIGHT.border
 
 
 def test_a_redundant_change_restyles_nothing(make_window, monkeypatch):
@@ -614,6 +624,195 @@ def test_there_is_no_appearance_setting(make_window):
     window._save_settings()
     keys = window._settings.allKeys()
     assert not any("appearance" in k or "theme" in k for k in keys)
+
+
+# -- the line change: fade and rise ---------------------------------------
+
+
+def synced_window(make_window):
+    window = make_window()
+    load(window, SYNCED)
+    window._last_state = PlaybackState.PLAYING
+    APP.processEvents()
+    return window
+
+
+def test_a_line_at_rest_is_opaque_and_on_its_mark(make_window):
+    window = synced_window(make_window)
+    assert window._current_fx.progress == 0.0
+
+
+def test_the_outgoing_line_leaves_upward(make_window):
+    """Upward, in the direction the song is going — a line that sank as it
+    left would read as the song going backwards."""
+    window = synced_window(make_window)
+    window._begin_fade_out()
+    assert window._fade_anim is not None
+    assert window._fade_anim.endValue() == -1.0
+
+    window._fade_anim.setCurrentTime(window._fade_anim.duration())
+    APP.processEvents()
+    assert window._current_fx.progress == -1.0
+
+
+def test_the_incoming_line_rises_from_below_into_place(make_window):
+    window = synced_window(make_window)
+    window._render()
+    window._predicted_swap()
+    # Starts below and transparent...
+    assert window._fade_anim is not None
+    assert window._fade_anim.endValue() == 0.0
+
+    window._fade_anim.setCurrentTime(0)
+    APP.processEvents()
+    assert window._current_fx.progress == pytest.approx(1.0, abs=0.05)
+
+    window._fade_anim.setCurrentTime(window._fade_anim.duration())
+    APP.processEvents()
+    assert window._current_fx.progress == 0.0  # ...and lands exactly on its mark
+
+
+def test_the_motion_ends_on_the_timestamp_rather_than_starting_on_it(make_window):
+    """The anticipatory schedule stays authoritative. The rise finishes as
+    the line becomes current, so it is never still moving while being read."""
+    window = synced_window(make_window)
+    window._render()
+    window._predicted_swap()
+    assert window._fade_anim.duration() == w._FADE_MS
+    # The swap is scheduled a full fade before the timestamp, so
+    # fade-in-completes-at-ts holds by construction.
+    assert w._SWAP_LEAD_MS >= w._FADE_MS
+
+
+def test_the_line_is_eased_not_linear(make_window):
+    window = synced_window(make_window)
+    window._begin_fade_out()
+    out_curve = window._fade_anim.easingCurve().type()
+    window._render()
+    window._predicted_swap()
+    in_curve = window._fade_anim.easingCurve().type()
+    assert out_curve != QEasingCurve.Type.Linear
+    assert in_curve != QEasingCurve.Type.Linear
+    assert in_curve != out_curve  # departure accelerates, arrival settles
+
+
+def test_travel_is_scale_aware(make_window):
+    """A few pixels at default width, proportionally more when the window
+    is dragged wider — the same scale everything else in the window
+    follows. Widths stay inside the offscreen screen (800px), or the
+    resize is clamped and the test proves nothing."""
+    window = make_window()
+    # Shown, because Qt defers resize events for hidden widgets and
+    # _apply_scale would never run — the test would pass on a stale value.
+    window.show()
+    window.resize(300, 240)
+    APP.processEvents()
+    narrow = window._current_fx.travel
+
+    window.resize(460, 240)
+    APP.processEvents()
+    default = window._current_fx.travel
+
+    window.resize(760, 260)
+    APP.processEvents()
+    wide = window._current_fx.travel
+
+    assert narrow < default < wide
+    assert 3 <= default <= 10  # a few pixels, at the width the app opens at
+
+
+@pytest.mark.parametrize(
+    "disturbance",
+    (
+        "render",
+        "seek",
+        "pause",
+        "loop",
+        "sync",
+        "track_change",
+    ),
+)
+def test_nothing_leaves_a_line_mid_flight(make_window, disturbance):
+    """A line parked off its mark, or fading, after the world moved is the
+    failure mode of animating this at all. Every path back to a known
+    state has to snap."""
+    window = synced_window(make_window)
+    window._begin_fade_out()
+    window._fade_anim.setCurrentTime(window._fade_anim.duration() // 2)
+    APP.processEvents()
+    assert window._current_fx.progress != 0.0  # genuinely mid-flight
+
+    if disturbance == "render":
+        window._render()
+    elif disturbance == "seek":
+        window._on_position_update(snapshot())
+        window._render()
+    elif disturbance == "pause":
+        window._on_state_change(snapshot(state=PlaybackState.PAUSED))
+        window._render()
+    elif disturbance == "loop":
+        window._do_loop_wrap()
+        window._render()
+    elif disturbance == "sync":
+        load(window, PLAIN, track_id="t2")
+        window._begin_sync()
+    elif disturbance == "track_change":
+        window._on_track_change(snapshot(track_id="t9"))
+    APP.processEvents()
+
+    assert window._current_fx.progress == 0.0
+    assert window._fade_anim is None or not window._fade_anim.state()
+
+
+def test_a_cancelled_schedule_leaves_no_timers_armed(make_window):
+    window = synced_window(make_window)
+    window._on_position_update(snapshot())
+    window._cancel_line_schedule()
+    assert not window._fadeout_timer.isActive()
+    assert not window._swap_timer.isActive()
+    assert window._current_fx.progress == 0.0
+
+
+def test_the_effect_reserves_room_for_the_travel(make_window):
+    """Without this the moving block is clipped to its own box and reads
+    as dissolving at the edge instead of leaving."""
+    window = synced_window(make_window)
+    fx = window._current_fx
+    source = QRectF(0, 0, 100, 40)
+    grown = fx.boundingRectFor(source)
+    assert grown.top() < source.top()
+    assert grown.bottom() > source.bottom()
+
+
+# -- depth ----------------------------------------------------------------
+
+
+def test_both_palettes_carry_a_hairline(make_window):
+    """Light over the dark panel, dark over the pale one — the way macOS
+    edges its own HUD surfaces."""
+    assert ap.DARK.border[:3] == (255, 255, 255)
+    assert ap.LIGHT.border[:3] == (0, 0, 0)
+    for palette in (ap.DARK, ap.LIGHT):
+        assert 0 < palette.border[3] < 64, "a hairline, not a border"
+
+
+def test_the_hairline_is_never_tinted_by_the_album(make_window):
+    """A coloured edge reads as a border; this one is meant to read as an
+    edge."""
+    for palette, appearance in (
+        (ap.DARK, ap.Appearance.DARK),
+        (ap.LIGHT, ap.Appearance.LIGHT),
+    ):
+        tinted = ap.tinted(palette, (200, 40, 40), appearance)
+        assert tinted.border == palette.border
+
+
+def test_the_shadow_is_guarded_off_cocoa(make_window):
+    """No NSWindow on the offscreen platform, so these must be no-ops
+    rather than crashes — which is what keeps the suite headless."""
+    window = make_window()
+    window._apply_shadow()
+    window._invalidate_shadow()
 
 
 # -- album colour ---------------------------------------------------------
