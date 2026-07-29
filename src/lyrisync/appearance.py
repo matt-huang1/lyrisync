@@ -228,28 +228,73 @@ def rgba(colour: RGBA) -> str:
 # obvious way to do it — sampling a colour and painting with it — which
 # works beautifully for three albums and then meets a neon cover.
 #
-# How much colour a tint carries, per mode.
+# How much colour a tint carries, as the CHROMA of the finished panel —
+# the spread between its strongest and weakest channel, 0-255, after the
+# background's own alpha has diluted it.
 #
-# These were 0.85 and 0.95, picked because measurement showed saturation
-# was nearly free: pinning the luminance means sweeping 0.18 to 1.00 moves
-# the worst-case contrast by about 0.01. That reasoning was sound and the
-# conclusion was wrong — CONTRAST HEADROOM IS NOT AESTHETIC HEADROOM. What
-# the floor permits and what looks like a pane of glass are different
-# questions, and a near-fully-saturated wash answers only the first: it
-# reads as a coloured panel rather than as the window quietly taking on
-# the record's colour.
+# Chroma, not HSL saturation, and that change is the fix for a real bug.
+# Saturation collapses at both ends of the lightness range: the light
+# scrim sits at L=0.973 where even S=1.0 can only produce 14/255 of
+# chroma, while the dark scrim at L=0.067 gets 34/255 from the same
+# number. So one saturation meant 2.4x more colour in dark than in light,
+# and at 0.22 the light tint moved the scrim by 3/255 — less than the
+# palette's own built-in blue cast, which is why album colour looked
+# switched off in light mode however strong the cover was.
 #
-# So they are now set by eye at the point where the colour is FELT rather
-# than noticed, and the floor is simply re-checked afterwards rather than
-# used to justify the value. Light carries slightly more because a pale
-# panel compresses saturation harder than a near-black one does.
-TINT_SATURATION_DARK = 0.18
-TINT_SATURATION_LIGHT = 0.22
+# Stated this way the number means the same thing in both modes and can
+# be reasoned about: this is how much colour ends up on screen.
+#
+# The two values still differ, because the eye is not linear either. At
+# low luminance a given chroma reads as less colourful (the Hunt effect),
+# so the dark panel needs more of it to feel equally tinted. Both are set
+# by eye against real covers, and the contrast floor is re-checked
+# afterwards rather than used to justify them.
+TINT_CHROMA_DARK = 14.0
+TINT_CHROMA_LIGHT = 12.0
 
-TINT_SATURATION = {
-    Appearance.DARK: TINT_SATURATION_DARK,
-    Appearance.LIGHT: TINT_SATURATION_LIGHT,
+TINT_CHROMA = {
+    Appearance.DARK: TINT_CHROMA_DARK,
+    Appearance.LIGHT: TINT_CHROMA_LIGHT,
 }
+
+
+def chroma_of(rgb) -> int:
+    """The spread between a colour's strongest and weakest channel — how
+    much colour it carries, in the unit the tint is specified in."""
+    return max(rgb[:3]) - min(rgb[:3])
+
+
+def _at_chroma(hue: float, target: float, luminance: float):
+    """The colour of this hue with this chroma, at this exact luminance.
+
+    Bisects on SATURATION against the chroma actually achieved, rather
+    than computing a saturation from HSL's closed form. The closed form
+    answers a different question: it gives the chroma at some lightness,
+    but pinning the luminance then MOVES the lightness, by wildly
+    different amounts per hue — matching luminance 0.93 costs a yellow
+    almost nothing (blue carries 7% of luminance, so it can drop to 51
+    and stay bright) and costs a blue everything.
+
+    Feeding that back as a correction does not converge, it oscillates:
+    yellow alternated between chroma 204 and chroma 2 on successive
+    rounds, and stopping after two landed on whichever the parity chose.
+    That is what made a yellow cover come out LESS coloured than the
+    untinted palette. Chroma rises monotonically with saturation at fixed
+    luminance, so bisecting on it converges instead of arguing with
+    itself, and a hue that cannot reach the target simply converges to
+    the most it can carry.
+    """
+    low, high = 0.0, 1.0
+    for _ in range(20):
+        middle = (low + high) / 2
+        if chroma_of(hsl_to_rgb(hue, middle, 0.5)) == 0:
+            low = middle
+            continue
+        if chroma_of(_at_luminance(hue, middle, luminance)) < target:
+            low = middle
+        else:
+            high = middle
+    return _at_luminance(hue, (low + high) / 2, luminance)
 
 # An artwork colour flatter than this has no hue worth taking — a black
 # and white cover would otherwise be assigned whatever hue its noise
@@ -362,11 +407,16 @@ def tinted(palette: Palette, artwork_rgb, appearance: Appearance) -> Palette:
     hue = usable_hue(artwork_rgb)
     if hue is None:
         return palette
-    saturation = TINT_SATURATION[appearance]
+    target = TINT_CHROMA[appearance]
 
     def recolour(colour: RGBA) -> RGBA:
-        red, green, blue = _at_luminance(
-            hue, saturation, relative_luminance(colour)
+        # The chroma is asked for on the FINISHED panel, so the colour
+        # itself has to carry more of it the more transparent it is —
+        # otherwise the scrim (alpha 134) and the solid fallback (alpha
+        # 236) would be tinted to the same value and look different.
+        alpha = max(1, colour[3]) / 255
+        red, green, blue = _at_chroma(
+            hue, target / alpha, relative_luminance(colour)
         )
         return (red, green, blue, colour[3])
 

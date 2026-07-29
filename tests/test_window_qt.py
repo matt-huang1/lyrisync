@@ -764,6 +764,78 @@ def test_nothing_leaves_a_line_mid_flight(make_window, disturbance):
     assert window._fade_anim is None or not window._fade_anim.state()
 
 
+def test_the_choreography_is_two_equal_phases_before_the_timestamp():
+    """One number, three constants derived from it, so the swap point and
+    the total window cannot drift apart from the phase length."""
+    assert w._SWAP_LEAD_MS == w._FADE_MS
+    assert w._FADE_OUT_LEAD_MS == 2 * w._FADE_MS
+
+
+def test_the_transition_is_unhurried_but_still_lands_on_time(make_window):
+    """Extended EARLIER rather than finishing later: the arrival still
+    ends on the timestamp, it just starts moving well before it."""
+    window = synced_window(make_window)
+    lines = [(0.0, "a"), (10.0, "b")]
+    window._schedule_line_advance(lines, 0, 0.0)
+
+    assert window._transition_ms == w._FADE_MS
+    # swap one phase before the line, fade-out two phases before it
+    assert window._swap_timer.interval() == 10000 - w._FADE_MS
+    assert window._fadeout_timer.interval() == 10000 - 2 * w._FADE_MS
+
+
+@pytest.mark.parametrize(
+    "gap_ms,expected_phase",
+    (
+        (10000, 260),   # ordinary spacing: the full choreography
+        (1040, 260),    # exactly twice the phase: still full
+        (600, 260),     # the phases fit with room to spare
+        (400, 200),     # too tight for the full movement: scaled down
+        (120, 60),      # a rapid-fire line
+        (20, 10),       # absurdly fast
+    ),
+)
+def test_a_short_gap_gets_a_quicker_movement_not_a_truncated_one(
+    make_window, gap_ms, expected_phase
+):
+    """Lines can arrive faster than the animation window — ad-libs, rapid
+    call-and-response. Both phases still fit and the arrival still ends
+    exactly on the timestamp; the movement is simply quicker."""
+    window = synced_window(make_window)
+    lines = [(0.0, "a"), (gap_ms / 1000, "b")]
+    window._schedule_line_advance(lines, 0, 0.0)
+
+    assert window._transition_ms == expected_phase
+    swap_at = window._swap_timer.interval()
+    # The arrival begins one phase before the line and lasts one phase,
+    # so it settles ON it — the property that must hold at any tempo.
+    assert swap_at + window._transition_ms == pytest.approx(gap_ms, abs=1)
+    assert swap_at >= 0
+    assert window._fadeout_timer.interval() >= 0
+
+
+def test_a_shortened_transition_is_what_the_animation_actually_uses(make_window):
+    """The clamp is worthless if the animation still runs at the nominal
+    duration — it would overrun the line it belongs to."""
+    window = synced_window(make_window)
+    window._schedule_line_advance([(0.0, "a"), (0.4, "b")], 0, 0.0)
+    assert window._transition_ms == 200
+
+    window._begin_fade_out()
+    assert window._fade_anim.duration() == 200
+
+
+def test_the_easing_is_gentle_at_both_ends(make_window):
+    """Sine, not cubic: cubic's ends are steep enough that even a 260ms
+    phase reads as a flick."""
+    window = synced_window(make_window)
+    window._begin_fade_out()
+    assert window._fade_anim.easingCurve().type() == QEasingCurve.Type.InSine
+    window._render()
+    window._predicted_swap()
+    assert window._fade_anim.easingCurve().type() == QEasingCurve.Type.OutSine
+
+
 def test_a_cancelled_schedule_leaves_no_timers_armed(make_window):
     window = synced_window(make_window)
     window._on_position_update(snapshot())

@@ -189,9 +189,18 @@ def _qcolor(colour: appearance.RGBA) -> QColor:
 # Anticipatory line fade: the old line fades out over [ts-200, ts-100],
 # the new line swaps in at ts-100 and its fade-in completes AT ts, so it
 # is fully legible at its timestamp and never late.
-_FADE_OUT_LEAD_MS = 200
-_SWAP_LEAD_MS = 100
-_FADE_MS = 100
+# One line change is two phases of equal length: the old line leaves over
+# the first, the new one arrives over the second. Everything is expressed
+# from that single number so the three cannot drift apart — the swap is
+# one phase before the timestamp, the whole choreography two.
+#
+# The schedule was extended EARLIER rather than allowed to finish later.
+# The incoming line still settles exactly on its timestamp; it simply
+# starts moving 520ms before it instead of 200ms, which is what turns a
+# flick into a movement.
+_FADE_MS = 260
+_SWAP_LEAD_MS = _FADE_MS
+_FADE_OUT_LEAD_MS = 2 * _FADE_MS
 
 # The album-colour cross-fade. Slower than the line fade on purpose: that
 # one has to finish before a lyric is due, this one is scenery and a
@@ -665,6 +674,10 @@ class LyricsWindow(QWidget):
         self._saved_native: Optional[tuple[int, int]] = None
         self._displayed_index: Optional[int] = None
         self._fade_anim: Optional[QPropertyAnimation] = None
+        # How long each half of the next line change may take. Recomputed
+        # per transition from the gap to the next line; the nominal value
+        # until a schedule says otherwise.
+        self._transition_ms = _FADE_MS
 
         # WindowDoesNotAcceptFocus + WA_ShowWithoutActivating: an overlay
         # must never activate the app or steal focus — all interaction here
@@ -1185,17 +1198,30 @@ class LyricsWindow(QWidget):
         eta_ms = int((lines[upcoming][0] - position_seconds) * 1000)
         if eta_ms <= 0:
             return  # the poll loop snaps it on the next update
-        self._fadeout_timer.start(max(0, eta_ms - _FADE_OUT_LEAD_MS))
-        self._swap_timer.start(max(0, eta_ms - _SWAP_LEAD_MS))
+        # Each phase gets at most half the gap, so a line that arrives
+        # sooner than the full choreography gets a shorter version of the
+        # same movement rather than a truncated one. Both phases still fit
+        # before the timestamp, and the arrival still lands ON it — which
+        # is the property that must survive at any tempo.
+        self._transition_ms = min(_FADE_MS, eta_ms // 2)
+        self._fadeout_timer.start(max(0, eta_ms - 2 * self._transition_ms))
+        self._swap_timer.start(max(0, eta_ms - self._transition_ms))
 
     def _begin_fade_out(self) -> None:
         """The outgoing line leaves upward, in the direction the song is
         going. Eased IN — it accelerates away, which reads as departure
-        rather than as something being switched off."""
+        rather than as something being switched off.
+
+        Sine rather than cubic: cubic's ends are steep enough that a
+        260ms phase still reads as a flick. The pair stays In-then-Out so
+        the outgoing is fastest exactly where the incoming picks up, and
+        velocity is continuous across the swap — which is what makes two
+        phases read as one movement.
+        """
         if self._view_model.timeline() is None or self._card_active():
             return
         if self._last_state is PlaybackState.PLAYING:
-            self._animate_line(-1.0, QEasingCurve.Type.InCubic)
+            self._animate_line(-1.0, QEasingCurve.Type.InSine)
 
     def _predicted_swap(self) -> None:
         timeline = self._view_model.timeline()
@@ -1216,13 +1242,15 @@ class LyricsWindow(QWidget):
         # authoritative: this animation ENDS at the line's timestamp, so
         # the motion completes on time rather than starting on time.
         self._current_fx.progress = 1.0
-        self._animate_line(0.0, QEasingCurve.Type.OutCubic)
+        self._animate_line(0.0, QEasingCurve.Type.OutSine)
 
     def _animate_line(self, end: float, curve: QEasingCurve.Type) -> None:
         if self._fade_anim is not None:
             self._fade_anim.stop()
         animation = QPropertyAnimation(self._current_fx, b"progress", self)
-        animation.setDuration(_FADE_MS)
+        # The duration this transition was scheduled for, which is the
+        # nominal one unless the next line arrives too soon for it.
+        animation.setDuration(self._transition_ms)
         animation.setEasingCurve(curve)
         animation.setEndValue(end)
         animation.start()

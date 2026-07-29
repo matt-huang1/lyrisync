@@ -76,10 +76,11 @@ TOP_MARGIN = 14
 BOTTOM_MARGIN = 16
 
 # How far a line travels vertically as it is replaced, base px at scale
-# 1.0. Small on purpose: this is a hint of motion in the direction the
-# song is going, not a transition. Big enough to be felt at a glance and
-# small enough that nobody watching the lyrics notices it happening.
-LINE_TRAVEL = 7
+# 1.0. Still a hint of motion in the direction the song is going rather
+# than a transition — but paced over 260ms rather than 100ms, and a
+# distance that read as a twitch at the old speed reads as too little at
+# this one. Distance and duration are a pair.
+LINE_TRAVEL = 10
 
 # Korean first, because the UI family carries no hangul of its own and this
 # is the face CoreText falls back to anyway — naming it makes the fallback

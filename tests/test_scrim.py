@@ -296,6 +296,125 @@ def test_a_tint_keeps_the_alpha_it_was_given():
         assert tinted.solid[3] == palette.solid[3]
 
 
+# -- how much colour a tint carries ---------------------------------------
+
+
+def panel_chroma(colour):
+    """The colour actually reaching the eye: the spread between the
+    strongest and weakest channel, diluted by the background's alpha."""
+    return (max(colour[:3]) - min(colour[:3])) * colour[3] / 255
+
+
+def test_chroma_is_solved_against_what_is_actually_achieved():
+    """Bisected on saturation rather than computed from HSL's closed
+    form. The closed form answers a different question — chroma at some
+    lightness — and pinning the luminance then moves the lightness by
+    wildly different amounts per hue. Feeding that back as a correction
+    oscillates instead of converging.
+    """
+    for luminance in (0.005, 0.2, 0.5, 0.93):
+        for target in (6.0, 14.0):
+            for hue in (0, 60, 120, 180, 240, 300):
+                got = ap.chroma_of(ap._at_chroma(hue, target, luminance))
+                # Either it hit the target, or the gamut would not allow
+                # it — never wildly over, and never oscillating away.
+                assert got <= target + 2, f"hue {hue} overshot to {got}"
+
+
+def test_the_solver_is_monotonic_in_what_it_is_asked_for():
+    """More chroma asked for is never less chroma delivered — the
+    property that makes bisection valid at all."""
+    for hue in (0, 90, 200, 300):
+        got = [ap.chroma_of(ap._at_chroma(hue, t, 0.93)) for t in (2, 6, 10, 20, 40)]
+        assert got == sorted(got), f"hue {hue}: {got}"
+
+
+def test_a_hue_that_cannot_reach_the_target_settles_for_its_most():
+    """A gamut limit, not an error. At the light panel's luminance a blue
+    is nearly white — blue carries 7% of luminance, so buying blue chroma
+    costs brightness the pinned luminance will not give up."""
+    reachable = ap.chroma_of(ap._at_chroma(240, 60.0, 0.93))
+    assert 0 < reachable < 60
+    # And asking for even more does not change the answer.
+    assert ap.chroma_of(ap._at_chroma(240, 200.0, 0.93)) == reachable
+
+
+@PALETTES
+def test_a_tint_is_actually_visible(palette):
+    """The bug this replaced: at 0.22 HSL saturation the light tint moved
+    the scrim by 3/255 — less than the palette's own built-in blue cast,
+    so album colour looked switched off however strong the cover was.
+    Every hue must now clear the untinted panel's own chroma."""
+    baseline = panel_chroma(palette.scrim)
+    appearance = (
+        ap.Appearance.DARK if palette is DARK else ap.Appearance.LIGHT
+    )
+    for hue in range(0, 360, 30):
+        tinted = ap.tinted(palette, ap.hsl_to_rgb(hue, 1.0, 0.5), appearance).scrim
+        assert panel_chroma(tinted) > baseline, f"hue {hue} is invisible"
+
+
+def test_the_chroma_target_means_the_same_thing_in_both_modes():
+    """Stated as delivered chroma rather than HSL saturation, because one
+    saturation produced 2.4x more colour in dark than in light — the same
+    number describing two different amounts of colour."""
+    assert ap.TINT_CHROMA[ap.Appearance.DARK] == ap.TINT_CHROMA_DARK
+    assert ap.TINT_CHROMA[ap.Appearance.LIGHT] == ap.TINT_CHROMA_LIGHT
+    for value in ap.TINT_CHROMA.values():
+        assert 0 < value < 64  # a cast, not a colour
+
+
+@PALETTES
+def test_the_tint_never_exceeds_what_was_asked_for(palette):
+    """Clamping may deliver less — the gamut says so — but nothing may
+    deliver more than the target, or the constant would not bound it."""
+    appearance = (
+        ap.Appearance.DARK if palette is DARK else ap.Appearance.LIGHT
+    )
+    target = ap.TINT_CHROMA[appearance]
+    for hue in range(0, 360, 15):
+        tinted = ap.tinted(palette, ap.hsl_to_rgb(hue, 1.0, 0.5), appearance)
+        for background in (tinted.scrim, tinted.solid):
+            assert panel_chroma(background) <= target + 1.5
+
+
+def test_the_tint_strength_does_not_depend_on_which_hue_the_album_is():
+    """Solved by bisection rather than computed once, because pinning the
+    luminance moves the lightness by different amounts per hue.
+
+    Dark has the gamut room to be even; light does not, and that is
+    checked separately below rather than pretended away.
+    """
+    delivered = [
+        panel_chroma(ap.tinted(DARK, ap.hsl_to_rgb(hue, 1.0, 0.5), ap.Appearance.DARK).scrim)
+        for hue in range(0, 360, 15)
+    ]
+    assert max(delivered) / min(delivered) < 1.5
+
+
+def test_light_mode_carries_less_colour_and_that_is_the_gamut_not_a_bug():
+    """Honest limit, recorded so it is not rediscovered as a regression.
+    The light panel sits at luminance 0.93, and holding that luminance —
+    which is what protects the contrast floor — leaves the hues that
+    carry little luminance of their own (blues, magentas, reds) with
+    almost no room for chroma: buying their colour costs brightness the
+    pinned luminance will not give up. Relaxing the luminance by even 5% was
+    measured to buy little and to leave the floor at 4.52, with none of
+    the rounding headroom the rest of the palette keeps.
+    """
+    light = [
+        panel_chroma(ap.tinted(LIGHT, ap.hsl_to_rgb(hue, 1.0, 0.5), ap.Appearance.LIGHT).scrim)
+        for hue in range(0, 360, 15)
+    ]
+    dark = [
+        panel_chroma(ap.tinted(DARK, ap.hsl_to_rgb(hue, 1.0, 0.5), ap.Appearance.DARK).scrim)
+        for hue in range(0, 360, 15)
+    ]
+    assert max(light) < max(dark)
+    # Still worth far more than the 1.6-2.1 that shipped in 13.0.
+    assert max(light) > 8
+
+
 # -- the colour maths itself ----------------------------------------------
 
 
