@@ -18,6 +18,8 @@ import tomllib
 from importlib.metadata import PackageNotFoundError, version as installed_version
 from pathlib import Path
 
+from PyInstaller.utils.hooks import copy_metadata
+
 PROJECT = Path(SPECPATH).parent
 PACKAGING = PROJECT / "packaging"
 
@@ -66,7 +68,17 @@ analysis = Analysis(
     # menubar.svg is loaded as Path(__file__).parent/"assets"/… , which in a
     # frozen build resolves inside the bundle — so it has to land at the
     # same place relative to the package.
-    datas=[(str(PROJECT / "src" / "lyrisync" / "assets"), "lyrisync/assets")],
+    #
+    # copy_metadata is load-bearing, not housekeeping: lyrisync/__init__.py
+    # asks importlib.metadata for its own version, and PyInstaller freezes
+    # the package WITHOUT its .dist-info unless told otherwise (verified —
+    # there was none in the bundle). Without this the app still runs, but
+    # falls back to "unknown" and introduces itself to LRCLIB as a version
+    # it is not.
+    datas=[
+        (str(PROJECT / "src" / "lyrisync" / "assets"), "lyrisync/assets"),
+        *copy_metadata("lyrisync"),
+    ],
     # AppKit and objc are imported inside functions (every native feature is
     # guarded), and korean_romanizer is reached through a lazy import too.
     hiddenimports=[

@@ -33,11 +33,15 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+# Carries the app's version, resolved once from the installed
+# distribution's metadata — the same string the lyrics fetch sends, so
+# the two cannot introduce themselves differently.
+from lyrisync import USER_AGENT
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_ARTWORK_CACHE_DIR = Path(".artwork_cache")
 
-USER_AGENT = "lyrisync/0.1.0 (https://github.com/matthewhuang/lyrisync)"
 _REQUEST_TIMEOUT = 10.0
 # Covers are a few hundred KB; anything wildly bigger is not a cover and
 # is not worth pulling down a phone tether to find out.

@@ -25,6 +25,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC_PATH = REPO_ROOT / "packaging" / "LyriSync.spec"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+PACKAGE_DIR = REPO_ROOT / "src" / "lyrisync"
+
+# The modules that introduce this app to somebody else's server. Both used
+# to carry "lyrisync/0.1.0 (…)" written out by hand, which stayed correct
+# for exactly as long as the version did.
+OUTBOUND_MODULES = ("artwork.py", "lyrics_provider.py")
 
 # The two Info.plist keys that state a version. Finder shows the first,
 # macOS compares the second; both have to be the package's own.
@@ -32,6 +38,11 @@ VERSION_KEYS = ("CFBundleShortVersionString", "CFBundleVersion")
 
 # A version-shaped string, for the check that none is hard-written.
 _VERSION_LITERAL = re.compile(r"^\d+\.\d+(\.\d+)*$")
+
+# The same shape, anywhere INSIDE a string. The User-Agent hid its copy of
+# the version in the middle of one ("lyrisync/0.1.0 (…)"), so a
+# whole-string match would have walked straight past it.
+_VERSION_ANYWHERE = re.compile(r"\d+\.\d+(\.\d+)*")
 
 # LSMinimumSystemVersion is version-shaped and is deliberately a literal:
 # it is the macOS floor (SF Symbols arrived in 11.0), not this app's
@@ -92,6 +103,30 @@ def _is_metadata_call(value: ast.AST, alias: str) -> bool:
         and isinstance(value.func, ast.Name)
         and value.func.id == alias
     )
+
+
+def docstring_ids(tree: ast.Module) -> set[int]:
+    """Every string that is prose rather than a value.
+
+    Needed because this file's own examples are version-shaped: the LRC
+    parser's docstring says ``[00:12.00][00:55.30] chorus``, and a scan
+    that counted that as a version would be a test nobody could satisfy
+    without deleting the documentation.
+    """
+    ids = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        if (
+            node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            ids.add(id(node.body[0].value))
+    return ids
 
 
 def bundle_call(tree: ast.Module) -> ast.Call:
@@ -182,6 +217,85 @@ def test_no_version_number_is_written_into_the_spec(spec_tree, declared_version)
     ]
     assert not offenders, f"version literals in the spec: {offenders}"
     assert declared_version not in SPEC_PATH.read_text(encoding="utf-8")
+
+
+# -- and neither does anything else the app says about itself -------------
+
+
+@pytest.mark.parametrize("module", OUTBOUND_MODULES)
+def test_no_version_number_is_written_into_an_outbound_module(module):
+    """The User-Agent LRCLIB and the artwork host see must not be a hand
+    written copy of the version. Both of these carried one, and it went
+    stale the first time the version moved — the app introduced itself as
+    0.1.0 while being 1.0.0.
+
+    Substring, not whole-string: the number was buried mid-sentence in
+    "lyrisync/0.1.0 (…)", which is exactly where a check for a literal
+    version would fail to look.
+    """
+    tree = ast.parse((PACKAGE_DIR / module).read_text(encoding="utf-8"))
+    prose = docstring_ids(tree)
+    offenders = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in prose
+        and _VERSION_ANYWHERE.search(node.value)
+    ]
+    assert not offenders, f"{module} states a version in: {offenders}"
+
+
+@pytest.mark.parametrize("module", OUTBOUND_MODULES)
+def test_the_outbound_modules_take_the_user_agent_from_the_package(module):
+    """Structural half of the same claim: no version literal is easy to
+    satisfy by deleting the version. The string still has to come from the
+    one place that resolves it."""
+    tree = ast.parse((PACKAGE_DIR / module).read_text(encoding="utf-8"))
+    imported = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "lyrisync"
+        and any(alias.name == "USER_AGENT" for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    assert imported, f"{module} does not import USER_AGENT from the package"
+
+
+def test_every_user_agent_is_the_same_string_and_carries_the_version():
+    """The behavioural half, at runtime. One identity, and it states what
+    the app actually is."""
+    from lyrisync import USER_AGENT, __version__
+    from lyrisync.artwork import USER_AGENT as artwork_agent
+    from lyrisync.lyrics_provider import USER_AGENT as lyrics_agent
+
+    assert artwork_agent == lyrics_agent == USER_AGENT
+    assert __version__ == installed_version("lyrisync")
+    assert f"lyrisync/{__version__}" in USER_AGENT
+
+
+def test_the_bundle_carries_the_metadata_that_answer_depends_on(spec_tree):
+    """__init__.py asks importlib.metadata for the version, and PyInstaller
+    freezes the package WITHOUT its .dist-info unless the spec says
+    otherwise — verified by finding none in a built bundle. Without this
+    the frozen app falls back to "unknown" and misstates itself to every
+    server it talks to, which is a failure nothing else here would catch.
+    """
+    source = SPEC_PATH.read_text(encoding="utf-8")
+    assert "copy_metadata" in source, (
+        "the spec does not copy the distribution metadata into the bundle"
+    )
+    call = next(
+        (
+            node
+            for node in ast.walk(spec_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "copy_metadata"
+        ),
+        None,
+    )
+    assert call is not None, "copy_metadata is mentioned but never called"
+    assert [ast.literal_eval(arg) for arg in call.args] == ["lyrisync"]
 
 
 # -- and that it cannot go stale ------------------------------------------

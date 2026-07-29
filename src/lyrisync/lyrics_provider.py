@@ -25,13 +25,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# Carries the app's version, resolved once from the installed
+# distribution's metadata. Re-exported here because this module's callers
+# have always read it from this module; what it must never be again is a
+# second copy of the version, written by hand and right for one release.
+from lyrisync import USER_AGENT
 from lyrisync.player_monitor import PlayerSnapshot
 
 logger = logging.getLogger(__name__)
 
 LRCLIB_GET_URL = "https://lrclib.net/api/get"
 LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
-USER_AGENT = "lyrisync/0.1.0 (https://github.com/matthewhuang/lyrisync)"
 DEFAULT_CACHE_DIR = Path(".lyrics_cache")
 # Hand-made syncs. Deliberately NOT under the cache directory: clearing the
 # cache is a documented reset, and it must never cost the user a sync they

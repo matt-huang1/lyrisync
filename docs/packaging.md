@@ -45,6 +45,33 @@ the spec as an AST — a spec cannot be imported, since PyInstaller injects
 the number comes *from*. Pinning the value in a test would just be the
 second copy of the version again.
 
+### `copy_metadata` is load-bearing
+
+The app asks the same question about itself at runtime: `lyrisync/__init__.py`
+resolves `__version__` from `importlib.metadata` and builds the User-Agent
+from it, so what LRCLIB and the artwork host are told cannot drift from
+what the app is.
+
+PyInstaller freezes the package **without** its `.dist-info` unless the
+spec says otherwise — verified by finding none in a built bundle. So the
+spec passes `copy_metadata("lyrisync")` into `datas`. Without it the app
+still runs, but falls back to `unknown` and misstates itself to every
+server it talks to, while the `Info.plist` beside it says 1.0.0.
+
+Verified after adding it, by resolving the version with the search path
+scoped to the bundle's own `Frameworks` directory, so the installed copy
+cannot be the one answering:
+
+```
+resolved from the bundle path only: {'lyrisync': '1.0.0'}
+User-Agent the frozen app would send: lyrisync/1.0.0 (…)
+```
+
+The fallback is the string `unknown`, deliberately not a number: a
+fallback version literal is exactly the drift this removes, and an app
+that cannot state its version is better than one that states the wrong
+one.
+
 ## The bundle identifier is the settings contract
 
 `com.lyrisync.lyrisync` is exactly what `QSettings("lyrisync",
