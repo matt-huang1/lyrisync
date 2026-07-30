@@ -45,6 +45,13 @@ the reasoning: what was decided, why, and what was measured to check it.
 - [Making a release](releasing.md)
 - [Gatekeeper, and why a downloaded build is blocked](gatekeeper.md)
 
-`CLAUDE.md` in the repository root is the raw working decision log — every
-decision in the order it was made, including the ones these pages
-summarise.
+**Underneath all of it**
+
+- [The decision log](decision-log.md) — every decision in the order it was
+  made, with the measurement or the bug behind it, including the ones
+  these pages summarise. It contradicts itself on purpose: a later entry
+  beginning SUPERSEDES is the current answer, and the superseded reasoning
+  is kept because being wrong is the useful part.
+- [`CLAUDE.md`](../CLAUDE.md) in the repository root is the short version
+  — the rules that still bind, without the history. It is instructions for
+  working on the app rather than a page about it.

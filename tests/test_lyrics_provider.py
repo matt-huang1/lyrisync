@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 
@@ -50,20 +51,44 @@ class FakeFetcher:
     Route keys distinguish the three request shapes: a /get URL with the
     album carries "album_name=", the album-less retry matches "api/get",
     and the search fallback matches "api/search".
+
+    An unrouted URL is a 404 rather than an error, because every attempt in
+    the chain now goes out on every fetch: a test that routes only the
+    exact match is describing a song LRCLIB has under that album and
+    nowhere else, which is a 404 from the other two.
+
+    Called from the attempt threads, so the record is locked — and it is a
+    record of WHAT was asked, never of what order the answers came back
+    in, which is now the network's business rather than the chain's.
     """
 
     def __init__(self, *routes):
         self.routes = list(routes)
         self.calls = []
+        self._lock = threading.Lock()
 
     def __call__(self, url):
-        self.calls.append(url)
+        with self._lock:
+            self.calls.append(url)
         for substring, response in self.routes:
             if substring in url:
                 if isinstance(response, Exception):
                     raise response
                 return response
-        raise AssertionError(f"unexpected URL: {url}")
+        return None
+
+    def asked(self, substring):
+        """The URLs matching ``substring``, in no particular order."""
+        with self._lock:
+            return [url for url in self.calls if substring in url]
+
+    def asked_once(self, substring):
+        return len(self.asked(substring)) == 1
+
+    @property
+    def count(self):
+        with self._lock:
+            return len(self.calls)
 
 
 @pytest.fixture
@@ -87,8 +112,8 @@ def test_synced_lyrics_fetched_and_parsed(provider, monkeypatch):
     lyrics = provider.get_lyrics(snapshot())
     assert lyrics.kind == "synced"
     assert lyrics.synced == [(12.0, "First line"), (17.5, "Second line")]
-    assert len(fake.calls) == 1
-    url = fake.calls[0]
+    assert fake.asked_once("album_name=Album")
+    url = fake.asked("album_name=Album")[0]
     assert "track_name=Song" in url
     assert "artist_name=Artist" in url
     assert "album_name=Album" in url
@@ -111,8 +136,9 @@ def test_404_with_album_retries_without_album(provider, monkeypatch):
     )
     lyrics = provider.get_lyrics(snapshot())
     assert lyrics.kind == "synced"
-    assert len(fake.calls) == 2
-    assert "album_name" not in fake.calls[1]
+    # Exact, not a substring: the album URL begins with this one.
+    album_less = lp.LRCLIB_GET_URL + "?track_name=Song&artist_name=Artist&duration=225"
+    assert album_less in fake.calls
 
 
 def test_double_404_falls_back_to_search(provider, monkeypatch):
@@ -124,8 +150,7 @@ def test_double_404_falls_back_to_search(provider, monkeypatch):
     )
     lyrics = provider.get_lyrics(snapshot())
     assert lyrics.kind == "synced"
-    assert len(fake.calls) == 3
-    assert "api/search" in fake.calls[2]
+    assert fake.asked_once("api/search")
 
 
 def test_search_prefers_synced_and_filters_bad_matches(provider, monkeypatch):
@@ -169,18 +194,23 @@ def test_nothing_found_anywhere_returns_none(provider, monkeypatch):
 
 
 def test_instrumental_exact_match_is_definitive(provider, monkeypatch):
-    # A 200 with null lyrics from the exact match ends the chain: no search.
-    fake = use_fetcher(monkeypatch, ("album_name", INSTRUMENTAL_RESPONSE))
+    """A 200 with null lyrics from the exact match ends the chain — and now
+    that every attempt goes out anyway, the claim has to be made about the
+    ANSWER rather than about how many requests were spared: search has a
+    perfectly good synced record here and it is not used."""
+    use_fetcher(
+        monkeypatch,
+        ("album_name", INSTRUMENTAL_RESPONSE),
+        ("api/search", [search_record(syncedLyrics=SYNCED_LRC)]),
+    )
     assert provider.get_lyrics(snapshot()) is None
-    assert len(fake.calls) == 1
 
 
 def test_no_album_snapshot_skips_album_query(provider, monkeypatch):
     fake = use_fetcher(monkeypatch, ("api/get", SYNCED_RESPONSE))
     lyrics = provider.get_lyrics(snapshot(album=None))
     assert lyrics.kind == "synced"
-    assert len(fake.calls) == 1
-    assert "album_name" not in fake.calls[0]
+    assert fake.asked("album_name") == []
 
 
 # -- caching semantics ---------------------------------------------------
@@ -189,8 +219,9 @@ def test_no_album_snapshot_skips_album_query(provider, monkeypatch):
 def test_cache_hit_skips_fetch(provider, monkeypatch):
     fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
     first = provider.get_lyrics(snapshot())
+    asked = fake.count
     second = provider.get_lyrics(snapshot())
-    assert len(fake.calls) == 1
+    assert fake.count == asked  # the second lookup never left the machine
     assert second.synced == first.synced
 
 
@@ -202,8 +233,9 @@ def test_genuine_not_found_is_cached_negatively(provider, monkeypatch):
         ("api/get", None),
     )
     assert provider.get_lyrics(snapshot()) is None
+    asked = fake.count
     assert provider.get_lyrics(snapshot()) is None
-    assert len(fake.calls) == 3  # second call never hit the network
+    assert fake.count == asked  # second call never hit the network
     entry = json.loads(provider._cache_path("track123").read_text(encoding="utf-8"))
     assert entry == {"found": False, "synced": None, "plain": None}
 
@@ -217,7 +249,7 @@ def test_http_error_raises_and_is_never_cached(provider, monkeypatch):
     # Next attempt goes to the network again and succeeds.
     fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
     assert provider.get_lyrics(snapshot()).kind == "synced"
-    assert len(fake.calls) == 1
+    assert fake.asked_once("album_name=Album")
 
 
 def test_error_midway_through_fallback_chain_not_cached(provider, monkeypatch):
@@ -246,9 +278,10 @@ def test_cache_survives_new_provider_instance(provider, monkeypatch):
 def test_corrupt_cache_entry_refetches(provider, monkeypatch):
     fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
     provider.get_lyrics(snapshot())
+    asked = fake.count
     provider._cache_path("track123").write_text("{not json", encoding="utf-8")
     assert provider.get_lyrics(snapshot()) is not None
-    assert len(fake.calls) == 2
+    assert fake.count == asked * 2  # an unreadable entry is a fresh lookup
 
 
 def test_no_track_id_returns_none_without_fetch(provider, monkeypatch):
@@ -283,8 +316,9 @@ def test_non_music_item_never_touches_network_or_cache(provider, monkeypatch):
         duration_ms=0,
         position_seconds=1.0,
     )
+    asked = fake.count
     assert provider.get_lyrics(narration) is None  # not the song's lyrics
-    assert len(fake.calls) == 1  # no second network call
+    assert fake.count == asked  # no second network call
     entry = json.loads(provider._cache_path("shared123").read_text(encoding="utf-8"))
     assert entry["found"] is True  # song's entry untouched
 
@@ -390,7 +424,7 @@ def test_unparseable_user_sync_falls_back_to_the_normal_chain(provider, monkeypa
         (12.0, "First line"),
         (17.5, "Second line"),
     ]
-    assert len(fake.calls) == 1
+    assert fake.asked_once("album_name=Album")
 
 
 def test_non_music_item_never_reads_a_user_sync(provider, monkeypatch):
@@ -464,3 +498,106 @@ def test_parse_lrc_no_fraction():
 def test_parse_lrc_garbage_and_empty():
     assert lp.parse_lrc("") == []
     assert lp.parse_lrc("no timestamps here\n\n") == []
+
+
+# -- the chain runs its attempts at once ----------------------------------
+
+
+def test_every_attempt_goes_out_together(provider, monkeypatch):
+    """The chain used to cost the SUM of its attempts. Measured against
+    LRCLIB, the three-attempt case ran 3.3-10.4s while no single attempt
+    took more than 4.9s — the attempts never depended on each other, only
+    the choice between their answers did."""
+    fake = use_fetcher(monkeypatch, ("api/search", []))
+    provider.get_lyrics(snapshot())
+
+    assert sorted(fake.calls) == sorted(lp.attempt_urls(snapshot()))
+    assert len(fake.calls) == 3
+
+
+def test_a_song_with_no_album_asks_two_questions_not_three(provider):
+    """The album-less /get and the album-qualified one would be the same
+    request, and asking a free service the same question twice at once is
+    not a thing to do."""
+    urls = lp.attempt_urls(snapshot(album=None))
+
+    assert len(urls) == 2
+    assert not any("album_name" in url for url in urls)
+
+
+def test_the_most_precise_answer_wins_whatever_order_they_land_in(
+    provider, monkeypatch
+):
+    """Priority order, not completion order. Search is the loose match and
+    may well answer first; it must still lose to the exact one."""
+    slow_but_exact = threading.Event()
+
+    def fetcher(url):
+        if "album_name" in url:
+            slow_but_exact.wait(2.0)  # search lands long before this
+            return SYNCED_RESPONSE
+        if "api/search" in url:
+            return [search_record(plainLyrics="the loose answer")]
+        return None
+
+    monkeypatch.setattr(lp, "_fetch_json", fetcher)
+    threading.Timer(0.05, slow_but_exact.set).start()
+
+    lyrics = provider.get_lyrics(snapshot())
+
+    assert lyrics.kind == "synced"  # not "the loose answer"
+
+
+def test_a_failure_that_outranks_an_answer_is_still_a_retry_state(
+    provider, monkeypatch
+):
+    """Sequentially, an error on the exact match ended the chain and search
+    was never asked. Concurrently it IS asked, and its answer must still be
+    refused: caching a loose match because the precise one happened to
+    fail would be a wrong answer written down permanently."""
+    use_fetcher(
+        monkeypatch,
+        ("album_name", lp.LyricsError("LRCLIB returned HTTP 500")),
+        ("api/search", [search_record(syncedLyrics=SYNCED_LRC)]),
+    )
+
+    with pytest.raises(lp.LyricsError):
+        provider.get_lyrics(snapshot())
+    assert not provider._cache_path("track123").exists()
+
+
+def test_a_failure_below_the_winner_is_never_looked_at(provider, monkeypatch):
+    """The mirror of the rule above: the exact match answered, so what
+    happened to the attempts under it is not the chain's business — it
+    would not even have asked them before."""
+    use_fetcher(
+        monkeypatch,
+        ("album_name", SYNCED_RESPONSE),
+        ("api/get", lp.LyricsError("timed out")),
+        ("api/search", lp.LyricsError("timed out")),
+    )
+
+    assert provider.get_lyrics(snapshot()).kind == "synced"
+
+
+def test_an_attempt_that_never_answers_is_not_a_licence_to_use_a_worse_one(
+    provider, monkeypatch
+):
+    """A wedged attempt has an UNKNOWN outcome, which is a retry state.
+    Falling through to search would be treating "we could not ask" as "the
+    answer was no"."""
+    monkeypatch.setattr(lp, "_ATTEMPT_WAIT", 0.05)
+    never = threading.Event()
+
+    def fetcher(url):
+        if "album_name" in url:
+            never.wait(30.0)
+            return None
+        return [search_record(syncedLyrics=SYNCED_LRC)]
+
+    monkeypatch.setattr(lp, "_fetch_json", fetcher)
+    try:
+        with pytest.raises(lp.LyricsError):
+            provider.get_lyrics(snapshot())
+    finally:
+        never.set()

@@ -212,6 +212,43 @@ def test_an_injected_settings_file_is_never_migrated_into(make_window):
     assert window._settings.value(preferences.MIGRATION_KEY) is None
 
 
+def test_the_title_card_gives_the_window_back_as_soon_as_lyrics_land(make_window):
+    """The card is a floor on how long the gap LOOKS, not on how long it
+    lasts. It used to run its full two seconds whatever happened
+    underneath, so lyrics that arrived in 900ms sat behind the song's name
+    for another 1.1 seconds — a delay the app was adding to every track.
+    """
+    window = make_window()
+    window._on_track_change(snapshot())
+    APP.processEvents()
+    # The card is up: the song announces itself while the fetch is out.
+    assert window._card_active() is True
+    assert window._card_on_screen() is True
+    assert window._current.text() == window._view_model.display().header
+
+    window._on_fetch_finished("t1", SYNCED, True)
+    window._on_position_update(snapshot(position=2.0))
+    APP.processEvents()
+
+    # Still inside the two seconds, and already showing the song.
+    assert window._card_active() is True
+    assert window._card_on_screen() is False
+    assert window._current.text() == "one"
+
+
+def test_the_card_still_covers_a_song_joined_before_its_first_line(make_window):
+    """Ending it here would trade two seconds of the song's name for ten
+    seconds of an empty window."""
+    window = make_window()
+    window._on_track_change(snapshot())
+    window._on_fetch_finished("t1", SYNCED, True)
+    window._on_position_update(snapshot(position=0.2))  # first line is at 1.0
+    APP.processEvents()
+
+    assert window._card_on_screen() is True
+    assert window._current.text() == window._view_model.display().header
+
+
 def snapshot(
     track_id="t1", title="Song", state=PlaybackState.PLAYING, position=0.0
 ):

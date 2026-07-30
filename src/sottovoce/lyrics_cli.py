@@ -19,6 +19,7 @@ import sys
 from sottovoce.lyrics_provider import LyricsError, LyricsProvider, TrackLyrics
 from sottovoce.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
 from sottovoce.sync import current_line_index
+from sottovoce.view_model import header_text
 
 _BOLD = "\x1b[1m"
 _DIM = "\x1b[2m"
@@ -77,7 +78,7 @@ class LyricsApp:
         if not snapshot.has_track:
             self._println("\n(no track loaded)")
             return
-        self._println(f"\n♪ {snapshot.title} — {snapshot.artist}")
+        self._println(f"\n♪ {header_text(snapshot)}")
         try:
             lyrics = self.provider.get_lyrics(snapshot)
         except LyricsError as exc:

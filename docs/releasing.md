@@ -100,5 +100,7 @@ published value. If you re-upload, update the README in the same breath.
 
 ## Afterwards
 
-Update [the changelog](../CHANGELOG.md), and check that the README's test
-count still matches `make test`.
+Update [the changelog](../CHANGELOG.md), and check that the test count in
+[testing and CI](testing-and-ci.md) still matches `make test`. That page is
+the only place the number is written down — it used to be in the README
+too, which meant two numbers to keep true and one that quietly was not.

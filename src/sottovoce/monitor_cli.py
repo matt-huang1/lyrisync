@@ -10,6 +10,7 @@ import sys
 import time
 
 from sottovoce.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
+from sottovoce.view_model import header_text
 
 
 def _fmt_clock(seconds: float) -> str:
@@ -45,7 +46,7 @@ class EventPrinter:
             else "?:??"
         )
         self._event(
-            f"track: {snapshot.artist} — {snapshot.title} "
+            f"track: {header_text(snapshot)} "
             f"[{snapshot.album}] ({duration})  id={snapshot.track_id}"
         )
 

@@ -96,7 +96,7 @@ from sottovoce import flight
 from sottovoce import frontmost
 from sottovoce import hotkey
 from sottovoce.loop import LineLoop, LoopPhase
-from sottovoce.lyrics_provider import LyricsError, LyricsProvider
+from sottovoce.lyrics_provider import LyricsError, LyricsProvider, close_connections
 from sottovoce.macspaces import (
     ACTIVATION_POLICY_ACCESSORY,
     STATUS_WINDOW_LEVEL,
@@ -178,7 +178,7 @@ from sottovoce.vibrancy import (
     WINDOW_BELOW,
     appearance_name,
 )
-from sottovoce.view_model import LyricsViewModel, Mode
+from sottovoce.view_model import LyricsViewModel, Mode, card_yields
 
 logger = logging.getLogger(__name__)
 
@@ -1363,7 +1363,7 @@ class LyricsWindow(QWidget):
             self._render()
 
     def _tick_dots(self) -> None:
-        if self._view_model.display().mode is Mode.FETCHING and not self._card_active():
+        if self._view_model.display().mode is Mode.FETCHING and not self._card_on_screen():
             self._dots_frame = (self._dots_frame + 1) % len(_DOTS_FRAMES)
             self._current.setText(_DOTS_FRAMES[self._dots_frame])
 
@@ -1440,7 +1440,7 @@ class LyricsWindow(QWidget):
         refused here and changes nothing.
         """
         timeline = self._view_model.timeline()
-        if timeline is None or self._card_active():
+        if timeline is None or self._card_on_screen():
             return
         if self._last_state is not PlaybackState.PLAYING:
             return
@@ -1451,7 +1451,7 @@ class LyricsWindow(QWidget):
 
     def _predicted_swap(self) -> None:
         timeline = self._view_model.timeline()
-        if timeline is None or self._card_active():
+        if timeline is None or self._card_on_screen():
             return
         if self._last_state is not PlaybackState.PLAYING:
             return
@@ -1530,7 +1530,18 @@ class LyricsWindow(QWidget):
     # -- rendering ---------------------------------------------------------
 
     def _card_active(self) -> bool:
+        """The card's two seconds have not run out yet."""
         return time.monotonic() < self._title_card_until
+
+    def _card_on_screen(self) -> bool:
+        """The card is actually up — which is the question every caller
+        here is asking, and not quite the same as its time being unspent.
+
+        It ends early when the lyrics land with something to put on
+        screen, so this is also what stops the anticipatory schedule from
+        sitting out the rest of a card that is no longer showing.
+        """
+        return self._card_active() and not card_yields(self._view_model.display())
 
     def _render(self) -> None:
         display = self._view_model.display()
@@ -1563,7 +1574,7 @@ class LyricsWindow(QWidget):
             self._upcoming.setText(display.upcoming)
             return
 
-        if display.header and display.mode is not Mode.IDLE and self._card_active():
+        if display.header and display.mode is not Mode.IDLE and self._card_on_screen():
             # Title card: the song announces itself before lyrics start.
             self._displayed_index = None
             self._show_plain_view(False)
@@ -3724,6 +3735,11 @@ class LyricsWindow(QWidget):
         if not self._pool.waitForDone(_SHUTDOWN_WAIT_MS):
             logger.warning("worker still running at shutdown (%d active)",
                            self._pool.activeThreadCount())
+        # Last, and after the workers, because a fetch still in flight owns
+        # a connection: LRCLIB holds an idle one for minutes, and leaving
+        # sockets open on somebody else's server after quitting is untidy.
+        # Cannot block — an idle connection has nothing in flight on it.
+        close_connections()
 
 
 def apply_accessory_policy() -> None:

@@ -15,27 +15,29 @@ nothing in this app deletes from it.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import re
-import urllib.error
+import threading
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 # Carries the app's version, resolved once from the installed
 # distribution's metadata. Re-exported here because this module's callers
 # have always read it from this module; what it must never be again is a
 # second copy of the version, written by hand and right for one release.
 from sottovoce import USER_AGENT
+from sottovoce.http_client import ConnectionPool
 from sottovoce.player_monitor import PlayerSnapshot
 
 logger = logging.getLogger(__name__)
 
-LRCLIB_GET_URL = "https://lrclib.net/api/get"
-LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
+LRCLIB_HOST = "lrclib.net"
+LRCLIB_GET_URL = f"https://{LRCLIB_HOST}/api/get"
+LRCLIB_SEARCH_URL = f"https://{LRCLIB_HOST}/api/search"
 DEFAULT_CACHE_DIR = Path(".lyrics_cache")
 # Hand-made syncs. Deliberately NOT under the cache directory: clearing the
 # cache is a documented reset, and it must never cost the user a sync they
@@ -43,6 +45,13 @@ DEFAULT_CACHE_DIR = Path(".lyrics_cache")
 DEFAULT_USER_SYNC_DIR = Path(".user_syncs")
 
 _REQUEST_TIMEOUT = 10.0
+# One second of slack over the socket's own timeout: the socket is what
+# should give up first, and this only exists so a wedged attempt cannot
+# hold the fallback chain open forever.
+_ATTEMPT_WAIT = _REQUEST_TIMEOUT + 1.0
+# The widest the fallback chain gets, which is also how many connections
+# are worth keeping alive.
+_CHAIN_WIDTH = 3
 # /api/get only matches durations within ~2s, so search results this far
 # from Spotify's duration are considered a different recording.
 _SEARCH_DURATION_TOLERANCE = 10.0
@@ -92,24 +101,145 @@ def parse_lrc(text: str) -> list[tuple[float, str]]:
     return entries
 
 
+_pool: Optional[ConnectionPool] = None
+_pool_lock = threading.Lock()
+
+
+def _lrclib_pool() -> ConnectionPool:
+    """The one door onto LRCLIB, and the connections kept alive to it.
+
+    Module-level rather than per-provider because the point is to outlive
+    a single lookup: the handshakes a track pays for are what the next
+    track gets for free. Tests never reach it — the socket guard refuses
+    first — and it is only ever built on demand, so importing this module
+    opens nothing.
+    """
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            _pool = ConnectionPool(
+                LRCLIB_HOST, timeout=_REQUEST_TIMEOUT, limit=_CHAIN_WIDTH
+            )
+        return _pool
+
+
+def close_connections() -> None:
+    """Drop the kept-alive connections. Called at shutdown so the app does
+    not leave sockets open on a public service; instant, because nothing
+    is in flight on an idle connection."""
+    with _pool_lock:
+        pool = _pool
+    if pool is not None:
+        pool.close()
+
+
 def _fetch_json(url: str):
     """GET a JSON document. Returns the parsed body, or None on 404 (a
     definitive "not found"). Raises LyricsError for anything whose outcome
     is unknown: network trouble, other HTTP errors, unparseable payload."""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    split = urllib.parse.urlsplit(url)
+    path = split.path + (f"?{split.query}" if split.query else "")
     try:
-        with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT) as response:
-            data = json.load(response)
-            logger.info("GET %s -> %d", url, response.status)
-            return data
-    except urllib.error.HTTPError as exc:
-        logger.info("GET %s -> %d", url, exc.code)
-        if exc.code == 404:
-            return None
-        raise LyricsError(f"LRCLIB returned HTTP {exc.code}") from exc
-    except (OSError, ValueError) as exc:
+        response = _lrclib_pool().get(path, headers={"User-Agent": USER_AGENT})
+    except (OSError, http.client.HTTPException) as exc:
         logger.warning("GET %s -> error: %s", url, exc)
         raise LyricsError(str(exc)) from exc
+
+    logger.info("GET %s -> %d", url, response.status)
+    if response.status == 404:
+        return None
+    if response.status != 200:
+        raise LyricsError(f"LRCLIB returned HTTP {response.status}")
+    try:
+        return json.loads(response.body)
+    except ValueError as exc:
+        raise LyricsError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    """What one attempt came back with: a parsed body, a definitive 404
+    (``data`` None with no error), or the reason it could not be answered."""
+
+    data: object = None
+    error: Optional[BaseException] = None
+
+
+def _run_attempts(urls: list[str]) -> Iterator[_Outcome]:
+    """Make every attempt at once; hand the results back in the order they
+    were given, which is PRIORITY order and not completion order.
+
+    The chain used to be sequential, and its cost was the sum of the
+    attempts rather than the longest of them — measured against LRCLIB at
+    3.3-10.4s for the three-attempt case, where no single attempt took
+    more than 4.9s. Nothing about the chain needed to be sequential: the
+    attempts do not depend on each other, only the CHOICE between their
+    answers does, and that is a question about results rather than about
+    when they arrive.
+
+    Priority order is what preserves the old semantics exactly. A caller
+    that stops at the first attempt with an answer never waits for the
+    rest, so a first-attempt hit costs one attempt's time, not three.
+
+    The cost, stated rather than buried: an uncached track now asks LRCLIB
+    up to three questions where it used to ask between one and three. It
+    is a free service; a lookup happens once per track ever, because the
+    answer is cached.
+    """
+    outcomes: list[Optional[_Outcome]] = [None] * len(urls)
+    landed = [threading.Event() for _ in urls]
+
+    def run(index: int, url: str) -> None:
+        try:
+            outcomes[index] = _Outcome(data=_fetch_json(url))
+        except BaseException as exc:  # noqa: BLE001 - reported, never swallowed
+            outcomes[index] = _Outcome(error=exc)
+        finally:
+            landed[index].set()
+
+    for index, url in enumerate(urls):
+        threading.Thread(
+            target=run, args=(index, url), name=f"lyrics-attempt-{index}", daemon=True
+        ).start()
+
+    for index in range(len(urls)):
+        if not landed[index].wait(_ATTEMPT_WAIT):
+            # A higher-priority attempt that never came back is not a
+            # licence to use a lower-priority answer: the outcome is
+            # unknown, which is a retry state.
+            yield _Outcome(error=LyricsError("LRCLIB did not answer in time"))
+            return
+        yield outcomes[index]
+
+
+def attempt_urls(snapshot: PlayerSnapshot) -> list[str]:
+    """The fallback chain as URLs, most precise first.
+
+    /get with the album is the exact match; without it, the same question
+    with one fewer thing to disagree about; /search is the loose one. Two
+    attempts rather than three when Spotify reports no album, because the
+    first two would then be the same request.
+    """
+    params = {"track_name": snapshot.title, "artist_name": snapshot.artist}
+    if snapshot.duration_ms is not None:
+        params["duration"] = str(round(snapshot.duration_ms / 1000))
+
+    urls = []
+    if snapshot.album:
+        urls.append(
+            LRCLIB_GET_URL
+            + "?"
+            + urllib.parse.urlencode({**params, "album_name": snapshot.album})
+        )
+    urls.append(LRCLIB_GET_URL + "?" + urllib.parse.urlencode(params))
+    urls.append(
+        LRCLIB_SEARCH_URL
+        + "?"
+        + urllib.parse.urlencode(
+            {"track_name": snapshot.title, "artist_name": snapshot.artist}
+        )
+    )
+    return urls
 
 
 class LyricsProvider:
@@ -159,35 +289,28 @@ class LyricsProvider:
         """Fallback chain against LRCLIB's exact-match /get endpoint, which
         404s when Spotify's album name or duration (tolerance ~2s) doesn't
         exactly match LRCLIB's record: full params → without album →
-        /search. Raises LyricsError on transient failure at any step."""
-        params = {
-            "track_name": snapshot.title,
-            "artist_name": snapshot.artist,
-        }
-        if snapshot.duration_ms is not None:
-            params["duration"] = str(round(snapshot.duration_ms / 1000))
+        /search. Raises LyricsError on transient failure at any step.
 
-        if snapshot.album:
-            data = _fetch_json(
-                LRCLIB_GET_URL
-                + "?"
-                + urllib.parse.urlencode({**params, "album_name": snapshot.album})
-            )
-            if data is not None:
-                return self._decode_record(data)
-
-        data = _fetch_json(LRCLIB_GET_URL + "?" + urllib.parse.urlencode(params))
-        if data is not None:
-            return self._decode_record(data)
-
-        search_params = {
-            "track_name": snapshot.title,
-            "artist_name": snapshot.artist,
-        }
-        results = _fetch_json(
-            LRCLIB_SEARCH_URL + "?" + urllib.parse.urlencode(search_params)
-        )
-        return self._pick_search_result(results or [], snapshot)
+        The attempts go out together and are read back in the order above,
+        which is the same chain it always was — the fallback is a
+        preference between answers, and never depended on asking one
+        question only after another had failed.
+        """
+        urls = attempt_urls(snapshot)
+        for url, outcome in zip(urls, _run_attempts(urls)):
+            if outcome.error is not None:
+                # An attempt that outranks the rest could not be answered,
+                # so the outcome of the chain is unknown — exactly as when
+                # it was sequential and stopped here. Never cached.
+                if isinstance(outcome.error, LyricsError):
+                    raise outcome.error
+                raise LyricsError(str(outcome.error)) from outcome.error
+            if outcome.data is None:
+                continue  # a definitive 404: the next attempt has the floor
+            if url.startswith(LRCLIB_SEARCH_URL):
+                return self._pick_search_result(outcome.data or [], snapshot)
+            return self._decode_record(outcome.data)
+        return None
 
     def _pick_search_result(
         self, results: list, snapshot: PlayerSnapshot

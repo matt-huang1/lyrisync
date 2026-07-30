@@ -55,19 +55,31 @@ def test_no_source_file_mentions_clearing_the_user_sync_directory():
                 ), f"{path.name}: {line.strip()}"
 
 
+# The two pages where the rule itself is written down, and where naming
+# the thing that must not happen is the entire point. The exclusion
+# follows the FILES rather than the filename: the decision log was
+# CLAUDE.md until session B and moved into docs/, where this guard reads
+# every page — it failed on the sentence that states the rule, which is
+# the guard working and pointed at the wrong shelf.
+RULE_PAGES = {"decision-log.md"}
+
+
 def prose_files():
     """Every page a user could take cleanup advice from.
 
     The README used to carry all of it; the depth now lives in docs/, so
-    the guard follows it there. CLAUDE.md is deliberately excluded — it is
-    the working decision log, where the rule itself is written down and
-    naming the thing that must not happen is the point.
+    the guard follows it there. CLAUDE.md is not in the list at all — it is
+    instructions for working on the app, not advice for running it.
     """
     return [
         REPO_ROOT / "README.md",
         REPO_ROOT / "DESIGN_PHILOSOPHY.md",
         REPO_ROOT / "CHANGELOG.md",
-        *sorted((REPO_ROOT / "docs").glob("*.md")),
+        *sorted(
+            path
+            for path in (REPO_ROOT / "docs").glob("*.md")
+            if path.name not in RULE_PAGES
+        ),
     ]
 
 

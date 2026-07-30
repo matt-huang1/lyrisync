@@ -70,9 +70,3 @@ DARK_APPEARANCE = "NSAppearanceNameDarkAqua"
 def appearance_name(dark: bool) -> str:
     """The NSAppearance the material should adopt for this mode."""
     return DARK_APPEARANCE if dark else LIGHT_APPEARANCE
-
-
-def autoresize_mask() -> int:
-    """Width- and height-sizable, so the material fills the window at every
-    size without us tracking resizes by hand."""
-    return AUTORESIZE_FILL

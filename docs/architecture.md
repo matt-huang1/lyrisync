@@ -37,6 +37,7 @@ Everything that can be logic rather than widget is:
 | `gestures.py` | scroll and wheel routing |
 | `romanize.py` | hangul detection and romanisation |
 | `settings.py` | where the preferences live, and the one-time carry from the LyriSync name — plus one native door |
+| `http_client.py` | connections to one host, kept alive between requests |
 
 None of them imports Qt. That is why the contrast floor, the type scale
 and the state machine can all be tested on a Linux runner with no display,

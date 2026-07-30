@@ -6,6 +6,81 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Session B — lyrics arrive sooner, and the log becomes two files
+
+**The fallback chain was sequential, and cost the sum of its attempts.**
+Measured against LRCLIB before anything was touched, per attempt and per
+step: DNS 1–4 ms, TCP ~41 ms, TLS ~55–70 ms — about **105 ms of handshake
+per request** — and then a time-to-first-byte of **0.7 to 4.8 seconds**,
+which is LRCLIB's own thinking time and is over 90% of every lookup.
+
+Nothing about the chain needed to be sequential. The fallback is a
+*preference between answers*, not a dependency: the attempts now go out
+together and are read back in priority order, so the most precise answer
+still wins and a lookup costs the longest attempt it actually needs.
+A/B against the live service, same URLs, alternating so server variance
+hit both arms equally:
+
+| | sequential | concurrent |
+|---|---|---|
+| three-attempt lookup, median | 5973 ms | **1811 ms** |
+| the first attempt's own time | 1567 ms | 1602 ms |
+
+The second row is what made the first trustworthy. An end-to-end harness
+first showed the exact-match case at 2154–5514 ms against ~1000 ms the day
+before — which looks exactly like a regression and was server variance.
+The A/B is what told them apart: LRCLIB is no slower under three
+concurrent requests from one client.
+
+Two edges preserve the old semantics exactly, and both have tests. An
+error on an attempt that **outranks** an answer is still a retry state —
+sequentially `search` was never asked, and caching its looser answer
+because the precise attempt failed would write a wrong answer down
+permanently. An attempt that never returns has an **unknown** outcome, not
+a negative one.
+
+Stated rather than buried: an uncached track now asks LRCLIB up to three
+questions where it asked between one and three. It is a free service; the
+mitigation is that a lookup happens once per track ever.
+
+**Connections are kept alive**, which is worth doing only because
+lrclib.net holds an idle one for at least four minutes — measured at 10,
+30, 60, 120, 180 and 240 seconds. In the app: the first track opened three
+connections, the second opened none. A pooled connection the server
+dropped while idle costs one retry on a fresh one, and only when the
+failed connection was reused.
+
+`gzip` was measured and rejected: 250 KB of search response becomes 25 KB,
+but the body read is ~130 ms of a ~1500 ms request and the comparison came
+back slower.
+
+**The title card was holding lyrics that had already arrived.** Its two
+seconds ran whatever happened underneath, so it was a delay the app added
+rather than a gap it filled — and a cache hit is **0.02 ms**, so every
+replayed track had its lyrics ready immediately and then watched the song's
+name for two seconds. It now yields the moment there is *something to
+show*, which is deliberately not "the fetch finished": a synced song joined
+before its first line has lyrics and an empty screen, and ending the card
+there would trade two seconds of the song's name for ten of nothing.
+
+**Song · Artist.** The header separator is a middle dot; an em dash is
+punctuation and reads as one between two proper nouns. It had two
+definitions and a third format in the monitor tool, which printed the
+artist first — all three now use one function.
+
+**`CLAUDE.md` split in two.** It is instructions for working in the repo:
+architecture in brief, the session rules, the guards, and the constraints
+that must not be reintroduced. The history moved whole to
+[docs/decision-log.md](docs/decision-log.md) — every entry kept, including
+the ones that contradict each other, because a `SUPERSEDES` entry is only
+legible beside what it supersedes.
+
+Also found in the tidy pass: the title card had never been documented in
+any milestone; `vibrancy.autoresize_mask()` had been dead since milestone
+10b; the two terminal tools had no tests at all, which is exactly why a
+format could drift there unnoticed; and the test count was written in two
+files and stale in both, so it now lives in one.
+
 ## Session A — the app is called SottoVoce
 
 A rename, and one thing a rename cannot be on macOS: free. The package,

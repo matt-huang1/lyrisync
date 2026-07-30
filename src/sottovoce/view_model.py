@@ -34,10 +34,26 @@ class Mode(Enum):
     ERROR = "error"        # fetch failed (network/server); not cached, will retry
 
 
+# What stands between the song and whoever made it, everywhere the two are
+# shown together: the window's header, both terminal tools. A middle dot
+# rather than an em dash — the dash is a piece of punctuation and reads as
+# one, which at header size in a line of two proper nouns is a word joined
+# to a sentence. The dot is a separator and nothing else.
+#
+# One definition because there were two, and two copies of a format string
+# is how a window and a terminal tool come to disagree about the same song.
+HEADER_SEPARATOR = " · "
+
+
+def header_text(snapshot: PlayerSnapshot) -> str:
+    """The song and its artist, as every surface shows them."""
+    return f"{snapshot.title}{HEADER_SEPARATOR}{snapshot.artist}"
+
+
 @dataclass(frozen=True)
 class Display:
     mode: Mode
-    header: str = ""       # "Song — Artist"
+    header: str = ""       # "Song · Artist"
     previous: str = ""
     current: str = ""
     upcoming: str = ""
@@ -47,6 +63,25 @@ class Display:
 
 
 RETRY_INTERVAL_SECONDS = 30.0
+
+
+def card_yields(display: Display) -> bool:
+    """Whether the title card should hand the window back before its time
+    is up.
+
+    The card fills the gap between a track change and lyrics arriving. It
+    is a floor on how long that gap looks, not a floor on how long it
+    lasts: once the fetch has landed there is no gap left to fill, and
+    holding the song's name up for the rest of the two seconds is a delay
+    this app is choosing to add.
+
+    "Something to show" is the whole rule, and it is deliberately not
+    "the fetch finished". A synced song joined before its first line has
+    lyrics and nothing to put on screen yet — ending the card there would
+    trade two seconds of the song's name for ten seconds of an empty
+    window. So the question is asked of the display, not of the fetch.
+    """
+    return bool(display.plain_text or display.current)
 
 
 class LyricsViewModel:
@@ -85,7 +120,7 @@ class LyricsViewModel:
             # flash back to loading or dispatch a redundant fetch. ERROR is
             # the exception: fresh metadata is worth a new attempt.
             self._suspended_mode = None
-            self._header = f"{snapshot.title} — {snapshot.artist}"
+            self._header = header_text(snapshot)
             if self._mode is Mode.ERROR and snapshot.is_music_track:
                 self._mode = Mode.FETCHING
                 return True
@@ -93,7 +128,7 @@ class LyricsViewModel:
         self._identity = identity
         self._suspended_mode = None
         self._track_id = snapshot.track_id
-        self._header = f"{snapshot.title} — {snapshot.artist}"
+        self._header = header_text(snapshot)
         self._lyrics = None
         self._index = -1
         self._has_hangul_synced = False

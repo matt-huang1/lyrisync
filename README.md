@@ -104,7 +104,7 @@ Two terminal tools exist for debugging: `sottovoce-monitor` and `sottovoce-lyric
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 955 tests run headless on Linux CI without touching the network, your settings or your Spotify.
+A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why the whole suite runs headless on Linux CI without touching the network, your settings or your Spotify ([how many, and how](docs/testing-and-ci.md)).
 
 ## Documentation
 

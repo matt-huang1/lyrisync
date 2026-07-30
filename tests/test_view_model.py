@@ -35,7 +35,7 @@ def test_track_change_requests_fetch_and_shows_fetching():
     assert vm.track_changed(snapshot()) is True
     display = vm.display()
     assert display.mode is Mode.FETCHING
-    assert display.header == "Song — Artist"
+    assert display.header == "Song · Artist"
     assert display.current == ""  # window renders the loading indicator
 
 
@@ -63,7 +63,7 @@ def test_stale_fetch_result_is_ignored():
     assert vm.fetch_completed("trackA", SYNCED) is False
     display = vm.display()
     assert display.mode is Mode.FETCHING  # still waiting on trackB
-    assert display.header == "Other — Artist"
+    assert display.header == "Other · Artist"
 
     assert vm.fetch_completed("trackB", PLAIN) is True
     assert vm.display().mode is Mode.PLAIN
@@ -347,7 +347,7 @@ def test_dj_narration_shows_header_with_empty_body():
     assert vm.track_changed(dj_narration()) is False  # no fetch requested
     display = vm.display()
     assert display.mode is Mode.NON_MUSIC
-    assert display.header == "Up next — DJ X"
+    assert display.header == "Up next · DJ X"
     assert display.current == ""  # never "no lyrics found" for narration
     assert display.previous == "" and display.upcoming == ""
 
@@ -430,7 +430,7 @@ def test_sync_display_shows_current_next_two_and_progress():
     vm = plain_vm()
     vm.begin_sync()
     display = vm.display()
-    assert display.header == "Song — Artist"
+    assert display.header == "Song · Artist"
     assert display.previous == ""  # nothing stamped yet
     assert display.current == "one"
     assert display.upcoming == "two\nthree"
@@ -742,3 +742,79 @@ def test_romanisation_offered_when_resyncing_korean_stored_lines():
     vm.begin_sync()
     assert vm.has_korean_lyrics is True
     assert vm.display().pronunciation == "annyeonghaseyo"
+
+
+# -- the header, and what the title card is allowed to hold up -------------
+
+
+def test_the_header_separates_song_from_artist_with_a_middle_dot():
+    """One definition, and it is a separator rather than punctuation. The
+    format used to be written out twice — a window and a terminal tool with
+    two copies of one format string is two things that can disagree about
+    the same song."""
+    from sottovoce.view_model import HEADER_SEPARATOR, header_text
+
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot(title="Spring Day", artist="BTS"))
+
+    assert HEADER_SEPARATOR == " · "
+    assert vm.display().header == "Spring Day · BTS"
+    assert header_text(snapshot(title="Spring Day", artist="BTS")) == "Spring Day · BTS"
+    assert "—" not in vm.display().header
+
+
+def test_the_card_holds_while_there_is_nothing_to_show():
+    """FETCHING is the gap the card exists to fill."""
+    from sottovoce.view_model import card_yields
+
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    assert vm.display().mode is Mode.FETCHING
+    assert card_yields(vm.display()) is False
+
+
+def test_the_card_gives_way_the_moment_lyrics_can_be_shown():
+    from sottovoce.view_model import card_yields
+
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", SYNCED)
+    vm.position_changed(15.0)  # past the first timestamp: a line to show
+
+    assert card_yields(vm.display()) is True
+
+
+def test_plain_lyrics_end_the_card_too():
+    from sottovoce.view_model import card_yields
+
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", PLAIN)
+
+    assert card_yields(vm.display()) is True
+
+
+def test_a_synced_song_joined_before_its_first_line_keeps_the_card():
+    """The rule is "something to show", not "the fetch finished". Ending
+    the card here would trade two seconds of the song's name for ten
+    seconds of an empty window."""
+    from sottovoce.view_model import card_yields
+
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", SYNCED)
+    vm.position_changed(2.0)  # first line is at 10.0
+
+    assert vm.display().mode is Mode.SYNCED
+    assert vm.display().current == ""
+    assert card_yields(vm.display()) is False
+
+
+def test_a_song_with_no_lyrics_says_so_rather_than_waiting_out_the_card():
+    from sottovoce.view_model import card_yields
+
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None)
+
+    assert card_yields(vm.display()) is True
