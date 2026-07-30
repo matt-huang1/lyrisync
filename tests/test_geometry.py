@@ -1,6 +1,6 @@
 import pytest
 
-from lyrisync.geometry import (
+from sottovoce.geometry import (
     RESIZE_MARGIN,
     button_margin,
     button_side,
@@ -107,7 +107,7 @@ def test_the_floor_counts_every_gap_the_window_actually_leaves():
     """Derived, not eyeballed: each of the three vertical rhythm constants
     has to appear in the floor, or a more generous layout would silently
     let the bottom row fall off a short window."""
-    from lyrisync import geometry, typography
+    from sottovoce import geometry, typography
 
     base = min_window_height(1.0)
     for name in ("ROW_SPACING", "PRONUNCIATION_SPACING", "CURRENT_SPACING"):
@@ -124,7 +124,7 @@ def test_min_height_is_derived_from_the_type_scale():
     """The floor exists to keep all five rows visible, so it has to be
     computed from the same sizes the stylesheet uses — not a copy that can
     drift when the type scale changes."""
-    from lyrisync import geometry, typography
+    from sottovoce import geometry, typography
 
     assert geometry._ROW_FONTS_PX == (
         typography.base_size(typography.HEADER),

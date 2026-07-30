@@ -17,8 +17,8 @@ import json
 
 import pytest
 
-from lyrisync import artwork
-from lyrisync.appearance import rgb_to_hsl
+from sottovoce import artwork
+from sottovoce.appearance import rgb_to_hsl
 
 
 def hue_of(rgb):
@@ -98,7 +98,7 @@ def test_the_extracted_colour_survives_the_hue_gate():
     """dominant_colour and appearance.usable_hue have separate saturation
     thresholds; a colour that passed the first and failed the second would
     be extraction work thrown away silently."""
-    from lyrisync.appearance import usable_hue
+    from sottovoce.appearance import usable_hue
 
     for sample in ((200, 40, 40), (150, 190, 120), (40, 60, 200)):
         colour = artwork.dominant_colour(block(sample, 500))

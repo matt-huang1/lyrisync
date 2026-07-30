@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "lyrisync"
+name = "sottovoce"
 version = "1.0.0"
 description = "Synced lyrics for the Spotify desktop app on macOS"
 requires-python = ">=3.12"
@@ -32,12 +32,12 @@ dev = ["pytest>=8"]
 build = ["pyinstaller>=6.10"]
 
 [project.scripts]
-lyrisync = "lyrisync.window:main"
-lyrisync-monitor = "lyrisync.monitor_cli:main"
-lyrisync-lyrics = "lyrisync.lyrics_cli:main"
+sottovoce = "sottovoce.window:main"
+sottovoce-monitor = "sottovoce.monitor_cli:main"
+sottovoce-lyrics = "sottovoce.lyrics_cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/lyrisync"]
+packages = ["src/sottovoce"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

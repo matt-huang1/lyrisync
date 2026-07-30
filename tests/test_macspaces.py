@@ -1,4 +1,4 @@
-from lyrisync import macspaces as ms
+from sottovoce import macspaces as ms
 
 
 def test_enabling_clears_primary_and_sets_both_flags():

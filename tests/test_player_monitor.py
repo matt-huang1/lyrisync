@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from lyrisync import player_monitor as pm
+from sottovoce import player_monitor as pm
 
 
 def batched_output(

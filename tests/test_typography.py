@@ -1,6 +1,6 @@
 import pytest
 
-from lyrisync import typography as t
+from sottovoce import typography as t
 
 
 ROLES = (t.HEADER, t.CONTEXT, t.CURRENT, t.PRONUNCIATION, t.PLAIN, t.PROGRESS)

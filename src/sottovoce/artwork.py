@@ -36,7 +36,7 @@ from typing import Optional
 # Carries the app's version, resolved once from the installed
 # distribution's metadata — the same string the lyrics fetch sends, so
 # the two cannot introduce themselves differently.
-from lyrisync import USER_AGENT
+from sottovoce import USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def dominant_colour(samples) -> Optional[tuple[int, int, int]]:
     and the window treats it as "do not tint", rather than inventing a
     colour from noise.
     """
-    from lyrisync.appearance import rgb_to_hsl
+    from sottovoce.appearance import rgb_to_hsl
 
     bins: dict[int, list[float]] = {}
     members: dict[int, list[tuple[float, tuple[int, int, int]]]] = {}

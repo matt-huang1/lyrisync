@@ -1,4 +1,4 @@
-# LyriSync documentation
+# SottoVoce documentation
 
 The [README](../README.md) is the ninety-second version. These pages are
 the reasoning: what was decided, why, and what was measured to check it.

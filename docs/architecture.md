@@ -9,8 +9,8 @@ window.py           PySide6 widget, wiring, natives    — knows about both
 ```
 
 The monitor and the provider are importable, runnable and testable with no
-Qt at all — which is what the two terminal tools (`lyrisync-monitor`,
-`lyrisync-lyrics`) are, and how the whole lyrics path was built before
+Qt at all — which is what the two terminal tools (`sottovoce-monitor`,
+`sottovoce-lyrics`) are, and how the whole lyrics path was built before
 there was a window.
 
 (`artwork.py` sits beside the provider and is the one exception: it
@@ -36,17 +36,20 @@ Everything that can be logic rather than widget is:
 | `appearance.py` | both palettes, the album tint maths |
 | `gestures.py` | scroll and wheel routing |
 | `romanize.py` | hangul detection and romanisation |
+| `settings.py` | where the preferences live, and the one-time carry from the LyriSync name — plus one native door |
 
 None of them imports Qt. That is why the contrast floor, the type scale
 and the state machine can all be tested on a Linux runner with no display,
 and why `window.py` is wiring rather than logic.
 
-`notifications.py` is the one entry above that is not purely pure: its
-rules are, and one function — `_quartz()` — is the single door to the
-window list, the same shape as `frontmost._workspace()`,
-`hotkey._carbon()` and `login_item._main_app_service()`. Each of those four
-doors is shut by `tests/conftest.py`, so a test can never reach the
-developer's keyboard, workspace, login items or windows.
+`notifications.py` and `settings.py` are the two entries above that are
+not purely pure: their rules are, and one function each —
+`_quartz()` and `_legacy_settings()` — is the single door to the window
+list and to the preferences the old name left behind, the same shape as
+`frontmost._workspace()`, `hotkey._carbon()` and
+`login_item._main_app_service()`. Each of those five doors is shut by
+`tests/conftest.py`, so a test can never reach the developer's keyboard,
+workspace, login items, windows or saved settings.
 
 ## Threads
 

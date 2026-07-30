@@ -3,6 +3,60 @@
 Milestones in the order they happened. Dates are commit dates; the deeper
 reasoning behind each is in [docs/](docs/).
 
+Entries before the rename below call the app **LyriSync**, because that is
+what it was called when they happened.
+
+## Session A — the app is called SottoVoce
+
+A rename, and one thing a rename cannot be on macOS: free. The package,
+the module paths, the three console scripts, the app bundle, the icon, the
+log variable and the bundle identifier all moved from `lyrisync` to
+`sottovoce`.
+
+The bundle identifier is the expensive one. macOS keys a preferences file
+on it, so changing `com.lyrisync.lyrisync` to `com.sottovoce.sottovoce`
+does not move the user's window position, size, opacity and toggles — it
+**orphans** them, and the app opens at its first-run defaults as though it
+had never been used. `settings.py` therefore copies the old plist across
+once, on a launch that finds nothing of its own, and records that it did.
+Copied and not moved: the old file is left exactly where it is, because
+deleting a user's settings to tidy up after a rename is the tidying this
+project does not do.
+
+**The bug only a real run could find**, and it would have made the whole
+migration a no-op on every Mac: `QSettings.allKeys()` does not answer for
+one app. NSUserDefaults resolves through a search list, so a plist that
+has never been written still reports **70 keys** from NSGlobalDomain —
+`AppleLocale`, the trackpad gestures, half of System Settings. Measured,
+against the developer's own preferences: "are there settings here already"
+was true on a file that did not exist, so the carry refused itself. And
+had it not refused, the same fall-through would have copied all 70 of
+those keys *into* the app's own plist. Both halves now ask per group
+(`window`, `lyrics`, `migration`), which answers 11 and 3 on the old file
+and nothing at all on a new one. A test reads the keys `window.py`
+actually saves out of its syntax and fails if one falls outside a group
+the migration would carry.
+
+Verified against the real file rather than a fixture: 14 settings carried,
+`QPoint(293, 73)` and `QSize(489, 196)` still typed as a point and a size
+on the other side, six remembered app positions intact, the old plist
+byte-for-byte where it was, and a second run answering "already run".
+
+**Two things no code can carry**, because macOS keys them on the
+identifier *and* the code signature: the Automation grant (macOS asks
+again on the first poll, now naming SottoVoce) and the login item
+registration (Open at Login has to be switched on again). Both are stated
+in the README's upgrade note rather than left to be discovered.
+
+The published 1.0.0 download keeps its name and its hash. It was built
+before the rename, the hash is a fact about those bytes, and re-pointing
+either would be a claim about a file that does not exist.
+
+A ninth guard in `conftest.py`: `settings._legacy_settings()`, the one
+door onto the old plist. It is a *read* of the developer's own
+preferences, which is the kind of escape that leaves nothing behind to
+notice afterwards.
+
 ## Milestone 16.1 — dim for the banner, not for the display
 
 Milestone 16 dimmed the window for banners it was **nowhere near**, because

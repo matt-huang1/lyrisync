@@ -16,8 +16,8 @@ import logging
 
 import pytest
 
-from lyrisync import hotkey
-from lyrisync.hotkey import Combination, GlobalHotkey
+from sottovoce import hotkey
+from sottovoce.hotkey import Combination, GlobalHotkey
 
 
 # -- what the combination is ----------------------------------------------
@@ -223,7 +223,7 @@ def test_a_refused_registration_leaves_nothing_installed(carbon, caplog):
     lib = carbon(FakeCarbon(register_status=-9878))  # eventHotKeyExistsErr
     hk = GlobalHotkey(hotkey.TOGGLE_LYRICS, lambda: None)
 
-    with caplog.at_level(logging.WARNING, logger="lyrisync.hotkey"):
+    with caplog.at_level(logging.WARNING, logger="sottovoce.hotkey"):
         assert hk.register() is False
     assert hk.registered is False
     assert lib.removed == [FakeCarbon.HANDLER_REF]  # handler not left behind
@@ -236,7 +236,7 @@ def test_a_handler_that_will_not_install_never_registers_a_hotkey(carbon, caplog
     lib = carbon(FakeCarbon(install_status=-50))
     hk = GlobalHotkey(hotkey.TOGGLE_LYRICS, lambda: None)
 
-    with caplog.at_level(logging.WARNING, logger="lyrisync.hotkey"):
+    with caplog.at_level(logging.WARNING, logger="sottovoce.hotkey"):
         assert hk.register() is False
     assert lib.registered == []
     assert "menu bar item" in caplog.text
@@ -259,7 +259,7 @@ def test_a_native_call_that_blows_up_is_not_a_crash(carbon, caplog):
 
     carbon(Exploding())
     hk = GlobalHotkey(hotkey.TOGGLE_LYRICS, lambda: None)
-    with caplog.at_level(logging.ERROR, logger="lyrisync.hotkey"):
+    with caplog.at_level(logging.ERROR, logger="sottovoce.hotkey"):
         assert hk.register() is False
     assert hk.registered is False
 

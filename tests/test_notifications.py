@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from lyrisync import notifications as n
+from sottovoce import notifications as n
 
 # The display this was all measured on, and the rectangle macOS actually
 # reports for a notification: the whole of it. Both a top-right banner and
@@ -232,7 +232,7 @@ def test_an_opacity_already_below_the_ceiling_is_left_alone():
 def test_the_ceiling_is_below_the_window_opacity_floor():
     """Not a tautology: it is the reason yielding is visible at all for a
     user who has already dimmed the window as far as the wheel allows."""
-    from lyrisync import window as w
+    from sottovoce import window as w
 
     assert n.YIELD_CEILING < w._MIN_OPACITY
 

@@ -1,6 +1,6 @@
 """The bundle may not invent its own version number.
 
-`make app` is the only way LyriSync reaches a user as an app, and the
+`make app` is the only way SottoVoce reaches a user as an app, and the
 version in its Info.plist is what they will quote in a bug report. A
 second copy of that number written into the spec is the kind of thing
 that stays right for one release.
@@ -23,9 +23,9 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SPEC_PATH = REPO_ROOT / "packaging" / "LyriSync.spec"
+SPEC_PATH = REPO_ROOT / "packaging" / "SottoVoce.spec"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
-PACKAGE_DIR = REPO_ROOT / "src" / "lyrisync"
+PACKAGE_DIR = REPO_ROOT / "src" / "sottovoce"
 
 # The modules that introduce this app to somebody else's server. Both used
 # to carry "lyrisync/0.1.0 (…)" written out by hand, which stayed correct
@@ -164,7 +164,7 @@ def test_the_spec_asks_the_installed_package_for_its_version(spec_tree):
         for node in ast.walk(spec_tree)
         if _is_metadata_call(node, alias)
     )
-    assert [ast.literal_eval(arg) for arg in call.args] == ["lyrisync"], (
+    assert [ast.literal_eval(arg) for arg in call.args] == ["sottovoce"], (
         "the spec asks for some other distribution's version"
     )
 
@@ -195,6 +195,27 @@ def test_the_bundle_version_argument_comes_from_it_too(spec_tree):
             assert keyword.value.id == name
             return
     raise AssertionError("BUNDLE(...) does not pass a version")
+
+
+def test_the_bundle_identifier_is_the_preferences_file(spec_tree):
+    """The identifier IS the settings contract. QSettings("sottovoce",
+    "sottovoce") resolves to ~/Library/Preferences/com.sottovoce.sottovoce
+    .plist, and the bundle declaring that same string is the whole reason
+    a checkout and the built app read one file instead of two.
+
+    Pinned rather than assumed because the rename proved what happens when
+    it moves: the old identifier's plist was orphaned, which is what
+    settings.py exists to carry across. A typo here would orphan the file
+    again, silently, and look like a first launch.
+    """
+    from sottovoce.settings import APPLICATION, ORGANISATION
+
+    for keyword in bundle_call(spec_tree).keywords:
+        if keyword.arg == "bundle_identifier":
+            assert isinstance(keyword.value, ast.Constant)
+            assert keyword.value.value == f"com.{ORGANISATION}.{APPLICATION}"
+            return
+    raise AssertionError("BUNDLE(...) does not declare a bundle_identifier")
 
 
 def test_no_version_number_is_written_into_the_spec(spec_tree, declared_version):
@@ -254,7 +275,7 @@ def test_the_outbound_modules_take_the_user_agent_from_the_package(module):
     tree = ast.parse((PACKAGE_DIR / module).read_text(encoding="utf-8"))
     imported = any(
         isinstance(node, ast.ImportFrom)
-        and node.module == "lyrisync"
+        and node.module == "sottovoce"
         and any(alias.name == "USER_AGENT" for alias in node.names)
         for node in ast.walk(tree)
     )
@@ -264,13 +285,13 @@ def test_the_outbound_modules_take_the_user_agent_from_the_package(module):
 def test_every_user_agent_is_the_same_string_and_carries_the_version():
     """The behavioural half, at runtime. One identity, and it states what
     the app actually is."""
-    from lyrisync import USER_AGENT, __version__
-    from lyrisync.artwork import USER_AGENT as artwork_agent
-    from lyrisync.lyrics_provider import USER_AGENT as lyrics_agent
+    from sottovoce import USER_AGENT, __version__
+    from sottovoce.artwork import USER_AGENT as artwork_agent
+    from sottovoce.lyrics_provider import USER_AGENT as lyrics_agent
 
     assert artwork_agent == lyrics_agent == USER_AGENT
-    assert __version__ == installed_version("lyrisync")
-    assert f"lyrisync/{__version__}" in USER_AGENT
+    assert __version__ == installed_version("sottovoce")
+    assert f"sottovoce/{__version__}" in USER_AGENT
 
 
 def test_the_contact_url_names_the_repository_the_readme_clones():
@@ -283,7 +304,7 @@ def test_the_contact_url_names_the_repository_the_readme_clones():
     Comparing against `git remote` instead would pass on a developer's
     fork and is unavailable in some CI checkouts.
     """
-    from lyrisync import REPOSITORY_URL, USER_AGENT
+    from sottovoce import REPOSITORY_URL, USER_AGENT
 
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     clone = re.search(r"git clone git@github\.com:([\w.-]+)/([\w.-]+)\.git", readme)
@@ -319,7 +340,7 @@ def test_the_bundle_carries_the_metadata_that_answer_depends_on(spec_tree):
         None,
     )
     assert call is not None, "copy_metadata is mentioned but never called"
-    assert [ast.literal_eval(arg) for arg in call.args] == ["lyrisync"]
+    assert [ast.literal_eval(arg) for arg in call.args] == ["sottovoce"]
 
 
 # -- and that it cannot go stale ------------------------------------------
@@ -333,9 +354,9 @@ def test_the_installed_version_matches_the_one_pyproject_declares(declared_versi
     The spec refuses to build on this; here it is a red test rather than a
     surprise at release time.
     """
-    assert installed_version("lyrisync") == declared_version, (
-        "installed lyrisync is "
-        f"{installed_version('lyrisync')} but pyproject.toml declares "
+    assert installed_version("sottovoce") == declared_version, (
+        "installed sottovoce is "
+        f"{installed_version('sottovoce')} but pyproject.toml declares "
         f"{declared_version} — reinstall with: pip install -e '.[dev]'"
     )
 

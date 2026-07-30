@@ -29,8 +29,8 @@ from typing import Optional
 # distribution's metadata. Re-exported here because this module's callers
 # have always read it from this module; what it must never be again is a
 # second copy of the version, written by hand and right for one release.
-from lyrisync import USER_AGENT
-from lyrisync.player_monitor import PlayerSnapshot
+from sottovoce import USER_AGENT
+from sottovoce.player_monitor import PlayerSnapshot
 
 logger = logging.getLogger(__name__)
 

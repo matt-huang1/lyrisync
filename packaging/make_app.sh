@@ -1,17 +1,17 @@
 #!/bin/bash
-# Build LyriSync.app. One command, from a clean checkout:
+# Build SottoVoce.app. One command, from a clean checkout:
 #
 #   .venv/bin/pip install -e ".[build]"
 #   make app
 #
 # Everything below is deterministic given that: the icon is rendered from
-# packaging/appicon.svg, the bundle from packaging/LyriSync.spec, and the
+# packaging/appicon.svg, the bundle from packaging/SottoVoce.spec, and the
 # signature is ad-hoc, so no certificate or keychain is involved.
 set -euo pipefail
 
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-$PROJECT/.venv/bin/python}"
-APP="$PROJECT/dist/LyriSync.app"
+APP="$PROJECT/dist/SottoVoce.app"
 
 if [ ! -x "$PYTHON" ]; then
   echo "no interpreter at $PYTHON — create .venv and pip install -e '.[build]'" >&2
@@ -44,7 +44,7 @@ find "$PROJECT/dist" -mindepth 1 -delete
   --clean \
   --distpath "$PROJECT/dist" \
   --workpath "$PROJECT/build" \
-  "$PROJECT/packaging/LyriSync.spec"
+  "$PROJECT/packaging/SottoVoce.spec"
 
 echo "==> ad-hoc signature"
 # Unsigned code is refused outright on Apple silicon, and a bundle whose

@@ -1,5 +1,5 @@
 """Korean romanisation for lyric lines. Pure text transforms — imports
-nothing from other lyrisync modules."""
+nothing from other sottovoce modules."""
 
 from __future__ import annotations
 

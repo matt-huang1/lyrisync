@@ -8,7 +8,7 @@ by hand; see docs/menu-and-system-integration.md.
 
 import pytest
 
-from lyrisync import flight
+from sottovoce import flight
 
 SCREEN = (0, 0, 1710, 1107)
 SECOND_SCREEN = (1710, -200, 1920, 1080)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lyrisync.typography import (
+from sottovoce.typography import (
     BOTTOM_MARGIN,
     CONTEXT,
     CURRENT,

@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
 
-from lyrisync import symbols  # noqa: E402
+from sottovoce import symbols  # noqa: E402
 
 WHITE = QColor(255, 255, 255, 255)
 BLUE = QColor(130, 200, 255, 235)
@@ -127,7 +127,7 @@ def test_the_glyph_reports_the_size_the_menu_bar_wants():
     """
     from PySide6.QtCore import QSize
 
-    from lyrisync import menubar
+    from sottovoce import menubar
 
     spec = menubar.icon_spec(playing=True, lyrics_visible=True, practising=True)
     icon = symbols.menubar_icon(spec)
@@ -138,7 +138,7 @@ def test_the_glyph_is_drawn_at_whatever_size_is_asked_for():
     """An engine rather than a pixmap, which is what the SVG engine had been
     doing all along — and the only construction of the five tried that came
     out both whole and crisp."""
-    from lyrisync import menubar
+    from sottovoce import menubar
 
     spec = menubar.icon_spec(playing=True, lyrics_visible=True, practising=False)
     icon = symbols.menubar_icon(spec)
@@ -151,7 +151,7 @@ def test_the_glyph_is_drawn_at_whatever_size_is_asked_for():
 def test_the_glyph_is_a_template_image():
     """macOS owns the colour, which is why the practice mark is a DOT and not
     a hue: a coloured menu bar icon stops following the menu bar."""
-    from lyrisync import menubar
+    from sottovoce import menubar
 
     spec = menubar.icon_spec(playing=False, lyrics_visible=True, practising=False)
     assert symbols.menubar_icon(spec).isMask() is True
@@ -160,7 +160,7 @@ def test_the_glyph_is_a_template_image():
 def test_a_dimmed_glyph_carries_less_ink_than_a_bright_one():
     """Dimming has to be the same shape at lower alpha, not a grey — a grey
     would stop following the menu bar. Measured from the drawn alpha."""
-    from lyrisync import menubar
+    from sottovoce import menubar
 
     def ink(spec):
         pixmap = symbols.menubar_pixmap(spec, 44)
@@ -179,7 +179,7 @@ def test_a_dimmed_glyph_carries_less_ink_than_a_bright_one():
 
 
 def test_the_practice_dot_adds_ink_without_changing_the_bars():
-    from lyrisync import menubar
+    from sottovoce import menubar
 
     plain = menubar.icon_spec(playing=True, lyrics_visible=True, practising=False)
     dotted = menubar.icon_spec(playing=True, lyrics_visible=True, practising=True)

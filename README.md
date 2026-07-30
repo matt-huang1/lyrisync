@@ -1,4 +1,4 @@
-# LyriSync
+# SottoVoce
 
 Synced lyrics for the Spotify desktop app on macOS, in a floating window built for language learners.
 
@@ -31,12 +31,12 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 ### Build it yourself
 
 ```sh
-git clone git@github.com:matt-huang1/lyrisync.git
-cd lyrisync
+git clone git@github.com:matt-huang1/sottovoce.git
+cd sottovoce
 python3 -m venv .venv
 .venv/bin/pip install -e ".[build]"
 make app
-mv dist/LyriSync.app /Applications/
+mv dist/SottoVoce.app /Applications/
 ```
 
 An app you build on your own Mac is never marked as downloaded, so macOS has no reason to question it: **it opens with an ordinary double-click and there is no security warning to click through.** No certificate, keychain or Xcode needed either — `make app` renders the icon, freezes the bundle and signs it ad-hoc in one step.
@@ -45,12 +45,17 @@ This is also the route that requires trusting nobody: you can read what you are 
 
 ### Or download the release
 
-[**LyriSync-1.0.0.zip**](https://github.com/matt-huang1/lyrisync/releases/download/v1.0.0/LyriSync-1.0.0.zip) (36 MB) — built from the `v1.0.0` tag. Check it before opening it:
+[**LyriSync-1.0.0.zip**](https://github.com/matt-huang1/sottovoce/releases/download/v1.0.0/LyriSync-1.0.0.zip) (36 MB) — built from the `v1.0.0` tag. Check it before opening it:
 
 ```sh
 shasum -a 256 ~/Downloads/LyriSync-1.0.0.zip
 # 52f7ac2bb5665d9b787d27c6a1c92d8cd22d0eadf21da677d52a1a15cba9482e
 ```
+
+1.0.0 was published before this app was renamed, so the zip and the app
+inside it are still called **LyriSync** — the hash is a fact about those
+bytes and is not re-pointed by a rename. The next release carries the new
+name.
 
 That hash is written down here and nowhere else; it changes with every
 re-upload ([how a release is made](docs/releasing.md)).
@@ -59,9 +64,20 @@ The app is signed **ad-hoc, not with an Apple Developer ID, and it is not notari
 
 ### Either way
 
-On its first poll, macOS asks for **Automation** permission ("LyriSync wants to control Spotify"). This one is not a trust warning but a capability grant, and the app genuinely needs it: it is how the current track and playback position are read. Moving the app afterwards can make macOS ask again, so put it where you want it first.
+On its first poll, macOS asks for **Automation** permission ("SottoVoce wants to control Spotify"). This one is not a trust warning but a capability grant, and the app genuinely needs it: it is how the current track and playback position are read. Moving the app afterwards can make macOS ask again, so put it where you want it first.
 
 For the spoken-reference feature, install the Korean system voice **Yuna** (System Settings → Accessibility → Spoken Content → System Voice → Manage Voices…). Without it, that one feature quietly disables itself.
+
+### Upgrading from LyriSync
+
+This app used to be called LyriSync. Your window position, size, opacity and every toggle are carried over the first time the renamed app runs: macOS keys a preferences file on the app's identifier, so the rename orphaned the old file rather than moving it, and the app copies it across once. Copied, not moved — the old file is left exactly where it is.
+
+Two things no app can carry, because macOS keys them on the identifier *and* the signature:
+
+- **Automation.** You are asked again on first poll, this time for SottoVoce. The old entry stays in System Settings → Privacy & Security → Automation until you remove it.
+- **Open at Login.** Switch it back on from the menu. The stale LyriSync entry lingers in System Settings → General → Login Items until the old app is deleted.
+
+Your lyrics cache and any syncs you tapped out by hand are files on disk, not preferences, and the rename does not touch them.
 
 ### Running from a checkout
 
@@ -69,7 +85,7 @@ What development uses:
 
 ```sh
 .venv/bin/pip install -e .
-.venv/bin/lyrisync
+.venv/bin/sottovoce
 ```
 
 It shares settings with the bundled app, so window position and every toggle carry over. More in [docs/packaging.md](docs/packaging.md).
@@ -78,17 +94,17 @@ It shares settings with the bundled app, so window position and every toggle car
 
 Play something in Spotify and the window follows along.
 
-- **⇧⌘J** hides and shows the lyrics from any app, full-screen ones included. Nothing takes focus and LyriSync never comes to the front.
+- **⇧⌘J** hides and shows the lyrics from any app, full-screen ones included. Nothing takes focus and SottoVoce never comes to the front.
 - **The menu bar item** is the app's home — every setting is there, including Open at Login in the built app, and entries appear only where they apply. Right-clicking the window gives the same menu.
 - **Drag** anywhere to move, **drag the edges** to resize (text scales with width), **scroll** to dim. In the plain-lyrics view, scroll moves the lyrics and Option+scroll dims.
 - **↻** repeats the current line; the **speech bubble** speaks it aloud.
 - **Sync this song** (right-click) times a song by hand: the track restarts, and you tap the wide bar as each line begins. ↩ undoes a tap, ✕ abandons the pass. Finish the last line and it saves itself. Once a song has your sync, the entry becomes **Re-sync this song**.
 
-Two terminal tools exist for debugging: `lyrisync-monitor` and `lyrisync-lyrics`. `LYRISYNC_LOG=DEBUG` makes the running app explain itself line by line — which app came to the front, what was remembered for it, and why anything it declined to do was declined.
+Two terminal tools exist for debugging: `sottovoce-monitor` and `sottovoce-lyrics`. `SOTTOVOCE_LOG=DEBUG` makes the running app explain itself line by line — which app came to the front, what was remembered for it, and why anything it declined to do was declined.
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 829 tests run headless on Linux CI without touching the network, your settings or your Spotify.
+A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 955 tests run headless on Linux CI without touching the network, your settings or your Spotify.
 
 ## Documentation
 

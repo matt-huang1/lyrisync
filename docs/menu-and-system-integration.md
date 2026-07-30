@@ -152,7 +152,7 @@ practice keeps the glyph at full brightness.
 They **compose**, so eight combinations come from three booleans rather than
 from eight drawings. That is only affordable because the glyph is now
 **drawn** rather than loaded — at 15 there were three SVG files in
-`lyrisync/assets/`, and this would have needed twenty. The bar thicknesses,
+`sottovoce/assets/`, and this would have needed twenty. The bar thicknesses,
 centres and the dot are the numbers those files carried; `menubar.py` owns
 them and `symbols.py` paints them.
 
@@ -293,11 +293,20 @@ the suite.
 nothing on macOS — trusting them meant tests writing into the real user's
 preferences.
 
-The bundle identifier *is* the settings contract: `com.lyrisync.lyrisync`
-is what `QSettings("lyrisync", "lyrisync")` already resolves to, so the
+The bundle identifier *is* the settings contract: `com.sottovoce.sottovoce`
+is what `QSettings("sottovoce", "sottovoce")` already resolves to, so the
 bundled app and a terminal run share one plist. Verified by launching both
 at once and reading the window geometry back — same position, same size,
 same file.
+
+Which is also why renaming the app cost something. The identifier was
+`com.lyrisync.lyrisync`, and macOS keys the file on it — changing it
+orphans the old plist rather than moving it. `settings.py` copies it
+across once, on a launch that finds nothing of its own, and leaves the
+original where it is. What it cannot copy is in
+[packaging](packaging.md#the-bundle-identifier-is-the-settings-contract):
+the Automation grant and the login item are keyed on the identifier *and*
+the signature, so both have to be granted again.
 
 There is **no appearance setting**. macOS already answers that question,
 and a toggle would be a second source of truth for it — the same argument

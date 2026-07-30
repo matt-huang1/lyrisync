@@ -14,8 +14,8 @@ import sys
 
 import pytest
 
-from lyrisync import login_item
-from lyrisync.login_item import LoginItemStatus as Status
+from sottovoce import login_item
+from sottovoce.login_item import LoginItemStatus as Status
 
 
 # -- what a status means --------------------------------------------------
@@ -67,20 +67,20 @@ def test_an_unknown_status_is_treated_as_not_found():
 
 
 def test_a_source_checkout_is_not_a_bundle():
-    assert login_item.is_bundled(False, "/Users/x/proj/.venv/bin/lyrisync") is False
+    assert login_item.is_bundled(False, "/Users/x/proj/.venv/bin/sottovoce") is False
     assert login_item.is_bundled(False, "/usr/bin/python3") is False
 
 
 def test_a_frozen_app_bundle_is():
     assert login_item.is_bundled(
-        True, "/Applications/LyriSync.app/Contents/MacOS/LyriSync"
+        True, "/Applications/SottoVoce.app/Contents/MacOS/SottoVoce"
     ) is True
 
 
 def test_frozen_alone_is_not_enough():
     """A PyInstaller one-file build sitting in a folder is frozen but has
     no bundle for macOS to register."""
-    assert login_item.is_bundled(True, "/Users/x/Downloads/LyriSync") is False
+    assert login_item.is_bundled(True, "/Users/x/Downloads/SottoVoce") is False
 
 
 def test_a_bundle_path_alone_is_not_enough():

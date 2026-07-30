@@ -2,7 +2,7 @@
 
 ``.user_syncs/`` holds work the user did by hand, one tap per line. Unlike
 ``.lyrics_cache/`` it is not derived from anything and cannot be rebuilt by
-re-fetching, so nothing in lyrisync may delete, clear, expire, or truncate
+re-fetching, so nothing in sottovoce may delete, clear, expire, or truncate
 it — and no documented cleanup step may point at it.
 """
 
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from lyrisync import lyrics_provider as lp
-from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
+from sottovoce import lyrics_provider as lp
+from sottovoce.player_monitor import PlaybackState, PlayerSnapshot
 
 
 PACKAGE_DIR = Path(lp.__file__).parent
@@ -34,7 +34,7 @@ def source_files():
 
 
 def test_the_package_contains_no_deletion_calls():
-    """Broad by design: lyrisync only ever creates and reads files, so any
+    """Broad by design: sottovoce only ever creates and reads files, so any
     deletion primitive appearing anywhere in it is a regression worth
     looking at — most of all one that could reach a user sync."""
     assert source_files(), "no package sources found"
@@ -172,7 +172,7 @@ def test_the_artwork_cache_cannot_reach_the_user_sync_directory():
     """The cover-colour cache is cache: its own directory, its own name,
     and no knowledge that .user_syncs/ exists. Clearing either of the two
     caches must stay a safe reset."""
-    from lyrisync import artwork
+    from sottovoce import artwork
 
     source = (PACKAGE_DIR / "artwork.py").read_text(encoding="utf-8")
     assert "user_sync" not in source
@@ -202,8 +202,8 @@ def test_an_abandoned_resync_leaves_the_stored_sync_untouched(provider):
     original = "[00:01.00] alpha\n[00:04.00] beta\n"
     provider.save_user_sync("track123", original)
 
-    from lyrisync.sync_session import SyncSession
-    from lyrisync.view_model import LyricsViewModel
+    from sottovoce.sync_session import SyncSession
+    from sottovoce.view_model import LyricsViewModel
 
     vm = LyricsViewModel()
     vm.track_changed(

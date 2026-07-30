@@ -190,7 +190,7 @@ def set_enabled(enabled: bool) -> tuple[bool, LoginItemStatus]:
     if enabled and now is LoginItemStatus.REQUIRES_APPROVAL:
         logger.warning(
             "login item registered but needs approval: System Settings → "
-            "General → Login Items → enable LyriSync"
+            "General → Login Items → enable SottoVoce"
         )
         return False, now
     if enabled and now is not LoginItemStatus.ENABLED:

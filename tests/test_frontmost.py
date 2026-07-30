@@ -14,7 +14,7 @@ see docs/per-app-position.md.
 
 import pytest
 
-from lyrisync import frontmost
+from sottovoce import frontmost
 
 
 class FakeApp:

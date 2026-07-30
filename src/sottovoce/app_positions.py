@@ -336,7 +336,7 @@ def learn_refusal(
     None.
 
     Our own identifier is refused anyway. If anything ever does make
-    LyriSync frontmost (a future menu, a debugger attaching), a position
+    SottoVoce frontmost (a future menu, a debugger attaching), a position
     recorded against ourselves would be an entry that can never be
     recalled, quietly evicting a real one. ``own_bundle_id`` is None for a
     source run, which has no bundle and therefore nothing to collide with.
@@ -346,7 +346,7 @@ def learn_refusal(
     if not frontmost:
         return "no frontmost app is known"
     if own_bundle_id is not None and frontmost == own_bundle_id:
-        return "LyriSync itself is frontmost"
+        return "SottoVoce itself is frontmost"
     return None
 
 

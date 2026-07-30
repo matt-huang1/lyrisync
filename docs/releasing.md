@@ -41,12 +41,12 @@ comparison, so `make test` catches it before the build does.
 make app
 ```
 
-Icon, freeze, ad-hoc signature. Produces `dist/LyriSync.app`.
+Icon, freeze, ad-hoc signature. Produces `dist/SottoVoce.app`.
 
 ### 4. Package with `ditto`, never `zip`
 
 ```sh
-cd dist && ditto -c -k --keepParent LyriSync.app LyriSync-1.1.0.zip
+cd dist && ditto -c -k --keepParent SottoVoce.app SottoVoce-1.1.0.zip
 ```
 
 `ditto` is the macOS archiver and preserves symlinks, resource forks and
@@ -61,7 +61,7 @@ and its signature does not survive the round trip.
 ### 5. Tag
 
 ```sh
-git tag -a v1.1.0 -m "LyriSync 1.1.0"
+git tag -a v1.1.0 -m "SottoVoce 1.1.0"
 git push origin v1.1.0
 ```
 
@@ -76,7 +76,7 @@ named for the version.
 ### 7. Record the hash
 
 ```sh
-shasum -a 256 dist/LyriSync-1.1.0.zip
+shasum -a 256 dist/SottoVoce-1.1.0.zip
 ```
 
 Put that value, and the new download link, in the **README's install
@@ -89,7 +89,7 @@ whether to trust a binary.
 Verify what you published rather than what you built:
 
 ```sh
-curl -sL -o /tmp/check.zip https://github.com/matt-huang1/lyrisync/releases/download/v1.1.0/LyriSync-1.1.0.zip
+curl -sL -o /tmp/check.zip https://github.com/matt-huang1/sottovoce/releases/download/v1.1.0/SottoVoce-1.1.0.zip
 shasum -a 256 /tmp/check.zip
 ```
 

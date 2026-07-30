@@ -1,4 +1,4 @@
-from lyrisync import speech as sp
+from sottovoce import speech as sp
 
 
 SAY_OUTPUT_WITH_YUNA = """\

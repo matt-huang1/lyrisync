@@ -23,8 +23,8 @@ PySide6 will not load.
 
 import pytest
 
-from lyrisync import appearance as ap
-from lyrisync.appearance import DARK, LIGHT
+from sottovoce import appearance as ap
+from sottovoce.appearance import DARK, LIGHT
 
 WHITE = (255.0, 255.0, 255.0)
 BLACK = (0.0, 0.0, 0.0)
@@ -582,7 +582,7 @@ def test_the_window_starts_at_full_opacity():
     """Below 1.0 macOS renders the material without its blur, so the
     default has to be exactly 1.0 for the frost to exist at all."""
     w = pytest.importorskip(
-        "lyrisync.window",
+        "sottovoce.window",
         reason="PySide6 unusable (missing system Qt libraries?)",
         exc_type=ImportError,
     )
@@ -598,7 +598,7 @@ def test_dimming_is_the_users_own_trade(palette):
     True in both modes: the gesture is not a colour and must not become
     one."""
     w = pytest.importorskip(
-        "lyrisync.window",
+        "sottovoce.window",
         reason="PySide6 unusable (missing system Qt libraries?)",
         exc_type=ImportError,
     )

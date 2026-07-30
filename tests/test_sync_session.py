@@ -1,6 +1,6 @@
 import pytest
 
-from lyrisync.sync_session import (
+from sottovoce.sync_session import (
     MAX_EXTRAPOLATION_SECONDS,
     SYNC_REACTION_OFFSET_SECONDS,
     SyncSession,
@@ -259,7 +259,7 @@ def test_to_lrc_only_covers_what_has_been_stamped():
 
 
 def test_to_lrc_round_trips_through_the_provider_parser():
-    from lyrisync.lyrics_provider import parse_lrc
+    from sottovoce.lyrics_provider import parse_lrc
 
     s = SyncSession(["First", "Second", "Third"], offset=0.0)
     for position in (3.5, 61.25, 129.0):

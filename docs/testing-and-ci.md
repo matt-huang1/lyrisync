@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-829 tests, run on every push. The interesting part is not the count — it
+955 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -25,7 +25,7 @@ than by the suite: real `QSettings` writes, real player commands, a tray
 test that never actually ran, and a live LRCLIB fetch that aborted CI
 mid-handshake.
 
-Eight doors are shut for the whole session:
+Nine doors are shut for the whole session:
 
 | guard | catches |
 |---|---|
@@ -33,18 +33,22 @@ Eight doors are shut for the whole session:
 | `subprocess.run` / `Popen` | `osascript` to Spotify, `say` to the speakers |
 | a `LyricsProvider` on its default directories | anything that would read or write the real caches — `.user_syncs/` included |
 | an `ArtworkProvider` on its default directory | the real `.artwork_cache/`, and the CDN a miss would reach for |
-| `QSettings("lyrisync", "lyrisync")` | the real `~/Library/Preferences` plist |
+| `QSettings("sottovoce", "sottovoce")` | the real `~/Library/Preferences` plist |
 | `login_item._main_app_service()` | leaving a real login item on the developer's Mac |
 | `hotkey._carbon()` | claiming ⇧⌘J from whoever is running the suite |
 | `frontmost._workspace()` | observing the developer's own app switching |
 | `notifications._quartz()` | reading every window open on the machine |
+| `settings._legacy_settings()` | the plist the LyriSync name left behind |
 
-The last four are the same shape and each module has exactly **one** native
+The last five are the same shape and each module has exactly **one** native
 door for that reason. Three of them would outlive the test that started
 them and keep calling into a window that has since been destroyed; the
 fourth reads which apps are running and where their windows are, which is
 both none of the suite's business and a result that would depend on what
-the developer happens to have open.
+the developer happens to have open. The fifth is a **read** of the user's
+old preferences, which is the kind of escape that leaves nothing behind to
+notice afterwards — the migration takes a factory so every test of it
+supplies its own file.
 
 Two of those doors have structural tests as well as behavioural ones — the
 native imports must appear in exactly one place, inside the door — because

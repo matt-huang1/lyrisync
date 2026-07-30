@@ -8,7 +8,7 @@ by hand against the real thing; see docs/per-app-position.md.
 
 import pytest
 
-from lyrisync.app_positions import (
+from sottovoce.app_positions import (
     ARRIVAL,
     GLOW_PEAK,
     GLOW_SECONDS,
@@ -31,7 +31,7 @@ from lyrisync.app_positions import (
 VSCODE = "com.microsoft.VSCode"
 SAFARI = "com.apple.Safari"
 NOTES = "com.apple.Notes"
-OURS = "com.lyrisync.lyrisync"
+OURS = "com.sottovoce.sottovoce"
 
 
 # -- the map ---------------------------------------------------------------
@@ -431,7 +431,7 @@ def test_learning_needs_an_app_to_learn_against():
 
 def test_the_app_never_learns_a_position_against_itself():
     """An entry keyed on our own identifier could never be recalled — the
-    window moving would mean LyriSync had become frontmost, which it is
+    window moving would mean SottoVoce had become frontmost, which it is
     built never to do — and it would evict a real one to sit there."""
     assert not may_learn(enabled=True, frontmost=OURS, own_bundle_id=OURS)
 

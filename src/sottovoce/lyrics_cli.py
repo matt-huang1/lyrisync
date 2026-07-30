@@ -1,6 +1,6 @@
 """Terminal runner: synced lyrics for whatever Spotify is playing.
 
-Run with ``lyrisync-lyrics`` or ``python -m lyrisync.lyrics_cli``.
+Run with ``sottovoce-lyrics`` or ``python -m sottovoce.lyrics_cli``.
 
 Wires the player monitor to the lyrics provider. Synced lyrics render as a
 previous / CURRENT / next block whose current line advances with playback;
@@ -16,9 +16,9 @@ import os
 import shutil
 import sys
 
-from lyrisync.lyrics_provider import LyricsError, LyricsProvider, TrackLyrics
-from lyrisync.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
-from lyrisync.sync import current_line_index
+from sottovoce.lyrics_provider import LyricsError, LyricsProvider, TrackLyrics
+from sottovoce.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
+from sottovoce.sync import current_line_index
 
 _BOLD = "\x1b[1m"
 _DIM = "\x1b[2m"
@@ -107,8 +107,8 @@ class LyricsApp:
 
 def main() -> int:
     # WARNING by default so log lines don't garble the in-place display;
-    # LYRISYNC_LOG=INFO shows each LRCLIB request and status.
-    logging.basicConfig(level=os.environ.get("LYRISYNC_LOG", "WARNING"))
+    # SOTTOVOCE_LOG=INFO shows each LRCLIB request and status.
+    logging.basicConfig(level=os.environ.get("SOTTOVOCE_LOG", "WARNING"))
     app = LyricsApp(LyricsProvider())
     monitor = PlayerMonitor(
         poll_interval=0.3,
@@ -116,7 +116,7 @@ def main() -> int:
         on_position_update=app.on_position_update,
         on_state_change=app.on_state_change,
     )
-    print("lyrisync — synced lyrics from LRCLIB, Ctrl-C to quit")
+    print("sottovoce — synced lyrics from LRCLIB, Ctrl-C to quit")
     try:
         monitor.run()
     except KeyboardInterrupt:

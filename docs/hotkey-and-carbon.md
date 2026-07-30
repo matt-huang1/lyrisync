@@ -45,7 +45,7 @@ block. (The login item follows the same pattern for the same reason.)
 
 ## Registration is not exclusive, and the code had to be corrected for it
 
-Measured: two LyriSync processes both claimed ⇧⌘J and both got `noErr`,
+Measured: two SottoVoce processes both claimed ⇧⌘J and both got `noErr`,
 with macOS deciding between them per press. `eventHotKeyExistsErr`
 (-9878) comes back only when the **same** process already holds the
 combination.

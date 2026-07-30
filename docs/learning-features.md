@@ -1,6 +1,6 @@
 # The learning layers
 
-LyriSync was built for language learners, and every learning feature is an
+SottoVoce was built for language learners, and every learning feature is an
 **optional layer**. They are off by default, or hidden until they can act,
 and with all of them off the app is a simple synced-lyrics window —
 identical to what it would be if none of this had been written.

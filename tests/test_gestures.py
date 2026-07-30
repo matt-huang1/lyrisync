@@ -1,6 +1,6 @@
 import pytest
 
-from lyrisync import gestures as g
+from sottovoce import gestures as g
 
 
 # -- routing -------------------------------------------------------------

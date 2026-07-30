@@ -27,7 +27,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QIconEngine, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
-from lyrisync import menubar
+from sottovoce import menubar
 
 logger = logging.getLogger(__name__)
 

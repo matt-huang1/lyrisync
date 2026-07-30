@@ -3,7 +3,7 @@
      the window's own background.
 
      Same shapes as the menu bar glyph's playing arrangement at 1024 — see
-     ARRANGEMENTS in lyrisync/menubar.py, which is where those numbers live
+     ARRANGEMENTS in sottovoce/menubar.py, which is where those numbers live
      now that the glyph is drawn rather than shipped as an SVG — so the icon
      in the Dock's recent items, in Finder, and the glyph in the menu bar are
      recognisably one thing. Unlike the menu bar image this one is NOT a

@@ -12,7 +12,7 @@ docs/menu-and-system-integration.md.
 
 import pytest
 
-from lyrisync import menubar
+from sottovoce import menubar
 
 
 def spec(**overrides):

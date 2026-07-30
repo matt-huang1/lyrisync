@@ -1,4 +1,4 @@
-"""LyriSync.
+"""SottoVoce.
 
 The version lives here and nowhere else. Every copy of a version number
 is a copy that stays right for one release: the bundle's Info.plist takes
@@ -8,7 +8,7 @@ app, the bundle and the User-Agent LRCLIB sees cannot disagree.
 
 from importlib.metadata import PackageNotFoundError, version as _installed_version
 
-from lyrisync.player_monitor import (
+from sottovoce.player_monitor import (
     PlaybackState,
     PlayerMonitor,
     PlayerSnapshot,
@@ -16,7 +16,7 @@ from lyrisync.player_monitor import (
 )
 
 try:
-    __version__ = _installed_version("lyrisync")
+    __version__ = _installed_version("sottovoce")
 except PackageNotFoundError:
     # Running from a source tree that was never installed. Deliberately
     # not a number: a fallback version literal is exactly the drift this
@@ -33,8 +33,8 @@ except PackageNotFoundError:
 # spent its first thirteen milestones pointing at github.com/matthewhuang,
 # which is not where it lives, so LRCLIB had a contact address that 404s.
 # It is checked against the repository the README tells people to clone.
-REPOSITORY_URL = "https://github.com/matt-huang1/lyrisync"
-USER_AGENT = f"lyrisync/{__version__} ({REPOSITORY_URL})"
+REPOSITORY_URL = "https://github.com/matt-huang1/sottovoce"
+USER_AGENT = f"sottovoce/{__version__} ({REPOSITORY_URL})"
 
 __all__ = [
     "PlaybackState",

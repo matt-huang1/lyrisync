@@ -106,7 +106,7 @@ def _no_real_world():
     # never allowed to lose. Both directories are constructor arguments
     # precisely so tests can point them somewhere temporary; refusing the
     # defaults is what makes skipping that a failure instead of a habit.
-    from lyrisync.lyrics_provider import LyricsProvider
+    from sottovoce.lyrics_provider import LyricsProvider
 
     real_init = LyricsProvider.__init__
     missing = object()
@@ -125,7 +125,7 @@ def _no_real_world():
     # writes derived cover colours into the repo's .artwork_cache/, and a
     # test that built one bare would also be a test reaching the CDN,
     # because a cache miss is a download.
-    from lyrisync.artwork import ArtworkProvider
+    from sottovoce.artwork import ArtworkProvider
 
     real_artwork_init = ArtworkProvider.__init__
 
@@ -144,7 +144,7 @@ def _no_real_world():
     # and nothing about that is scoped to a test run: a stray call here
     # would leave a login item behind on the developer's Mac. Every native
     # call goes through _main_app_service, so blocking it is enough.
-    from lyrisync import login_item
+    from sottovoce import login_item
 
     def guard_service():
         raise _violation("SMAppService — a test may not register a login item")
@@ -157,7 +157,7 @@ def _no_real_world():
     # whoever is running the suite — every window construction would do
     # it, and nothing about it is scoped to a test. Every native call goes
     # through _carbon, so blocking it is enough.
-    from lyrisync import hotkey
+    from sottovoce import hotkey
 
     def guard_carbon():
         raise _violation("Carbon — a test may not claim a system-wide hotkey")
@@ -169,7 +169,7 @@ def _no_real_world():
     # the suite for the life of the process, watching them switch apps and
     # calling back into a window the test has since destroyed. Same shape
     # as Carbon above: one door in the module, shut here.
-    from lyrisync import frontmost
+    from sottovoce import frontmost
 
     def guard_workspace():
         raise _violation(
@@ -186,7 +186,7 @@ def _no_real_world():
     # would be a test whose result depends on what the developer happens to
     # have open, which is the other reason to shut this door. One door in
     # the module, same as the three above.
-    from lyrisync import notifications
+    from sottovoce import notifications
 
     def guard_quartz():
         raise _violation(
@@ -195,15 +195,32 @@ def _no_real_world():
 
     patch.setattr(notifications, "_quartz", guard_quartz)
 
+    # -- the settings this app left behind under its old name -------------
+    # The rename orphaned ~/Library/Preferences/com.lyrisync.lyrisync.plist,
+    # and the migration reads it once on a first launch. It is the
+    # developer's own file as much as the new one is, and it is READ rather
+    # than written, which is exactly the kind of escape that leaves no
+    # trace to notice afterwards. One door in the module, same as above;
+    # every test of the migration hands `migrate` a factory of its own.
+    from sottovoce import settings as preferences
+
+    def guard_legacy_settings():
+        raise _violation(
+            "QSettings('lyrisync', 'lyrisync') — the preferences left behind "
+            "by the old name; pass migrate() a legacy_settings factory"
+        )
+
+    patch.setattr(preferences, "_legacy_settings", guard_legacy_settings)
+
     # -- the developer's own settings -------------------------------------
-    # QSettings("lyrisync", "lyrisync") is the real ~/Library/Preferences
+    # QSettings("sottovoce", "sottovoce") is the real ~/Library/Preferences
     # entry: the user's window position, size, opacity and every toggle.
     # The window takes a settings object precisely so tests can hand it a
     # file of their own, and this refuses the form that would not.
     # Imported here rather than at module scope so a broken PySide6 still
     # leaves the Qt-free tests runnable.
     try:
-        from lyrisync import window as window_module
+        from sottovoce import window as window_module
     except ImportError:  # pragma: no cover - PySide6 unusable
         window_module = None
 

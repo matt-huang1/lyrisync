@@ -21,7 +21,7 @@ where the window belongs, so that is the only moment anything is learned.
 This works because of a property the app already had: **the window is
 unfocusable and the app is an accessory**, so dragging it does not change
 which app is frontmost. Without that, every drag would record a position
-against LyriSync itself.
+against SottoVoce itself.
 
 ## Watching the frontmost app
 
@@ -150,7 +150,7 @@ being recorded, which narrows it to the three refusals in
 `learn_refusal` — and only one of them could hold with the layer on and a
 window being dragged.
 
-**Dragging the window activates LyriSync.** The feature's founding
+**Dragging the window activates SottoVoce.** The feature's founding
 assumption was that it does not: the window is unfocusable and the app is
 an accessory, so a drag was thought to leave the frontmost app alone.
 Unfocusable is about *key focus*; app activation is a separate thing, and
@@ -158,8 +158,8 @@ an accessory app can be frontmost. Measured, in both a source run and the
 built bundle:
 
 ```
-… activation notification: com.lyrisync.lyrisync     ← the drag
-… learn: nothing recorded, LyriSync itself is frontmost
+… activation notification: com.sottovoce.sottovoce     ← the drag
+… learn: nothing recorded, SottoVoce itself is frontmost
 ```
 
 So every drag replaced the app the user was working in with ourselves,
@@ -272,11 +272,11 @@ and with the layer off nothing is watching which app that is: a stale
 line would be worse than no line, and going to look would be the
 watching that "off" promises to end.
 
-**"What exactly happened just now?"** — `LYRISYNC_LOG=DEBUG` prints the
+**"What exactly happened just now?"** — `SOTTOVOCE_LOG=DEBUG` prints the
 whole chain, one line per decision, from the notification to the pixels:
 
 ```
-per-app positions restored on: frontmost=com.apple.Safari watching=True remembered=2 own=com.lyrisync.lyrisync
+per-app positions restored on: frontmost=com.apple.Safari watching=True remembered=2 own=com.sottovoce.sottovoce
 activation notification: com.microsoft.VSCode
 activation: com.microsoft.VSCode (arrival)
 settling: com.microsoft.VSCode has 12ms left — asking again
@@ -432,7 +432,7 @@ every activation macOS announces — including ours — so the raw stream can
 be compared with what the window did with it.
 
 Run against a source checkout (`org.python.python`) and then against the
-built bundle (`com.lyrisync.lyrisync`), because a source tree that is
+built bundle (`com.sottovoce.sottovoce`), because a source tree that is
 right and a bundle that is stale look identical from the outside. In the
 bundle: two real drags in two real applications recorded
 `[["com.microsoft.VSCode", 672, 260], ["com.apple.Safari", 396, 495]]`,

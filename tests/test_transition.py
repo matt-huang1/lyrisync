@@ -5,7 +5,7 @@ about timing, so the rule is testable as a rule. The window tests then
 check that it is actually consulted on the paths a poll takes.
 """
 
-from lyrisync.transition import LineTransition
+from sottovoce.transition import LineTransition
 
 LEAD = 0.82  # the choreography (520ms) plus one poll interval
 

@@ -1,6 +1,6 @@
-"""Floating always-on-top lyrics window — the main lyrisync app.
+"""Floating always-on-top lyrics window — the main sottovoce app.
 
-Run with ``lyrisync``. Spotify polling runs on a worker QThread that emits
+Run with ``sottovoce``. Spotify polling runs on a worker QThread that emits
 snapshots to the UI through queued signals, and LRCLIB fetches run on the
 global QThreadPool — the UI thread never runs a subprocess and never blocks
 on the network. All display decisions live in ``view_model.LyricsViewModel``;
@@ -64,8 +64,8 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from lyrisync import appearance
-from lyrisync.app_positions import (
+from sottovoce import appearance
+from sottovoce.app_positions import (
     ActivationDebounce,
     AppPositions,
     GLOW_SECONDS,
@@ -78,8 +78,8 @@ from lyrisync.app_positions import (
     move_refusal,
     status_summary,
 )
-from lyrisync.artwork import ArtworkProvider
-from lyrisync.geometry import (
+from sottovoce.artwork import ArtworkProvider
+from sottovoce.geometry import (
     RESIZE_MARGIN,
     button_margin,
     button_side,
@@ -91,20 +91,21 @@ from lyrisync.geometry import (
     sync_bar_reserve,
     text_gutter,
 )
-from lyrisync.gestures import opacity_step, scroll_step, wheel_action
-from lyrisync import flight
-from lyrisync import frontmost
-from lyrisync import hotkey
-from lyrisync.loop import LineLoop, LoopPhase
-from lyrisync.lyrics_provider import LyricsError, LyricsProvider
-from lyrisync.macspaces import (
+from sottovoce.gestures import opacity_step, scroll_step, wheel_action
+from sottovoce import flight
+from sottovoce import frontmost
+from sottovoce import hotkey
+from sottovoce.loop import LineLoop, LoopPhase
+from sottovoce.lyrics_provider import LyricsError, LyricsProvider
+from sottovoce.macspaces import (
     ACTIVATION_POLICY_ACCESSORY,
     STATUS_WINDOW_LEVEL,
     all_desktops_behavior,
 )
-from lyrisync import login_item
-from lyrisync import menubar
-from lyrisync.menu import (
+from sottovoce import login_item
+from sottovoce import menubar
+from sottovoce import settings as preferences
+from sottovoce.menu import (
     ALBUM_COLOUR,
     ALL_DESKTOPS,
     ECHO,
@@ -125,8 +126,8 @@ from lyrisync.menu import (
     YIELD_NOTIFICATIONS,
     visible_entries,
 )
-from lyrisync import notifications
-from lyrisync.player_monitor import (
+from sottovoce import notifications
+from sottovoce.player_monitor import (
     POLL_INTERVAL_SECONDS,
     PlaybackState,
     PlayerMonitor,
@@ -136,7 +137,7 @@ from lyrisync.player_monitor import (
     resume_playback,
     set_position,
 )
-from lyrisync.speech import (
+from sottovoce.speech import (
     SPEECH_RATE_PRESETS,
     SPEECH_RATE_WPM,
     SpeechSession,
@@ -144,16 +145,16 @@ from lyrisync.speech import (
     detect_voice,
     speak_korean,
 )
-from lyrisync.sync_session import interpolated_position
-from lyrisync import symbols
-from lyrisync.symbols import (
+from sottovoce.sync_session import interpolated_position
+from sottovoce import symbols
+from sottovoce.symbols import (
     SPEAK_FALLBACK_GLYPH,
     SPEAK_SYMBOL,
     icon_size,
     symbol_icon,
 )
-from lyrisync.transition import LineTransition
-from lyrisync.typography import (
+from sottovoce.transition import LineTransition
+from sottovoce.typography import (
     BOTTOM_MARGIN,
     CONTEXT,
     CURRENT,
@@ -169,7 +170,7 @@ from lyrisync.typography import (
     font_stack,
     style_for,
 )
-from lyrisync.vibrancy import (
+from sottovoce.vibrancy import (
     AUTORESIZE_FILL,
     BLENDING_MODE_BEHIND_WINDOW,
     MATERIAL_HUD_WINDOW,
@@ -177,7 +178,7 @@ from lyrisync.vibrancy import (
     WINDOW_BELOW,
     appearance_name,
 )
-from lyrisync.view_model import LyricsViewModel, Mode
+from sottovoce.view_model import LyricsViewModel, Mode
 
 logger = logging.getLogger(__name__)
 
@@ -688,7 +689,21 @@ class LyricsWindow(QWidget):
         # Injectable so tests and scratch runs write somewhere of their own:
         # QSettings' default location is global process state, and getting
         # it wrong means stamping on the real user's saved window.
-        self._settings = settings or QSettings("lyrisync", "lyrisync")
+        if settings is not None:
+            self._settings = settings
+        else:
+            # The real preferences file, and the only path that consults the
+            # one this app left behind when it stopped being LyriSync. An
+            # injected settings object is the caller's and arrives complete;
+            # copying somebody else's app's preferences into it is not this
+            # constructor's business, and it keeps the suite off the legacy
+            # file by construction rather than by remembering to stub.
+            self._settings = QSettings(
+                preferences.ORGANISATION, preferences.APPLICATION
+            )
+            logger.info(
+                "settings: %s", preferences.migrate(self._settings).value
+            )
 
         self._drag_offset: Optional[QPoint] = None
         self._resize_edges = Qt.Edges()
@@ -2082,7 +2097,7 @@ class LyricsWindow(QWidget):
         """Ask macOS which app is in front, refusing ourselves.
 
         The same rule as the activation handler, at the other door. Asking
-        while LyriSync happens to be frontmost — the layer switched on from
+        while SottoVoce happens to be frontmost — the layer switched on from
         a menu opened over our own window — would seed the frontmost app as
         us, and the first drag would be refused for a reason the user could
         not act on. Unknown is the honest answer: unknown until the next
@@ -2655,7 +2670,7 @@ class LyricsWindow(QWidget):
         spec = self._tray_spec_now()
         self._tray = QSystemTrayIcon(self._tray_icon_for(spec), self)
         self._tray_state = spec
-        self._tray.setToolTip("LyriSync")
+        self._tray.setToolTip("SottoVoce")
         self._tray.setContextMenu(self._menu)
         self._tray.show()
 
@@ -3741,12 +3756,12 @@ def apply_accessory_policy() -> None:
 
 def main() -> int:
     logging.basicConfig(
-        level=os.environ.get("LYRISYNC_LOG", "INFO"),
+        level=os.environ.get("SOTTOVOCE_LOG", "INFO"),
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     app = QApplication(sys.argv)
-    app.setApplicationName("lyrisync")
-    app.setOrganizationName("lyrisync")
+    app.setApplicationName("sottovoce")
+    app.setOrganizationName("sottovoce")
     # A menu bar app outlives its window: hiding the lyrics must not be
     # mistaken for the user closing the last window and quitting.
     app.setQuitOnLastWindowClosed(False)

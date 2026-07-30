@@ -21,7 +21,7 @@ STATUS_WINDOW_LEVEL = 25       # NSStatusWindowLevel
 # A Regular-policy app owns a Space: activating it from inside another
 # app's full-screen Space makes macOS SWITCH there instead of overlaying.
 # Accessory apps (no Dock icon, no Cmd-Tab entry) have no Space to switch
-# to, so their windows overlay full-screen Spaces in place. LyriSync lives
+# to, so their windows overlay full-screen Spaces in place. SottoVoce lives
 # in the menu bar and is accessory permanently and unconditionally — it is
 # never coupled to the all-desktops toggle, and never restored to regular.
 ACTIVATION_POLICY_ACCESSORY = 1  # NSApplicationActivationPolicyAccessory

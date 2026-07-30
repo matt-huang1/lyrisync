@@ -1,6 +1,6 @@
 # Gatekeeper, and why a downloaded build is blocked
 
-If you built LyriSync yourself, none of this applies: an app you compiled
+If you built SottoVoce yourself, none of this applies: an app you compiled
 on your own Mac is never marked as downloaded, so it opens with an
 ordinary double-click. This page is about the release zip.
 
@@ -12,15 +12,15 @@ The flag is applied by the *downloading application*, not by the network:
 Safari, Chrome and Mail set it; `curl` does not.
 
 When you open a quarantined app for the first time, macOS asks Gatekeeper
-whether it approves. For LyriSync the answer is no:
+whether it approves. For SottoVoce the answer is no:
 
 ```
-$ codesign -dv /Applications/LyriSync.app
+$ codesign -dv /Applications/SottoVoce.app
 Signature=adhoc
 TeamIdentifier=not set
 
-$ spctl -a -vvv -t exec /Applications/LyriSync.app
-/Applications/LyriSync.app: rejected
+$ spctl -a -vvv -t exec /Applications/SottoVoce.app
+/Applications/SottoVoce.app: rejected
 ```
 
 **The app is signed ad-hoc rather than with an Apple Developer ID, and it
@@ -42,14 +42,14 @@ the option that requires trusting nobody.
 
 **Through System Settings.** Try to open the app; macOS refuses. Then go
 to System Settings → Privacy & Security, scroll to the Security section,
-find the message naming LyriSync and click **Open Anyway**. Confirm at the
+find the message naming SottoVoce and click **Open Anyway**. Confirm at the
 prompt. This is Apple's supported route: it records your decision for that
 one app and leaves everything else unchanged.
 
 **By removing the flag yourself.**
 
 ```sh
-xattr -d com.apple.quarantine /Applications/LyriSync.app
+xattr -d com.apple.quarantine /Applications/SottoVoce.app
 ```
 
 This strips the quarantine attribute, after which the app launches like
@@ -103,8 +103,9 @@ Three things you can check without trusting a claim on this page:
 - **The hash.** The command above is the whole of it. If it does not match
   the value in the README, do not open the file.
 - **The provenance.** The release is built from the `v1.0.0` tag, and that
-  tag is in this repository. The zip contains one thing, `LyriSync.app`,
-  which is the PyInstaller output described in
+  tag is in this repository. The zip contains one thing — `LyriSync.app`
+  in 1.0.0, which predates the rename, and `SottoVoce.app` from the next
+  release on — which is the PyInstaller output described in
   [packaging](packaging.md) — icon, freeze, ad-hoc signature, nothing
   else. `main` moves ahead of the tag between releases, so the released
   build is the tag, not the tip.

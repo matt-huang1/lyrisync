@@ -195,7 +195,7 @@ class GlobalHotkey:
         as before, minus the shortcut.
 
         Registration is not exclusive across apps — measured, not assumed:
-        two LyriSync processes both claimed ⇧⌘J and both got noErr, and
+        two SottoVoce processes both claimed ⇧⌘J and both got noErr, and
         macOS decided between them for each press. ``eventHotKeyExistsErr``
         comes back only when *this* process already holds the combination.
         So a refusal here is never "another app owns it"; it is the event

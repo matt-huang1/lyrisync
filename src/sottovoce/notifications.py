@@ -158,7 +158,7 @@ import logging
 import sys
 from typing import Optional, Sequence
 
-from lyrisync.geometry import intersects
+from sottovoce.geometry import intersects
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 """Terminal runner: prints player-monitor events so they can be verified by
 playing, pausing, and switching songs in Spotify.
 
-Run with ``lyrisync-monitor`` or ``python -m lyrisync.monitor_cli``.
+Run with ``sottovoce-monitor`` or ``python -m sottovoce.monitor_cli``.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 import time
 
-from lyrisync.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
+from sottovoce.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
 
 
 def _fmt_clock(seconds: float) -> str:
@@ -72,7 +72,7 @@ def main() -> int:
         on_track_change=printer.on_track_change,
         on_position_update=printer.on_position_update,
     )
-    print("lyrisync player monitor — polling Spotify every 300ms, Ctrl-C to quit")
+    print("sottovoce player monitor — polling Spotify every 300ms, Ctrl-C to quit")
     print("(first run may trigger a macOS Automation permission prompt)")
     try:
         monitor.run()

@@ -1,6 +1,6 @@
 import pytest
 
-from lyrisync.loop import (
+from sottovoce.loop import (
     ENTRY_GRACE,
     EXIT_GRACE,
     SEEK_LEAD_SECONDS,

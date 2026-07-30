@@ -1,4 +1,4 @@
-"""Render packaging/appicon.svg into packaging/LyriSync.icns.
+"""Render packaging/appicon.svg into packaging/SottoVoce.icns.
 
 Every size is rendered from the SVG rather than downscaled from the 1024,
 because a 16pt icon that is a shrunken 1024 is mud: the bars are drawn at
@@ -22,8 +22,8 @@ from PySide6.QtSvg import QSvgRenderer
 
 HERE = Path(__file__).resolve().parent
 SOURCE = HERE / "appicon.svg"
-ICONSET = HERE / "LyriSync.iconset"
-ICNS = HERE / "LyriSync.icns"
+ICONSET = HERE / "SottoVoce.iconset"
+ICNS = HERE / "SottoVoce.icns"
 
 # The set macOS asks for: each logical size at 1x and 2x.
 SIZES = [16, 32, 128, 256, 512]

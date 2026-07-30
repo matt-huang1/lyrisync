@@ -1,6 +1,6 @@
 # Spotify integration and polling
 
-How LyriSync knows what is playing, and why it asks the way it does.
+How SottoVoce knows what is playing, and why it asks the way it does.
 
 ## AppleScript, not the Web API
 

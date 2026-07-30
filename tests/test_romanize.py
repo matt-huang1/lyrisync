@@ -1,6 +1,6 @@
 import pytest
 
-from lyrisync import romanize as rz
+from sottovoce import romanize as rz
 
 
 # -- hangul detection ----------------------------------------------------

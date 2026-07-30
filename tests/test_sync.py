@@ -1,6 +1,6 @@
 import pytest
 
-from lyrisync.sync import current_line_index
+from sottovoce.sync import current_line_index
 
 LINES = [(10.0, "one"), (20.0, "two"), (30.0, "three")]
 

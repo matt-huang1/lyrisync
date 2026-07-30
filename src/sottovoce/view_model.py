@@ -12,11 +12,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from lyrisync.lyrics_provider import TrackLyrics
-from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
-from lyrisync.romanize import contains_hangul, romanize_korean
-from lyrisync.sync import current_line_index
-from lyrisync.sync_session import (
+from sottovoce.lyrics_provider import TrackLyrics
+from sottovoce.player_monitor import PlaybackState, PlayerSnapshot
+from sottovoce.romanize import contains_hangul, romanize_korean
+from sottovoce.sync import current_line_index
+from sottovoce.sync_session import (
     SyncSession,
     sync_targets,
     sync_targets_from_lines,

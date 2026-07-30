@@ -1,13 +1,13 @@
 # Packaging the app bundle
 
 ```sh
-make app     # dist/LyriSync.app, ad-hoc signed
+make app     # dist/SottoVoce.app, ad-hoc signed
 make icon    # regenerate the icon from packaging/appicon.svg
 make clean   # remove build/, dist/ and the generated icon
 ```
 
 `make app` is the whole build: render the icon, freeze with PyInstaller
-(`packaging/LyriSync.spec`), ad-hoc sign the finished bundle. It needs
+(`packaging/SottoVoce.spec`), ad-hoc sign the finished bundle. It needs
 `pip install -e ".[build]"` and nothing else — no certificate, no
 keychain, no Xcode.
 
@@ -20,7 +20,7 @@ upstream. py2app needs hand-written recipes for the same bundle.
 
 Both version keys in `Info.plist` — `CFBundleShortVersionString`, which
 Finder shows, and `CFBundleVersion`, which macOS compares — come from
-`importlib.metadata.version("lyrisync")`.
+`importlib.metadata.version("sottovoce")`.
 
 The **installed** distribution, deliberately, rather than a re-read of
 `pyproject.toml`: the installed package is what PyInstaller freezes into
@@ -34,7 +34,7 @@ install's metadata is a snapshot taken at install time, so editing
 would quietly claim the older version. The spec compares the two and stops:
 
 ```
-version drift: pyproject.toml declares 1.0.1, the installed lyrisync is
+version drift: pyproject.toml declares 1.0.1, the installed sottovoce is
 1.0.0. The bundle would claim 1.0.0. Reinstall first: pip install -e '.[build]'
 ```
 
@@ -47,14 +47,14 @@ second copy of the version again.
 
 ### `copy_metadata` is load-bearing
 
-The app asks the same question about itself at runtime: `lyrisync/__init__.py`
+The app asks the same question about itself at runtime: `sottovoce/__init__.py`
 resolves `__version__` from `importlib.metadata` and builds the User-Agent
 from it, so what LRCLIB and the artwork host are told cannot drift from
 what the app is.
 
 PyInstaller freezes the package **without** its `.dist-info` unless the
 spec says otherwise — verified by finding none in a built bundle. So the
-spec passes `copy_metadata("lyrisync")` into `datas`. Without it the app
+spec passes `copy_metadata("sottovoce")` into `datas`. Without it the app
 still runs, but falls back to `unknown` and misstates itself to every
 server it talks to, while the `Info.plist` beside it says 1.0.0.
 
@@ -63,8 +63,8 @@ scoped to the bundle's own `Frameworks` directory, so the installed copy
 cannot be the one answering:
 
 ```
-resolved from the bundle path only: {'lyrisync': '1.0.0'}
-User-Agent the frozen app would send: lyrisync/1.0.0 (…)
+resolved from the bundle path only: {'sottovoce': '1.0.0'}
+User-Agent the frozen app would send: sottovoce/1.0.0 (…)
 ```
 
 The fallback is the string `unknown`, deliberately not a number: a
@@ -74,12 +74,28 @@ one.
 
 ## The bundle identifier is the settings contract
 
-`com.lyrisync.lyrisync` is exactly what `QSettings("lyrisync",
-"lyrisync")` already resolves to, so the bundled app and a terminal run
+`com.sottovoce.sottovoce` is exactly what `QSettings("sottovoce",
+"sottovoce")` already resolves to, so the bundled app and a terminal run
 share one plist and one set of remembered window geometry.
 
 Verified by launching both at once and reading the geometry back — same
-position, same size, same file.
+position, same size, same file. A test pins the two together, because a
+typo in either half orphans the file silently and reads as a first launch.
+
+That is also what the rename cost. The identifier used to be
+`com.lyrisync.lyrisync`, and macOS keys a preferences file on the
+identifier: changing it does not move the file, it orphans it. So
+`settings.py` copies the old plist across once, on a launch that finds
+nothing of its own, and leaves the original exactly where it is. Two
+things no code can carry, because macOS keys them on the identifier *and*
+the code signature:
+
+- **The Automation grant.** macOS asks again on the first poll, and the
+  prompt now names SottoVoce. The old app's entry stays in System
+  Settings → Privacy & Security → Automation until it is removed.
+- **The login item.** Open at Login has to be switched on again, and the
+  stale LyriSync entry lingers in System Settings → General → Login Items
+  until the old bundle is deleted.
 
 ## Two `Info.plist` keys that are load-bearing
 
@@ -100,7 +116,7 @@ altered since it was signed. What it is **not** is a Developer ID
 signature: it carries no identity, so it says nothing about who built it.
 
 ```
-$ codesign -dv /Applications/LyriSync.app
+$ codesign -dv /Applications/SottoVoce.app
 Signature=adhoc
 TeamIdentifier=not set
 ```
@@ -114,7 +130,7 @@ What that block means and what to do about it is
 reader rather than a step in a build guide.
 
 The first time it polls, macOS asks for **Automation** permission
-("LyriSync wants to control Spotify"). That one is a capability grant
+("SottoVoce wants to control Spotify"). That one is a capability grant
 rather than a trust warning, and the app genuinely needs it. Moving the
 app afterwards can make macOS ask again, so put it where you want it
 before granting.
@@ -123,14 +139,14 @@ before granting.
 
 ```sh
 .venv/bin/pip install -e .
-.venv/bin/lyrisync
+.venv/bin/sottovoce
 ```
 
 Which is what development uses. Both read and write the same settings, so
 toggles and window geometry carry over between the two.
 
-Two auxiliary terminal tools exist for debugging: `lyrisync-monitor` (raw
-player events) and `lyrisync-lyrics` (synced lyrics in the terminal).
+Two auxiliary terminal tools exist for debugging: `sottovoce-monitor` (raw
+player events) and `sottovoce-lyrics` (synced lyrics in the terminal).
 
 ## Bundle building is deliberately not in CI
 

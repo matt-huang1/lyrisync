@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from lyrisync import lyrics_provider as lp
-from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
+from sottovoce import lyrics_provider as lp
+from sottovoce.player_monitor import PlaybackState, PlayerSnapshot
 
 
 SYNCED_LRC = "[00:12.00] First line\n[00:17.50] Second line\n"

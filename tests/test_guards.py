@@ -15,10 +15,10 @@ import threading
 
 import pytest
 
-from lyrisync import hotkey
-from lyrisync import lyrics_provider as lp
-from lyrisync import player_monitor as pm
-from lyrisync import speech
+from sottovoce import hotkey
+from sottovoce import lyrics_provider as lp
+from sottovoce import player_monitor as pm
+from sottovoce import speech
 
 
 def test_the_lyrics_fetch_cannot_reach_lrclib(escapes):
@@ -112,7 +112,7 @@ def test_a_bare_artwork_provider_refuses_the_repo_directory(escapes):
     """Same hazard as the lyrics provider one directory along: a default
     ArtworkProvider writes derived cover colours into the repo, and every
     cache miss it takes is a request to Spotify's CDN."""
-    from lyrisync import artwork
+    from sottovoce import artwork
 
     with pytest.raises(RuntimeError, match="test escape"):
         artwork.ArtworkProvider()
@@ -120,7 +120,7 @@ def test_a_bare_artwork_provider_refuses_the_repo_directory(escapes):
 
 
 def test_an_injected_artwork_provider_is_fine(escapes, tmp_path):
-    from lyrisync import artwork
+    from sottovoce import artwork
 
     provider = artwork.ArtworkProvider(cache_dir=tmp_path / "art")
     assert provider.cache_dir == tmp_path / "art"
@@ -131,7 +131,7 @@ def test_album_artwork_cannot_be_downloaded(escapes):
     """The cover fetch is a real HTTP request to a CDN. Blocked at the
     socket like every other, and recorded so the test that reached for it
     fails rather than quietly getting no tint."""
-    from lyrisync import artwork
+    from sottovoce import artwork
 
     # The guard's own RuntimeError, not an ArtworkError: it is raised
     # below the layer that translates network failures, exactly as the
@@ -156,21 +156,34 @@ def test_a_test_cannot_claim_a_system_wide_hotkey(escapes):
 
 
 def test_the_real_preferences_file_cannot_be_opened(escapes):
-    """The first escape this project had: QSettings("lyrisync", "lyrisync")
+    """The first escape this project had: QSettings("sottovoce", "sottovoce")
     is the user's own window position, opacity and toggles."""
     w = pytest.importorskip(
-        "lyrisync.window",
+        "sottovoce.window",
         reason="PySide6 unusable (missing system Qt libraries?)",
         exc_type=ImportError,
     )
     with pytest.raises(RuntimeError, match="test escape"):
-        w.QSettings("lyrisync", "lyrisync")
+        w.QSettings("sottovoce", "sottovoce")
     assert escapes.drain()
+
+
+def test_the_preferences_left_behind_by_the_old_name_cannot_be_opened(escapes):
+    """The rename left ~/Library/Preferences/com.lyrisync.lyrisync.plist
+    where it was, and the migration reads it once on a first launch. That
+    is the developer's own file too — and a READ, which leaves nothing
+    behind to notice afterwards, so it needs the alarm more than a write
+    does. Every test of the migration passes its own factory instead."""
+    from sottovoce import settings as preferences
+
+    with pytest.raises(RuntimeError, match="test escape"):
+        preferences._legacy_settings()
+    assert any("lyrisync" in e for e in escapes.drain())
 
 
 def test_a_settings_file_of_its_own_is_fine(escapes, tmp_path):
     w = pytest.importorskip(
-        "lyrisync.window",
+        "sottovoce.window",
         reason="PySide6 unusable (missing system Qt libraries?)",
         exc_type=ImportError,
     )

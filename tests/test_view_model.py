@@ -1,6 +1,6 @@
-from lyrisync.lyrics_provider import TrackLyrics
-from lyrisync.player_monitor import PlaybackState, PlayerSnapshot
-from lyrisync.view_model import RETRY_INTERVAL_SECONDS, LyricsViewModel, Mode
+from sottovoce.lyrics_provider import TrackLyrics
+from sottovoce.player_monitor import PlaybackState, PlayerSnapshot
+from sottovoce.view_model import RETRY_INTERVAL_SECONDS, LyricsViewModel, Mode
 
 
 SYNCED = TrackLyrics(synced=[(10.0, "one"), (20.0, "two"), (30.0, "three")])
@@ -729,7 +729,7 @@ def test_reload_after_a_resync_shows_the_new_timings():
     vm.end_sync()
     assert vm.begin_reload("trackA") is True
 
-    from lyrisync.lyrics_provider import parse_lrc
+    from sottovoce.lyrics_provider import parse_lrc
 
     vm.fetch_completed("trackA", TrackLyrics(synced=parse_lrc(lrc)))
     assert vm.display().mode is Mode.SYNCED

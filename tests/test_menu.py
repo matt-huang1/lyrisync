@@ -1,4 +1,4 @@
-from lyrisync import menu as m
+from sottovoce import menu as m
 
 
 ALL_LAYERS = dict(

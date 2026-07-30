@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional, Sequence
 
-from lyrisync.geometry import intersects
+from sottovoce.geometry import intersects
 
 # A rectangle as (x, y, width, height), top-left origin — screen
 # coordinates the way Qt reports them, not Cocoa's.

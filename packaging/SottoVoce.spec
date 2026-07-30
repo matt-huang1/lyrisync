@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for LyriSync.app.
+"""PyInstaller spec for SottoVoce.app.
 
 Built with PyInstaller rather than py2app: PySide6 and pyobjc are both
 covered by hooks PyInstaller maintains upstream (Qt plugins, the platform
@@ -28,10 +28,10 @@ PACKAGING = PROJECT / "packaging"
 # the file instead would describe the source tree, which is the same thing
 # right up until it is not.
 try:
-    VERSION = installed_version("lyrisync")
+    VERSION = installed_version("sottovoce")
 except PackageNotFoundError:  # pragma: no cover - build-time only
     raise SystemExit(
-        "lyrisync is not installed in this environment, so there is no "
+        "sottovoce is not installed in this environment, so there is no "
         "version to stamp the bundle with. Run: pip install -e '.[build]'"
     )
 
@@ -46,7 +46,7 @@ with open(PROJECT / "pyproject.toml", "rb") as handle:
 if VERSION != DECLARED:
     raise SystemExit(
         f"version drift: pyproject.toml declares {DECLARED}, the installed "
-        f"lyrisync is {VERSION}. The bundle would claim {VERSION}. "
+        f"sottovoce is {VERSION}. The bundle would claim {VERSION}. "
         "Reinstall first: pip install -e '.[build]'"
     )
 
@@ -55,30 +55,30 @@ if VERSION != DECLARED:
 # app with no such string is refused silently — the app comes up, the menu
 # bar icon appears, and every poll fails with no visible reason.
 APPLE_EVENTS_REASON = (
-    "LyriSync reads the Spotify app's current track and playback position "
+    "SottoVoce reads the Spotify app's current track and playback position "
     "so it can show the lyrics in time with the music. It does not control "
     "playback unless you use its loop, spoken-reference, or tap-to-sync "
     "features."
 )
 
 analysis = Analysis(
-    [str(PACKAGING / "lyrisync_launcher.py")],
+    [str(PACKAGING / "sottovoce_launcher.py")],
     pathex=[str(PROJECT / "src")],
     binaries=[],
     # No data files. The menu bar glyphs used to be three SVGs in
-    # lyrisync/assets/ and are drawn by symbols.py from menubar.py's geometry
+    # sottovoce/assets/ and are drawn by symbols.py from menubar.py's geometry
     # since milestone 15.1 — brightness, shape and dot compose into eight
     # combinations and twenty with the optional animation, which is more
     # images than anybody should ship.
     #
-    # copy_metadata is load-bearing, not housekeeping: lyrisync/__init__.py
+    # copy_metadata is load-bearing, not housekeeping: sottovoce/__init__.py
     # asks importlib.metadata for its own version, and PyInstaller freezes
     # the package WITHOUT its .dist-info unless told otherwise (verified —
     # there was none in the bundle). Without this the app still runs, but
     # falls back to "unknown" and introduces itself to LRCLIB as a version
     # it is not.
     datas=[
-        *copy_metadata("lyrisync"),
+        *copy_metadata("sottovoce"),
     ],
     # AppKit and objc are imported inside functions (every native feature is
     # guarded), and korean_romanizer is reached through a lazy import too.
@@ -146,7 +146,7 @@ executable = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="LyriSync",
+    name="SottoVoce",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -157,7 +157,7 @@ executable = EXE(
     target_arch=None,
     codesign_identity=None,  # ad-hoc signing happens in make_app.sh
     entitlements_file=None,
-    icon=str(PACKAGING / "LyriSync.icns"),
+    icon=str(PACKAGING / "SottoVoce.icns"),
 )
 
 collection = COLLECT(
@@ -167,22 +167,32 @@ collection = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="LyriSync",
+    name="SottoVoce",
 )
 
 app = BUNDLE(
     collection,
-    name="LyriSync.app",
-    icon=str(PACKAGING / "LyriSync.icns"),
-    # The identifier QSettings("lyrisync", "lyrisync") already resolves to:
-    # ~/Library/Preferences/com.lyrisync.lyrisync.plist. Matching it is what
+    name="SottoVoce.app",
+    icon=str(PACKAGING / "SottoVoce.icns"),
+    # The identifier QSettings("sottovoce", "sottovoce") already resolves to:
+    # ~/Library/Preferences/com.sottovoce.sottovoce.plist. Matching it is what
     # carries every existing setting — window position, size, opacity, the
-    # learning toggles — into the bundled app instead of starting it fresh.
-    bundle_identifier="com.lyrisync.lyrisync",
+    # learning toggles — between a terminal run and the bundled app instead
+    # of giving each one a file of its own.
+    #
+    # It used to be com.lyrisync.lyrisync, and changing it orphaned that
+    # plist rather than moving it: macOS keys preferences on the identifier.
+    # settings_migration.py copies the old file across once on first launch.
+    # Two things it cannot copy, because macOS keys those on the identifier
+    # AND the code signature: the Automation grant (macOS asks again on the
+    # first poll) and the login item registration (Open at Login has to be
+    # switched on again, and the old entry lingers in System Settings until
+    # the old bundle is deleted).
+    bundle_identifier="com.sottovoce.sottovoce",
     version=VERSION,
     info_plist={
-        "CFBundleName": "LyriSync",
-        "CFBundleDisplayName": "LyriSync",
+        "CFBundleName": "SottoVoce",
+        "CFBundleDisplayName": "SottoVoce",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
         # An accessory app, declared rather than only applied at runtime:

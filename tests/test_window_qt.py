@@ -58,19 +58,20 @@ try:
 except Exception as exc:  # pragma: no cover - platform plugin missing
     pytest.skip(f"Qt cannot start: {exc}", allow_module_level=True)
 
-from lyrisync import appearance as ap  # noqa: E402
-from lyrisync import frontmost  # noqa: E402
-from lyrisync import hotkey  # noqa: E402
-from lyrisync import login_item  # noqa: E402
-from lyrisync import menu as m  # noqa: E402
-from lyrisync import menubar as mb  # noqa: E402
-from lyrisync import notifications as n  # noqa: E402
-from lyrisync import vibrancy  # noqa: E402
-from lyrisync import window as w  # noqa: E402
-from lyrisync.artwork import ArtworkProvider  # noqa: E402
-from lyrisync.lyrics_provider import LyricsProvider, TrackLyrics  # noqa: E402
-from lyrisync.player_monitor import PlaybackState, PlayerSnapshot  # noqa: E402
-from lyrisync.view_model import Mode  # noqa: E402
+from sottovoce import appearance as ap  # noqa: E402
+from sottovoce import frontmost  # noqa: E402
+from sottovoce import hotkey  # noqa: E402
+from sottovoce import login_item  # noqa: E402
+from sottovoce import menu as m  # noqa: E402
+from sottovoce import menubar as mb  # noqa: E402
+from sottovoce import notifications as n  # noqa: E402
+from sottovoce import settings as preferences  # noqa: E402
+from sottovoce import vibrancy  # noqa: E402
+from sottovoce import window as w  # noqa: E402
+from sottovoce.artwork import ArtworkProvider  # noqa: E402
+from sottovoce.lyrics_provider import LyricsProvider, TrackLyrics  # noqa: E402
+from sottovoce.player_monitor import PlaybackState, PlayerSnapshot  # noqa: E402
+from sottovoce.view_model import Mode  # noqa: E402
 
 
 # Captured before any fixture stubs it, so the one test that needs the
@@ -145,7 +146,7 @@ def make_window(tmp_path):
     nothing on macOS, so a test that trusted them would write into the real
     ~/Library/Preferences entry and stamp on the user's saved window.
     """
-    settings_path = tmp_path / "lyrisync-test.ini"
+    settings_path = tmp_path / "sottovoce-test.ini"
     windows = []
 
     def factory():
@@ -190,10 +191,25 @@ def test_the_window_writes_only_where_it_is_told(make_window, tmp_path):
     """Guard on the seam itself: lose the injection and every test below
     starts editing the real user's preferences."""
     window = make_window()
-    assert window._settings.fileName() == str(tmp_path / "lyrisync-test.ini")
+    assert window._settings.fileName() == str(tmp_path / "sottovoce-test.ini")
     window._set_lyrics_visible(False)
     window._settings.sync()
-    assert (tmp_path / "lyrisync-test.ini").exists()
+    assert (tmp_path / "sottovoce-test.ini").exists()
+
+
+def test_an_injected_settings_file_is_never_migrated_into(make_window):
+    """The carry from the LyriSync name runs on the file the window opens
+    for itself and on no other. An injected settings object is the
+    caller's and arrives complete; copying an older app's preferences into
+    it is not the constructor's business — and it is what keeps the whole
+    suite off ~/Library/Preferences/com.lyrisync.lyrisync.plist by
+    construction rather than by remembering to stub something.
+
+    The legacy door is guarded in conftest, so a regression here would
+    also fail as an escape. This says it in the window's own terms.
+    """
+    window = make_window()
+    assert window._settings.value(preferences.MIGRATION_KEY) is None
 
 
 def snapshot(
@@ -1149,7 +1165,7 @@ NAMES = {
     VSCODE: "Code",
     SAFARI: "Safari",
     "com.apple.Notes": "Notes",
-    "com.lyrisync.lyrisync": "LyriSync",
+    "com.sottovoce.sottovoce": "SottoVoce",
 }
 
 
@@ -1470,8 +1486,8 @@ def test_the_window_never_learns_a_position_against_itself(make_window):
     app is an accessory — but an entry keyed on us could never be recalled
     and would evict a real one."""
     window = remembering(make_window)
-    window._own_bundle_id = "com.lyrisync.lyrisync"
-    window._frontmost = "com.lyrisync.lyrisync"
+    window._own_bundle_id = "com.sottovoce.sottovoce"
+    window._frontmost = "com.sottovoce.sottovoce"
 
     end_a_drag(window, 300, 200)
 
@@ -1485,9 +1501,9 @@ def test_our_own_activation_does_not_become_the_frontmost_app(make_window):
     and nothing would be learned for no visible reason. The window follows
     the last app that was not us."""
     window = remembering(make_window, frontmost_app=VSCODE)
-    window._own_bundle_id = "com.lyrisync.lyrisync"
+    window._own_bundle_id = "com.sottovoce.sottovoce"
 
-    activate(window, "com.lyrisync.lyrisync")
+    activate(window, "com.sottovoce.sottovoce")
 
     assert window._frontmost == VSCODE
     end_a_drag(window, 300, 200)
@@ -1499,12 +1515,12 @@ def test_our_own_activation_does_not_disturb_an_app_that_is_settling(make_window
     was almost due must not be restarted, or reaching for the menu bar
     would cost the move the user was waiting for."""
     window = remembering(make_window)
-    window._own_bundle_id = "com.lyrisync.lyrisync"
+    window._own_bundle_id = "com.sottovoce.sottovoce"
     window._positions.remember(SAFARI, 400, 300)
     window.move(10, 10)
 
     activate(window, SAFARI)
-    activate(window, "com.lyrisync.lyrisync")
+    activate(window, "com.sottovoce.sottovoce")
 
     assert window._debounce.pending == SAFARI
     window._settle_timer.stop()
@@ -1519,8 +1535,8 @@ def test_asking_who_is_in_front_refuses_ourselves(make_window):
     opened over our own window must not seed the frontmost app as us, or the
     first drag would be refused for a reason the user cannot act on."""
     window = make_window()
-    window._own_bundle_id = "com.lyrisync.lyrisync"
-    ourselves = frontmost.AppIdentity("com.lyrisync.lyrisync", "LyriSync")
+    window._own_bundle_id = "com.sottovoce.sottovoce"
+    ourselves = frontmost.AppIdentity("com.sottovoce.sottovoce", "SottoVoce")
     with patch.object(w.frontmost, "current_app", return_value=ourselves):
         window._set_remember_position(True)
     assert window._frontmost is None
@@ -2390,7 +2406,7 @@ def test_the_window_is_not_dragged_while_it_is_flying(make_window):
 
 def test_the_flight_never_activates_the_app(make_window):
     """The window is unfocusable by design, and hiding it must not be the
-    one thing that brings LyriSync forward. Recorded rather than asserted
+    one thing that brings SottoVoce forward. Recorded rather than asserted
     on isActiveWindow, which the offscreen platform answers however it
     likes: what matters is that the flight never ASKS."""
     window = make_window()
@@ -2816,7 +2832,7 @@ def test_a_refused_hotkey_leaves_the_app_fully_working(make_window, caplog):
     """Registration fails here for real — the fixture hands back no Carbon
     — so this is the "another app owns it" path. Everything the hotkey
     would have done is still reachable from the menu."""
-    with caplog.at_level(logging.INFO, logger="lyrisync.window"):
+    with caplog.at_level(logging.INFO, logger="sottovoce.window"):
         window = make_window()
     assert window._hotkey.registered is False
     assert "continuing without the global hotkey" in caplog.text
@@ -3013,7 +3029,7 @@ def test_shutdown_survives_a_worker_that_will_not_come_back(make_window, caplog)
     monkeypatch.setattr(w, "_SHUTDOWN_WAIT_MS", 50)
     window._pool.start(Stuck())
     try:
-        with caplog.at_level(logging.WARNING, logger="lyrisync.window"):
+        with caplog.at_level(logging.WARNING, logger="sottovoce.window"):
             window._shutdown()
         assert "worker still running at shutdown" in caplog.text
     finally:
@@ -3121,7 +3137,7 @@ def test_a_failed_registration_leaves_the_entry_unchecked(make_window, monkeypat
         "set_enabled",
         lambda enabled: (False, login_item.LoginItemStatus.REQUIRES_APPROVAL),
     )
-    with caplog.at_level(logging.WARNING, logger="lyrisync.window"):
+    with caplog.at_level(logging.WARNING, logger="sottovoce.window"):
         window._set_open_at_login(True)
 
     action = window._menu_actions[m.OPEN_AT_LOGIN]

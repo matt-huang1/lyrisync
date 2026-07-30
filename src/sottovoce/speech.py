@@ -11,7 +11,7 @@ import logging
 import re
 import subprocess
 
-from lyrisync.romanize import contains_hangul
+from sottovoce.romanize import contains_hangul
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def detect_voice() -> bool:
     logger.info(
         "spoken reference disabled: macOS voice %r is not installed. "
         "Install it under System Settings → Accessibility → Spoken Content "
-        "→ System Voice → Manage Voices…, then restart lyrisync.",
+        "→ System Voice → Manage Voices…, then restart sottovoce.",
         VOICE,
     )
     return False

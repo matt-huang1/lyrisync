@@ -59,7 +59,7 @@ set in `Info.plist`: the runtime call is what the code guarantees, the
 plist key is what stops macOS showing a Dock icon for the instant before
 it runs.
 
-This is what keeps LyriSync out of the Dock and out of the ⌘-Tab
+This is what keeps SottoVoce out of the Dock and out of the ⌘-Tab
 switcher — and, less obviously, it is what makes the full-screen overlay
 work at all. A Regular-policy app triggers a Space switch when activated,
 so the overlay would drag you out of the full-screen app you were watching.
