@@ -119,8 +119,10 @@ from lyrisync.menu import (
     SPEECH_RATE,
     SPOKEN,
     SYNC,
+    YIELD_NOTIFICATIONS,
     visible_entries,
 )
+from lyrisync import notifications
 from lyrisync.player_monitor import (
     POLL_INTERVAL_SECONDS,
     PlaybackState,
@@ -254,6 +256,13 @@ _MOVE_CURVE = QEasingCurve.Type.InOutSine
 # should read as a departure and the arrival as settling.
 _FLIGHT_LEAVING = QEasingCurve.Type.InSine
 _FLIGHT_ARRIVING = QEasingCurve.Type.OutSine
+
+# Fading out of a notification's way, and back. The same curve as the
+# travel to a remembered position, and the same argument for it: one
+# continuous movement rather than two phases handing over, so both ends are
+# eased — and a fade that reverses mid-way then does so symmetrically,
+# which a paired In/Out would not.
+_YIELD_CURVE = _MOVE_CURVE
 
 # How big an application icon is drawn for the menu. macOS puts 16-point
 # icons beside menu items; this is asked for in points and comes back at
@@ -715,6 +724,20 @@ class LyricsWindow(QWidget):
         self._flight_progress = 0.0
         self._flight_home: Optional[tuple] = None
         self._flight_to: Optional[tuple] = None
+        # What the flight is currently doing to the window's opacity, held
+        # here rather than applied directly, so there is one place that
+        # multiplies the three things with an opinion about it: the user's
+        # own setting, a flight, and a yield.
+        self._flight_opacity = 1.0
+        # Yielding to notifications. `_yield_level` runs 0 (the user's own
+        # opacity) to 1 (as faint as yielding goes), and `_yielding` is what
+        # the last poll saw — the target the level is heading for, kept
+        # apart from the level itself so an ordinary poll that agrees with
+        # the current state costs nothing.
+        self._yield_to_notifications = False  # restored from settings below
+        self._yield_level = 0.0
+        self._yielding = False
+        self._yield_anim: Optional[QVariantAnimation] = None
         # Which glyph the menu bar item is showing, so it is only ever set
         # when it changes: _refresh_menu runs on every render.
         self._tray_state: Optional[str] = None
@@ -866,6 +889,20 @@ class LyricsWindow(QWidget):
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
         self._settle_timer.timeout.connect(self._apply_settled_app)
+        # Repeating, unlike every other timer here, and running only while
+        # the layer is on and the window is showing. There is no signal to
+        # subscribe to — macOS broadcasts app activations but says nothing
+        # when a banner appears — so this is the one thing in the app that
+        # genuinely has to ask. The monitor's own 300ms tick was the
+        # alternative and it cannot carry this: position updates stop
+        # arriving the moment nothing is playing, which is exactly a moment
+        # when the window is still on screen and still in the way. A layer
+        # that worked only during playback would be the fourteenth
+        # milestone's lesson again — a feature indistinguishable from a
+        # broken one.
+        self._yield_timer = QTimer(self)
+        self._yield_timer.setInterval(int(notifications.POLL_SECONDS * 1000))
+        self._yield_timer.timeout.connect(self._check_notifications)
 
         self._loop = LineLoop()
         self._loop_timer = QTimer(self)
@@ -2374,6 +2411,11 @@ class LyricsWindow(QWidget):
         all_desktops.triggered.connect(self._set_all_desktops)
         actions[ALL_DESKTOPS] = all_desktops
 
+        yield_notifications = self._menu.addAction("Yield to notifications")
+        yield_notifications.setCheckable(True)
+        yield_notifications.triggered.connect(self._set_yield_to_notifications)
+        actions[YIELD_NOTIFICATIONS] = yield_notifications
+
         remember_position = self._menu.addAction("Remember position per app")
         remember_position.setCheckable(True)
         remember_position.triggered.connect(self._set_remember_position)
@@ -2499,6 +2541,9 @@ class LyricsWindow(QWidget):
         self._menu_actions[ECHO].setChecked(self._echo_enabled)
         self._menu_actions[ALBUM_COLOUR].setChecked(self._album_colour)
         self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
+        self._menu_actions[YIELD_NOTIFICATIONS].setChecked(
+            self._yield_to_notifications
+        )
         self._menu_actions[REMEMBER_POSITION].setChecked(self._remember_position)
         # The system's answer, not ours: the tick follows what macOS says,
         # so flipping it in System Settings shows up here rather than the
@@ -2596,6 +2641,13 @@ class LyricsWindow(QWidget):
         if visible:
             self._render()  # catch up with whatever happened while hidden
         self._refresh_menu()
+        # Hiding gives the opacity back before the flight borrows it: a
+        # window that goes away faded would come back faded, because the
+        # yield is a level and not something the flight restores. Showing
+        # starts looking again, and the first poll settles it.
+        if not visible:
+            self._stop_yield()
+        self._update_yield_watch()
         self._begin_flight(visible)
 
     # -- leaving for the menu bar, and coming back -------------------------
@@ -2705,7 +2757,8 @@ class LyricsWindow(QWidget):
         self._flight_progress = progress
         frame = flight.frame_at(progress, self._flight_home, self._flight_to)
         self.move(frame.x, frame.y)
-        self.setWindowOpacity(self._opacity * frame.opacity)
+        self._flight_opacity = frame.opacity
+        self._apply_window_opacity()
         self._set_content_scale(frame.scale)
 
     def _land(self, showing: bool) -> None:
@@ -2740,7 +2793,8 @@ class LyricsWindow(QWidget):
             self.move(self._flight_home[0], self._flight_home[1])
             self._flight_home = None
         self._flight_to = None
-        self.setWindowOpacity(self._opacity)
+        self._flight_opacity = 1.0
+        self._apply_window_opacity()
         self._set_content_scale(1.0)
         self._end_native_flight()
 
@@ -2750,6 +2804,159 @@ class LyricsWindow(QWidget):
             self._flight_anim.stop()
             self._flight_anim = None
         self._end_flight()
+
+    # -- getting out of a notification's way -------------------------------
+
+    def _set_yield_to_notifications(self, enabled: bool) -> None:
+        """Turn the layer on or off.
+
+        Off stops the looking as well as the fading — the timer is stopped,
+        so with the layer off this app is not asking the window server
+        anything. The same literal reading of the layers principle that
+        removes the activation subscription with per-app positions off:
+        off has to equal the app before the feature was written, not the
+        app quietly still polling.
+
+        Switching it on does not fade anything by itself. The first poll is
+        a third of a second away and will fade if there is something there,
+        which is the same answer arrived at honestly rather than a guess
+        made at the moment a menu item was ticked.
+        """
+        self._yield_to_notifications = enabled
+        self._settings.setValue("window/yield_notifications", enabled)
+        if enabled:
+            self._update_yield_watch()
+            logger.info(
+                "yield to notifications on: polling every %.0fms, ceiling %.2f",
+                notifications.POLL_SECONDS * 1000,
+                notifications.YIELD_CEILING,
+            )
+        else:
+            logger.info("yield to notifications off: no longer polling")
+            self._yield_timer.stop()
+            self._stop_yield()
+        self._refresh_menu()
+
+    def _update_yield_watch(self) -> None:
+        """Poll only while the layer is on and the window is on screen.
+
+        A hidden window is not in anybody's way, so there is nothing to
+        look for — and this is the cheapest half of "poll only as often as
+        needed", because it is the difference between polling and not
+        polling at all rather than between two intervals. Called from both
+        of the things it depends on, so neither has to know about the
+        other's state.
+        """
+        wanted = self._yield_to_notifications and self._lyrics_visible
+        if wanted == self._yield_timer.isActive():
+            return
+        if wanted:
+            self._yield_timer.start()
+            logger.debug("yield: watching for notifications")
+        else:
+            self._yield_timer.stop()
+            logger.debug("yield: stopped watching")
+
+    def _check_notifications(self) -> None:
+        """One poll: is the notification system over this window?
+
+        The refusal is asked first and it is not only a gate — a pass that
+        starts, or a window that is hidden, while the window is already
+        faded has to hand the opacity back, or the window would be left
+        faint for a banner that has long gone.
+        """
+        refusal = notifications.yield_refusal(
+            enabled=self._yield_to_notifications,
+            visible=self._lyrics_visible,
+            syncing=self._syncing,
+            flying=self._flight_anim is not None,
+        )
+        if refusal is not None:
+            if self._yielding or self._yield_level:
+                logger.debug("yield: giving the opacity back, %s", refusal)
+                self._set_yielding(False)
+            return
+        rect = self.frameGeometry()
+        window = (rect.x(), rect.y(), rect.width(), rect.height())
+        occupied = notifications.occupied_rects()
+        covered = notifications.in_the_way(window, occupied)
+        if covered == self._yielding:
+            return
+        logger.debug(
+            "yield: %s — window at %r, notification at %r",
+            "fading" if covered else "clearing",
+            window,
+            occupied,
+        )
+        self._set_yielding(covered)
+
+    def _set_yielding(self, yielding: bool) -> None:
+        """Move the yield level towards where it now belongs.
+
+        Retargeted from the level the window actually reached, not from the
+        one the last animation was heading for — the tint cross-fade's rule
+        and the flight's, so a banner that clears while the window is still
+        fading turns around from halfway rather than completing a fade
+        nobody is waiting for. ``duration_ms`` makes that turn cost what
+        the remaining distance is worth.
+        """
+        self._yielding = yielding
+        end = 1.0 if yielding else 0.0
+        start = self._yield_level
+        if self._yield_anim is not None:
+            self._yield_anim.stop()
+            self._yield_anim = None
+        if start == end:
+            # Already there — including the case where the layer is
+            # switched off having never faded anything.
+            self._yield_level = end
+            self._apply_window_opacity()
+            return
+        animation = QVariantAnimation(self)
+        animation.setDuration(notifications.duration_ms(start, end))
+        animation.setEasingCurve(_YIELD_CURVE)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.valueChanged.connect(self._on_yield_step)
+        animation.finished.connect(self._end_yield)
+        animation.start()
+        self._yield_anim = animation
+        logger.debug(
+            "yield: level %.2f → %.2f in %dms",
+            start,
+            end,
+            animation.duration(),
+        )
+
+    def _on_yield_step(self, value) -> None:
+        """One frame. The level is the only thing that moves; what it means
+        for the window's opacity is decided in one place, together with the
+        user's own setting and whatever a flight is doing."""
+        self._yield_level = float(value)
+        self._apply_window_opacity()
+
+    def _end_yield(self) -> None:
+        """Land on the level exactly, rather than wherever the last frame
+        happened to fall."""
+        self._yield_level = 1.0 if self._yielding else 0.0
+        self._yield_anim = None
+        self._apply_window_opacity()
+
+    def _stop_yield(self) -> None:
+        """Give the opacity back at once, with no fade.
+
+        For the paths where a fade would be wrong or pointless: the layer
+        being switched off (the user asked for the window back, not for it
+        to drift back), and shutdown. Goes through the same level and the
+        same composition as everything else, so there is no second idea of
+        what "not yielding" looks like.
+        """
+        if self._yield_anim is not None:
+            self._yield_anim.stop()
+            self._yield_anim = None
+        self._yielding = False
+        self._yield_level = 0.0
+        self._apply_window_opacity()
 
     def _toggle_lyrics_visible(self) -> None:
         """What the global hotkey does, and all it does.
@@ -3133,7 +3340,21 @@ class LyricsWindow(QWidget):
 
     def _set_opacity(self, value: float) -> None:
         self._opacity = max(_MIN_OPACITY, min(_MAX_OPACITY, value))
-        self.setWindowOpacity(self._opacity)
+        self._apply_window_opacity()
+
+    def _apply_window_opacity(self) -> None:
+        """The one place that decides how solid the window is.
+
+        Three things have an opinion and they compose rather than compete:
+        the user's own setting is the baseline, a yield takes it down
+        towards a ceiling, and a flight scales whatever is left as the
+        window leaves for the menu bar. Every one of them used to call
+        setWindowOpacity itself, which worked only because no two of them
+        were ever true at once — and a fade to a notification that landed
+        during a flight would have been the first pair.
+        """
+        base = notifications.yielded_opacity(self._opacity, self._yield_level)
+        self.setWindowOpacity(base * self._flight_opacity)
 
     def _restore_settings(self) -> None:
         try:
@@ -3206,7 +3427,16 @@ class LyricsWindow(QWidget):
                 "per-app positions off (%d remembered) — not watching activations",
                 len(self._positions),
             )
+        # Assigned rather than routed through the setter, for the same
+        # reason as the layer above: this runs before the menu is built and
+        # the setter refreshes the menu. Watching depends on both this and
+        # the saved visibility, so it is started after the pair of them
+        # rather than beside either one.
+        self._yield_to_notifications = self._settings.value(
+            "window/yield_notifications", False, type=bool
+        )
         self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
+        self._update_yield_watch()
         # Open at Login is NOT restored from here: the stored value is what
         # the user last asked for, and the system is what is actually true.
         # Reading it back is the whole point, so the setting is only ever
@@ -3228,6 +3458,9 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/album_colour", self._album_colour)
         self._settings.setValue("window/visible", self._lyrics_visible)
         self._settings.setValue("window/remember_position", self._remember_position)
+        self._settings.setValue(
+            "window/yield_notifications", self._yield_to_notifications
+        )
         self._settings.setValue("window/app_positions", self._positions.to_json())
 
     def _shutdown(self) -> None:
@@ -3261,6 +3494,13 @@ class LyricsWindow(QWidget):
         self._watcher.stop()
         self._settle_timer.stop()
         self._stop_move()
+        # Stopped before the save, like the flight below and for a milder
+        # version of the same reason: a poll landing mid-teardown would ask
+        # the window server about a window being destroyed. The level goes
+        # back too — it is not persisted, but leaving the window faint while
+        # it is torn down would be visible.
+        self._yield_timer.stop()
+        self._stop_yield()
         # Before the save: a flight holds the window's real position while
         # it is away, and saving mid-journey would persist the menu bar's
         # corner as where the user left it.

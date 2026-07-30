@@ -52,6 +52,31 @@ _SYNC_BAR_GAP = 6
 RESIZE_MARGIN = 8
 
 
+def intersects(
+    first: tuple[int, int, int, int], second: tuple[int, int, int, int]
+) -> bool:
+    """Whether two rectangles share any area at all.
+
+    Touching edges do not count: a window whose right edge is exactly a
+    screen's left edge is not on that screen, and a notification whose
+    rectangle stops where the window starts is not over it.
+
+    Lives here rather than in either caller because two of them now ask the
+    same question — flight.py, about whether the menu bar item is on any
+    screen, and notifications.py, about whether something is covering the
+    window. Three lines of arithmetic in two places is still two places for
+    the boundary case to be decided differently.
+    """
+    ax, ay, awidth, aheight = first
+    bx, by, bwidth, bheight = second
+    return (
+        ax < bx + bwidth
+        and bx < ax + awidth
+        and ay < by + bheight
+        and by < ay + aheight
+    )
+
+
 def button_side(scale: float) -> int:
     """Overlay button box edge at this scale, floored at a comfortable
     click target."""

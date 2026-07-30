@@ -3,6 +3,51 @@
 Milestones in the order they happened. Dates are commit dates; the deeper
 reasoning behind each is in [docs/](docs/).
 
+## Milestone 16 — yield to notifications
+
+The window floats *above* notification banners — level 25 against their 21
+— so when one arrives over the same corner of the screen, this app is what
+is covering somebody's mail. It now **fades out of the way** while a banner
+or the Notification Centre is over it, to opacity 0.15 over 260 ms, and
+comes back the same way when the way is clear. Off by default.
+
+Fading, never moving: moving would fight per-app position memory for
+ownership of where the window lives, and would then have to decide when and
+where to move back.
+
+**It needs no permission, and that was measured rather than assumed** — with
+a throwaway app bundle whose identifier had never been granted anything,
+not from a terminal that inherits its editor's grant. The window list hands
+back owner, PID, layer, bounds and on-screen state with no prompt and no TCC
+entry. Exactly one field is withheld, `kCGWindowName`, the window's *title*,
+and the app never asks for it; two tests forbid the module from mentioning
+it or any screen-capture entry point.
+
+Keyed on the bundle identifier rather than the owner's name, because that
+name is **localised** — "Notification Centre" here, "Notification Center" in
+the US — and a string match on it would have worked for whoever wrote it and
+silently never fired for half the people who ran it. Control Centre is
+deliberately excluded: it owns eleven permanently on-screen windows, and
+yielding to it would fade the window once and never bring it back.
+
+The rectangle macOS reports for a banner is **the whole display**, and the
+page says so rather than dressing it up: there is no public way to find the
+banner's own rect that does not involve capturing its pixels, which is the
+one thing that would need the permission this avoids. So the overlap test
+discriminates by display, and narrows for free if Apple ever reports
+something tighter.
+
+Costs 0.105 ms of CPU per poll — 0.035% of one core at 300 ms, against 2.3%
+for the line change. Traced live: the fade starts 90 ms after a banner
+appears and 190 ms after it clears, both inside one poll interval.
+
+And a correction kept in the docs because the obvious assumption is wrong:
+the banner's **own** text contrast is never the casualty. It *rises* under
+the window's pale panel — 8.32:1 alone, 12.90:1 fully covered — and never
+approaches 4.5:1 at any ceiling. The first measurement said the opposite,
+because it sampled the whole window rectangle where most of the pixels are
+the app behind. Looking at the capture is what found it.
+
 ## Milestone 15 — menu bar presence
 
 The window no longer blinks out when you hide it: it **shrinks and fades

@@ -28,6 +28,13 @@ because they cannot act; this one can always be answered and is a standing
 preference about the window, so appearing and vanishing with each track
 would hide it exactly when someone goes looking — before the music starts.
 
+Show on all desktops, [Remember position per app](per-app-position.md) and
+[Yield to notifications](notification-yield.md) are always visible for the
+same reason: each is a standing preference about the window rather than
+about the song. Gating the last of those on a notification being up right
+now would offer it for five seconds at a time, which is not a way to find a
+setting.
+
 **Quit is visible in every state.** The menu bar item is the way back from
 a hidden window, so it must never be a dead end.
 

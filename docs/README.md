@@ -31,6 +31,8 @@ the reasoning: what was decided, why, and what was measured to check it.
   that shaped it
 - [Per-app window position](per-app-position.md) — following the app you
   switched to, and the clock bug behind it
+- [Yielding to notifications](notification-yield.md) — fading out of a
+  banner's way, and why it needs no permission
 - [Motion and typography](motion-and-typography.md) — the line change, the
   type scale, and how motion is verified
 

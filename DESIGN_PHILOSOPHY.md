@@ -156,6 +156,21 @@ proved it was nearly free — and then cut by two thirds because what the
 floor permits is not what looks right. The measurement was correct; the
 inference from it was not.
 
+The sharper version of the same lesson: a measurement can be of the wrong
+*quantity*, and a number carries no warning that its label is wrong.
+Milestone 16 measured a notification banner's "text contrast" through the
+window and found it collapsing to 1.50:1 — a clean, plausible, repeatable
+result, and not what it claimed to be. The sample covered the whole window
+rectangle, where most of the pixels are the app behind the banner, so
+"text" was the banner's pale body and "background" was a dark editor.
+Cropped to the banner, its own text contrast turns out to *rise* under the
+window and never to approach 4.5:1 at all.
+
+**Looking at the artefact is what caught it** — the capture, not the number
+derived from it. So a pixel measurement is not finished until someone has
+seen the pixels, which is principle 7 turned back on the verification
+itself.
+
 ## 9. The user's own work is not cache
 
 `.lyrics_cache/` and `.artwork_cache/` are derived data: everything in

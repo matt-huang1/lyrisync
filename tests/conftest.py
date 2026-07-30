@@ -178,6 +178,23 @@ def _no_real_world():
 
     patch.setattr(frontmost, "_workspace", guard_workspace)
 
+    # -- the developer's own windows --------------------------------------
+    # CGWindowListCopyWindowInfo answers with every window open on the
+    # machine — which apps are running, where their windows are, how big
+    # they are. The app needs one bit of that (is the notification system on
+    # screen) and the suite needs none of it: a test that read the real list
+    # would be a test whose result depends on what the developer happens to
+    # have open, which is the other reason to shut this door. One door in
+    # the module, same as the three above.
+    from lyrisync import notifications
+
+    def guard_quartz():
+        raise _violation(
+            "CGWindowList — a test may not read the developer's own windows"
+        )
+
+    patch.setattr(notifications, "_quartz", guard_quartz)
+
     # -- the developer's own settings -------------------------------------
     # QSettings("lyrisync", "lyrisync") is the real ~/Library/Preferences
     # entry: the user's window position, size, opacity and every toggle.

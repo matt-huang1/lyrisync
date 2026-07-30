@@ -28,7 +28,10 @@ Everything that can be logic rather than widget is:
 | `transition.py` | which line change is in flight (the dedupe) |
 | `loop.py` | line looping and echo-practice phases |
 | `menu.py` | which entries are visible, and their labels |
-| `geometry.py` | minimum height, button boxes, drag clamping |
+| `geometry.py` | minimum height, button boxes, drag clamping, rect intersection |
+| `flight.py` | the journey to and from the menu bar item |
+| `app_positions.py` | the per-app position map, the settling rule, the gates |
+| `notifications.py` | the overlap and opacity rules for yielding — plus one native door |
 | `typography.py` | the type scale — imported by `geometry.py` |
 | `appearance.py` | both palettes, the album tint maths |
 | `gestures.py` | scroll and wheel routing |
@@ -37,6 +40,13 @@ Everything that can be logic rather than widget is:
 None of them imports Qt. That is why the contrast floor, the type scale
 and the state machine can all be tested on a Linux runner with no display,
 and why `window.py` is wiring rather than logic.
+
+`notifications.py` is the one entry above that is not purely pure: its
+rules are, and one function — `_quartz()` — is the single door to the
+window list, the same shape as `frontmost._workspace()`,
+`hotkey._carbon()` and `login_item._main_app_service()`. Each of those four
+doors is shut by `tests/conftest.py`, so a test can never reach the
+developer's keyboard, workspace, login items or windows.
 
 ## Threads
 

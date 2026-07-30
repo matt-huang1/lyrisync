@@ -59,6 +59,7 @@ from lyrisync import hotkey  # noqa: E402
 from lyrisync import login_item  # noqa: E402
 from lyrisync import menu as m  # noqa: E402
 from lyrisync import menubar as mb  # noqa: E402
+from lyrisync import notifications as n  # noqa: E402
 from lyrisync import vibrancy  # noqa: E402
 from lyrisync import window as w  # noqa: E402
 from lyrisync.artwork import ArtworkProvider  # noqa: E402
@@ -334,6 +335,7 @@ def test_bare_menu_when_every_layer_is_dormant(make_window):
         m.SEPARATOR_AFTER_SHOW,
         m.ALBUM_COLOUR,
         m.ALL_DESKTOPS,
+        m.YIELD_NOTIFICATIONS,
         m.REMEMBER_POSITION,
         m.SEPARATOR_BEFORE_QUIT,
         m.QUIT,
@@ -2887,3 +2889,357 @@ def test_the_all_desktops_toggle_cannot_touch_the_activation_policy():
     assert callable(w.apply_accessory_policy)
     source = w.LyricsWindow._apply_all_desktops.__doc__ or ""
     assert "activation policy is NOT part of this" in source
+
+
+# -- getting out of a notification's way ----------------------------------
+#
+# The pure rules — what overlaps, how faint, how long — live in
+# test_notifications.py. These cover what only a real window can answer:
+# that the timer follows the layer, that the three things with an opinion
+# about opacity compose, and that every path out of a fade gives it back.
+#
+# occupied_rects is stubbed rather than blocked. The conftest guard shuts
+# the door underneath it and stays armed for anything reaching around;
+# handing back rectangles here is what lets the poll be driven on a machine
+# with no notification centre at all, which is every CI runner.
+
+
+DISPLAY_RECT = (0, 0, 1710, 1107)
+
+# windowOpacity() does not hand back what it was given: Qt stores it as an
+# 8-bit alpha, so 0.15 reads back as 38/255 = 0.14902. Measured, not
+# guessed at — the first version of these tests compared exactly and failed
+# on the third decimal. The same 8-bit residue the album tint's luminance
+# sweep runs into, and the tolerance for reading a real window's opacity.
+OPACITY_STEP = 1 / 255
+
+
+def notifications_at(monkeypatch, *rects):
+    """What the next poll will see. Returns the call log, so a test can
+    assert the layer is not looking at all."""
+    calls = []
+
+    def occupied():
+        calls.append(True)
+        return tuple(rects)
+
+    monkeypatch.setattr(w.notifications, "occupied_rects", occupied)
+    return calls
+
+
+def settle_yield(window):
+    """Run the fade to its end without waiting it out — the same shape as
+    land() for the flight."""
+    if window._yield_anim is not None:
+        window._yield_anim.setCurrentTime(window._yield_anim.duration())
+    APP.processEvents()
+
+
+def test_yielding_to_notifications_is_off_by_default(make_window):
+    """Default off, like every layer. And off means not looking: the timer
+    is the whole of the watching, so an inactive timer is the layers
+    principle taken literally."""
+    window = make_window()
+    assert window._yield_to_notifications is False
+    assert window._yield_timer.isActive() is False
+    assert window._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is False
+
+
+def test_the_layer_being_off_asks_nothing(make_window, monkeypatch):
+    """Not merely ignored — never asked. A poll that arrived anyway must
+    still not read the window list."""
+    window = make_window()
+    calls = notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    assert calls == []
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_switching_it_on_starts_watching_and_off_stops(make_window):
+    window = make_window()
+    window._set_yield_to_notifications(True)
+    assert window._yield_timer.isActive() is True
+    assert window._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is True
+
+    window._set_yield_to_notifications(False)
+    assert window._yield_timer.isActive() is False
+    assert window._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is False
+
+
+def test_switching_it_on_fades_nothing_by_itself(make_window, monkeypatch):
+    """The first poll is a third of a second away and will answer honestly.
+    Fading at the moment a menu item is ticked would be a guess."""
+    window = make_window()
+    calls = notifications_at(monkeypatch, DISPLAY_RECT)
+    window._set_yield_to_notifications(True)
+    assert calls == []
+    assert window._yield_level == 0.0
+
+
+def test_a_notification_over_the_window_fades_it(make_window, monkeypatch):
+    window = make_window()
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+
+    window._check_notifications()
+    assert window._yielding is True
+    settle_yield(window)
+    assert window.windowOpacity() == pytest.approx(n.YIELD_CEILING, abs=OPACITY_STEP)
+
+
+def test_the_users_opacity_comes_back_when_it_clears(make_window, monkeypatch):
+    window = make_window()
+    window._set_opacity(0.8)
+    window._set_yield_to_notifications(True)
+
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+    assert window.windowOpacity() == pytest.approx(n.YIELD_CEILING, abs=OPACITY_STEP)
+
+    notifications_at(monkeypatch)  # the banner has gone
+    window._check_notifications()
+    settle_yield(window)
+    assert window.windowOpacity() == pytest.approx(0.8, abs=OPACITY_STEP)
+    assert window._yield_level == 0.0
+
+
+def test_a_notification_that_does_not_reach_the_window_is_left_alone(
+    make_window, monkeypatch
+):
+    """A banner on another display. The intersection is real arithmetic, so
+    this is the same code path as the overlapping case rather than a
+    branch."""
+    window = make_window()
+    window.move(200, 200)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, (5000, 0, 1710, 1107))
+
+    window._check_notifications()
+    assert window._yielding is False
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_an_already_dimmed_window_is_never_brightened(make_window, monkeypatch):
+    """The user has scrolled the window down to the floor. Yielding takes it
+    further, never back up — measured against their own setting, not against
+    full opacity."""
+    window = make_window()
+    window._set_opacity(w._MIN_OPACITY)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+
+    seen = []
+    for step in range(0, 11):
+        window._yield_level = step / 10
+        window._apply_window_opacity()
+        seen.append(window.windowOpacity())
+    assert max(seen) <= w._MIN_OPACITY + 1e-6
+    assert seen == sorted(seen, reverse=True)
+
+
+def test_a_repeat_poll_while_faded_starts_no_second_fade(make_window, monkeypatch):
+    """Three polls a second land inside every banner. An announcement of
+    what is already true is not news — the same dedupe shape as the line
+    change's target index."""
+    window = make_window()
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+
+    window._check_notifications()
+    settle_yield(window)
+    assert window._yield_anim is None
+
+    window._check_notifications()
+    window._check_notifications()
+    assert window._yield_anim is None
+    assert window.windowOpacity() == pytest.approx(n.YIELD_CEILING, abs=OPACITY_STEP)
+
+
+def test_a_banner_clearing_mid_fade_turns_around_from_where_it_got_to(
+    make_window, monkeypatch
+):
+    """The interruption case. It retargets from the level the window
+    actually reached and pays for the distance left, rather than finishing a
+    fade nobody is waiting for."""
+    window = make_window()
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+
+    halfway = window._yield_anim
+    halfway.setCurrentTime(halfway.duration() // 2)
+    APP.processEvents()
+    reached = window._yield_level
+    assert 0.0 < reached < 1.0
+
+    notifications_at(monkeypatch)
+    window._check_notifications()
+    assert window._yield_anim is not None
+    assert window._yield_anim.startValue() == pytest.approx(reached)
+    assert window._yield_anim.duration() < n.YIELD_MS
+
+    settle_yield(window)
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_a_sync_pass_is_never_faded_under_the_user(make_window, monkeypatch):
+    """Principle 6: the pass is the user tapping this window once per line,
+    and a decorative feature does not get to fade an essential one. A pass
+    beginning while the window is already faint hands the opacity back."""
+    window = make_window()
+    load(window, PLAIN)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+    assert window._yielding is True
+
+    window._begin_sync()
+    assert window._syncing is True
+    window._check_notifications()
+    settle_yield(window)
+    assert window._yielding is False
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_hiding_the_window_hands_the_opacity_back_and_stops_watching(
+    make_window, monkeypatch
+):
+    """A hidden window is in nobody's way, so there is nothing to look for.
+    The level goes back BEFORE the flight borrows the opacity — a window
+    that went away faded would come back faded, because the flight restores
+    its own factor and not this one."""
+    window = make_window()
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+
+    window._set_lyrics_visible(False)
+    assert window._yield_level == 0.0
+    assert window._yield_timer.isActive() is False
+    land(window)
+
+    window._set_lyrics_visible(True)
+    land(window)
+    assert window._yield_timer.isActive() is True
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_a_flight_and_a_yield_compose_rather_than_overwrite(make_window, monkeypatch):
+    """The pair that could not happen before this milestone and now can.
+    Both scale the same window, so they multiply — and neither may reset the
+    other's contribution on its way out."""
+    window = make_window()
+    window._set_opacity(0.9)
+    window._yield_level = 1.0
+    window._flight_opacity = 0.5
+    window._apply_window_opacity()
+    assert window.windowOpacity() == pytest.approx(n.YIELD_CEILING * 0.5, abs=OPACITY_STEP)
+
+    window._end_flight()
+    assert window.windowOpacity() == pytest.approx(n.YIELD_CEILING, abs=OPACITY_STEP)
+
+
+def test_switching_the_layer_off_gives_the_window_back_at_once(
+    make_window, monkeypatch
+):
+    """No fade on the way out of the layer: the user asked for the window
+    back, not for it to drift back."""
+    window = make_window()
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+
+    window._set_yield_to_notifications(False)
+    assert window._yield_anim is None
+    assert window._yield_level == 0.0
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_the_setting_survives_a_restart(make_window):
+    """And restoring it on must not need the menu to exist yet: the setter
+    refreshes the menu, and _restore_settings runs before it is built —
+    which is the bug the previous layer shipped and this one inherits the
+    fix for."""
+    first = make_window()
+    first._set_yield_to_notifications(True)
+    first._save_settings()
+    first._settings.sync()
+
+    second = make_window()
+    assert second._yield_to_notifications is True
+    assert second._yield_timer.isActive() is True
+    assert second._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is True
+
+
+def test_a_restored_hidden_window_does_not_start_watching(make_window):
+    """Both halves are read at startup, and watching depends on the pair."""
+    first = make_window()
+    first._set_yield_to_notifications(True)
+    first._set_lyrics_visible(False)
+    first._save_settings()
+    first._settings.sync()
+
+    second = make_window()
+    assert second._yield_to_notifications is True
+    assert second._lyrics_visible is False
+    assert second._yield_timer.isActive() is False
+
+
+def test_shutdown_stops_watching_and_hands_the_opacity_back(
+    make_window, monkeypatch
+):
+    """A poll landing mid-teardown would ask the window server about a
+    window being destroyed."""
+    window = make_window()
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+
+    window._shutdown()
+    assert window._yield_timer.isActive() is False
+    assert window._yield_anim is None
+    assert window._yield_level == 0.0
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_the_yield_is_never_written_into_the_saved_opacity(make_window, monkeypatch):
+    """What gets persisted is what the user chose, not what a banner
+    happened to be doing when the app quit."""
+    window = make_window()
+    window._set_opacity(0.7)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+
+    window._save_settings()
+    assert window._settings.value("window/opacity", type=float) == pytest.approx(0.7)
+
+
+def test_only_one_place_writes_the_windows_opacity():
+    """Three things scale the window now — the user's setting, a yield and a
+    flight — and each of them used to call setWindowOpacity directly. That
+    worked only because no two were ever true at once. Enforced as a source
+    scan rather than trusted, because a fourth caller would pass every
+    behavioural test above while quietly dropping the other two."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(w))
+    callers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "setWindowOpacity"
+            for inner in ast.walk(node)
+        )
+    }
+    assert callers == {"_apply_window_opacity"}

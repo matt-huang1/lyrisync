@@ -17,6 +17,10 @@ dependencies = [
     # SMAppService, for Open at Login. Separate from Cocoa because pyobjc
     # ships one package per framework.
     "pyobjc-framework-ServiceManagement>=10.0; sys_platform == 'darwin'",
+    # CGWindowListCopyWindowInfo, to see when a notification is over the
+    # window. Needs no permission (see notifications.py) and is the only
+    # thing this pulls in from Quartz.
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
     # Revised Romanization for the Korean pronunciation line.
     "korean-romanizer>=0.25",
 ]

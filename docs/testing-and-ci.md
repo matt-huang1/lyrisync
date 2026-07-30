@@ -25,20 +25,31 @@ than by the suite: real `QSettings` writes, real player commands, a tray
 test that never actually ran, and a live LRCLIB fetch that aborted CI
 mid-handshake.
 
-Six doors are shut for the whole session:
+Eight doors are shut for the whole session:
 
 | guard | catches |
 |---|---|
 | outbound sockets (at `socket`, not `urllib`) | any lyrics or artwork fetch, however it is made |
 | `subprocess.run` / `Popen` | `osascript` to Spotify, `say` to the speakers |
-| a `LyricsProvider` on its default directories | anything that would read or write the real caches |
+| a `LyricsProvider` on its default directories | anything that would read or write the real caches — `.user_syncs/` included |
+| an `ArtworkProvider` on its default directory | the real `.artwork_cache/`, and the CDN a miss would reach for |
 | `QSettings("lyrisync", "lyrisync")` | the real `~/Library/Preferences` plist |
+| `login_item._main_app_service()` | leaving a real login item on the developer's Mac |
 | `hotkey._carbon()` | claiming ⇧⌘J from whoever is running the suite |
 | `frontmost._workspace()` | observing the developer's own app switching |
+| `notifications._quartz()` | reading every window open on the machine |
 
-The last two are the same shape for the same reason: both would outlive
-the test that started them and keep calling into a window that has since
-been destroyed.
+The last four are the same shape and each module has exactly **one** native
+door for that reason. Three of them would outlive the test that started
+them and keep calling into a window that has since been destroyed; the
+fourth reads which apps are running and where their windows are, which is
+both none of the suite's business and a result that would depend on what
+the developer happens to have open.
+
+Two of those doors have structural tests as well as behavioural ones — the
+native imports must appear in exactly one place, inside the door — because
+a second import site would pass every behavioural test while quietly
+reopening it.
 
 Loopback sockets are allowed — Qt and pytest use them internally.
 

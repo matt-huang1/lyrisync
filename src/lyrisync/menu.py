@@ -17,6 +17,7 @@ SPEECH_RATE = "speech_rate"
 ECHO = "echo"
 ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
+YIELD_NOTIFICATIONS = "yield_notifications"
 REMEMBER_POSITION = "remember_position"
 POSITION_STATUS = "position_status"
 POSITION_LIST = "position_list"
@@ -38,6 +39,7 @@ MENU_ORDER = (
     ECHO,
     ALBUM_COLOUR,
     ALL_DESKTOPS,
+    YIELD_NOTIFICATIONS,
     REMEMBER_POSITION,
     POSITION_STATUS,
     POSITION_LIST,
@@ -65,8 +67,21 @@ MENU_ORDER = (
 # anything is playing and whether or not any position has been learned
 # yet. Its companion — forgetting what was learned — is NOT here, because
 # that one genuinely cannot act on an empty map.
+#
+# Yielding to notifications, likewise: a standing preference about how the
+# window behaves when it is in somebody's way, which has nothing to do with
+# what is playing and everything to do with the window. Gating it on a
+# notification being on screen right now would offer it for five seconds at
+# a time, which is not a way to find a setting.
 ALWAYS_VISIBLE = frozenset(
-    {SHOW_LYRICS, ALBUM_COLOUR, ALL_DESKTOPS, REMEMBER_POSITION, QUIT}
+    {
+        SHOW_LYRICS,
+        ALBUM_COLOUR,
+        ALL_DESKTOPS,
+        YIELD_NOTIFICATIONS,
+        REMEMBER_POSITION,
+        QUIT,
+    }
 )
 
 

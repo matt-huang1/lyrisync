@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional, Sequence
 
+from lyrisync.geometry import intersects
+
 # A rectangle as (x, y, width, height), top-left origin — screen
 # coordinates the way Qt reports them, not Cocoa's.
 Rect = tuple[int, int, int, int]
@@ -76,13 +78,7 @@ def item_usable(item: Optional[Rect], screens: Sequence[Rect]) -> bool:
     x, y, width, height = item
     if width <= 0 or height <= 0:
         return False
-    return any(_intersects(item, screen) for screen in screens)
-
-
-def _intersects(first: Rect, second: Rect) -> bool:
-    ax, ay, aw, ah = first
-    bx, by, bw, bh = second
-    return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+    return any(intersects(item, screen) for screen in screens)
 
 
 def centre(rect: Rect) -> tuple[float, float]:
