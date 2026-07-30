@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 
+from sottovoce.failure import describe
 from sottovoce.lyrics_provider import LyricsError, LyricsProvider, TrackLyrics
 from sottovoce.player_monitor import PlaybackState, PlayerMonitor, PlayerSnapshot
 from sottovoce.sync import current_line_index
@@ -82,7 +83,14 @@ class LyricsApp:
         try:
             lyrics = self.provider.get_lyrics(snapshot)
         except LyricsError as exc:
-            self._println(f"  lyrics unavailable ({exc}) — will retry next track")
+            # The same words the window keeps behind its info control, from
+            # the same function: two surfaces describing one failure two
+            # ways is how they came to disagree about a song's title once
+            # already (view_model.HEADER_SEPARATOR).
+            self._println(
+                f"  lyrics unavailable, will retry next track: "
+                f"{describe(exc.failure)}"
+            )
             return
         if lyrics is None:
             self._println("  no lyrics found")
@@ -117,7 +125,7 @@ def main() -> int:
         on_position_update=app.on_position_update,
         on_state_change=app.on_state_change,
     )
-    print("sottovoce — synced lyrics from LRCLIB, Ctrl-C to quit")
+    print("sottovoce · synced lyrics from LRCLIB, Ctrl-C to quit")
     try:
         monitor.run()
     except KeyboardInterrupt:

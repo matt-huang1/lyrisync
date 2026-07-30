@@ -376,3 +376,39 @@ def test_the_spec_refuses_to_build_on_a_mismatch(spec_tree):
         if isinstance(node, ast.Raise)
     ]
     assert raising, "a mismatch has to stop the build, not warn about it"
+
+
+def test_the_readme_installs_the_extras_that_exist():
+    """The install line is the one a real person follows, so it is the one
+    that gets noticed when it breaks — the same argument the clone URL
+    above rests on.
+
+    It broke: the build instructions installed ``".[build]"`` and then told
+    the reader to run the suite, which fails with "No module named pytest"
+    because pytest is the `dev` extra. A missing extra, not a broken
+    checkout, and nothing compared the two.
+    """
+    import re
+    import tomllib
+
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    project = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    declared = set(project["project"]["optional-dependencies"])
+
+    asked_for = set()
+    for match in re.finditer(r'pip install -e "\.\[([\w,\s-]+)\]"', readme):
+        asked_for.update(name.strip() for name in match.group(1).split(","))
+    assert asked_for, "the README no longer shows an extras install to check"
+    assert asked_for <= declared, (
+        f"the README installs {sorted(asked_for - declared)}, which "
+        f"pyproject.toml does not define"
+    )
+    # And the suite's own dependency is one of them, or the instructions
+    # tell somebody to run `make test` against a checkout that cannot.
+    assert "dev" in asked_for
+    assert any(
+        "pytest" in requirement
+        for requirement in project["project"]["optional-dependencies"]["dev"]
+    )

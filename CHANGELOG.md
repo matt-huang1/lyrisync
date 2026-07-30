@@ -6,6 +6,44 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Session D — a polish sweep, and three settings nobody had asked about
+
+**Every em dash in a user-visible string is gone**, and there were 29.
+Three replacements, one per context: a middle dot where two things are
+named side by side, following `HEADER_SEPARATOR`, which had already made
+that argument for the song and its artist and was the only place obeying
+it; a colon where the second half follows from the first; a comma where
+the two halves are one sentence. A test scans the syntax of every module
+and exempts docstrings, because the file explaining the rule contains one.
+
+**A failed lookup will now say why, if asked.** The provider knew whether
+it was a 503, a timeout, an unreachable socket or an unreadable body, and
+which of the fallback attempts it happened on, and threw all of it away at
+the door. It now travels to the window, where a small ⓘ beside "lyrics
+unavailable, will retry" reveals it — and nothing else changed, because
+the default is for the people who do not care why. A track that genuinely
+has no lyrics still says "no lyrics found" and offers nothing to click.
+
+**The three macOS accessibility display settings are followed, live.**
+Reduce Motion takes the travel out of a line change and leaves the fade,
+and removes the flight and the travel to a remembered position outright.
+Reduce Transparency removes the vibrancy material and paints an opaque
+panel. Increase Contrast lifts every text role to 4.5:1 and every mark to
+3:1, measured — and dropping the material turns out to be worth more than
+any recolouring: the sung line goes from 4.70:1 to 17.93:1 in dark.
+
+**A Mac with no Spotify installed reported nothing at all.** The snapshot
+script cannot compile without Spotify's dictionary, so its own "is not
+running" first line was never reached, `poll_once` swallowed the error,
+and osascript was spawned three times a second forever for a script that
+could not run. It now answers "not running", which is the truth, from a
+second script that needs no dictionary — asked only on failure, and
+remembered.
+
+The README's demo GIF is centred, and its build instructions install the
+extra the suite actually needs: `".[build]"` alone builds a working app
+and then fails `make test` with "No module named pytest".
+
 ## Session C — a demo of the app as it is now
 
 **The README's GIF was 31 commits out of date.** It predated the menu bar

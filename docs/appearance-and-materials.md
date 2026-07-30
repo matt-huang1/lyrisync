@@ -130,3 +130,24 @@ capturing blocks repainting, so every capture comes back identical and the
 run looks like a stale-frame problem. macOS *also* hands back a stale
 frame on the first capture after a change, so the first one is thrown
 away.
+
+## When the system asks for no transparency
+
+Reduce Transparency (and Increase Contrast, which macOS turns it on with)
+takes the material away. It is **removed from its superview**, not hidden:
+a hidden `NSVisualEffectView` is still one, and `_begin_native_flight`
+hides and shows this view for its own reasons — which would put a
+suppressed material straight back the first time the window flew to the
+menu bar.
+
+`_apply_vibrancy` refuses to build one at all while the setting is on,
+which is what covers the first install in `showEvent` too, and the
+background becomes `palette.solid` at **alpha 255**. The shipped 232/236
+stay exactly as they are: they belong to a different case — vibrancy that
+could not be installed at all, off macOS or without pyobjc — and are
+measured for it.
+
+This costs the frost and buys a great deal of contrast, because the floor
+has always been measured with the material contributing nothing. The
+numbers are in
+[contrast and accessibility](contrast-and-accessibility.md#reduce-transparency).

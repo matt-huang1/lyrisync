@@ -94,3 +94,66 @@ A poll that fails (`osascript` timeout, Spotify quitting mid-call) keeps
 the previous snapshot rather than reporting "nothing is playing". Spotify
 not running and Spotify failing to answer one question are different
 things, and only the first should empty the window.
+
+## A Mac with no Spotify on it
+
+The snapshot script opens with
+
+```applescript
+if application "Spotify" is not running then return "not_running"
+```
+
+which reads like the answer to this and is not, because it is never
+reached. Everything below it is Spotify's **own** terminology — `player
+state`, `current track`, `spotify url`, `player position` — and AppleScript
+resolves terminology at **compile** time, out of the application bundle on
+disk. With no bundle to read, the script does not run and report "not
+running"; it fails to compile. Measured, by asking with an application
+name that is not installed:
+
+```
+141:146: syntax error: Expected “,” but found identifier. (-2741)
+```
+
+What that produced was an app that reported *nothing*: `poll_once`
+swallowed the error, no state callback ever fired, and osascript was
+spawned three times a second forever for a script that could not compile.
+The window happened to look right — "Spotify is not playing" is its
+initial state — which is exactly why nothing had ever noticed.
+
+The fix is a second script that needs no dictionary at all. `running` is a
+property of AppleScript's own generic application class, so
+`_RUNNING_SCRIPT` compiles anywhere:
+
+```applescript
+if application "Spotify" is not running then return "not_running"
+return "running"
+```
+
+It is asked **only when the snapshot fails**, which is what tells a Mac
+with no Spotify apart from a Mac whose osascript timed out while Spotify
+sat right there — the second is the transient failure the poll loop has
+always kept state across, and it is still re-raised.
+
+And the answer is **remembered**, because the two questions cost very
+different amounts:
+
+| | Spotify installed | application absent |
+|---|---|---|
+| snapshot script | 184 ms | fails to compile |
+| running probe | 37 ms | 182 ms |
+
+The 182 ms is LaunchServices going to look for something that is not
+there. Without the memory, a Mac with no Spotify pays for a doomed compile
+*and* a probe on every poll; with it, it settles into the probe alone —
+which is also what notices Spotify being installed later, since it is
+asked again every time.
+
+`run script` was measured as the alternative — one call always, with the
+terminology-dependent half deferred to runtime — and rejected: 199.9 ms
+against 183.9 ms median, 9% of a 300 ms poll interval paid by every Mac to
+fix the case of the Mac that has none.
+
+`poll_once` now logs the failure it used to swallow, at debug rather than
+warning: a genuinely transient failure happens, and one line three times a
+second is a stream rather than a diagnostic.

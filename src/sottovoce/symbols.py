@@ -40,6 +40,17 @@ SPEAK_SYMBOL = "text.bubble"
 # (U+1F56A and friends fall back to a striped tofu box).
 SPEAK_FALLBACK_GLYPH = "♬"
 
+# The system's glyph for "there is more to say about this", used by the one
+# control that reveals rather than does: why the lyrics could not be
+# fetched. Available since macOS 11, like every symbol here.
+WHY_SYMBOL = "info.circle"
+
+# Its text fallback. U+24D8 is a plain letterform in a circle and renders
+# monochrome from the system font; ℹ️ is the same idea as an emoji and comes
+# out in colour whatever is asked of it, which is the trap SPEAK_FALLBACK_GLYPH
+# already documents.
+WHY_FALLBACK_GLYPH = "ⓘ"
+
 # NSFont weights, as used by NSImageSymbolConfiguration.
 _WEIGHT_REGULAR = 5.0
 
@@ -73,7 +84,7 @@ def _template_pixmap(name: str, point_size: float, ratio: float = 1.0) -> Option
     try:
         from AppKit import NSImage, NSImageSymbolConfiguration
     except ImportError:
-        logger.warning("pyobjc unavailable — no SF Symbols")
+        logger.warning("pyobjc unavailable: no SF Symbols")
         return None
     try:
         image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
@@ -123,13 +134,25 @@ def symbol_icon(
     normal: QColor,
     active: Optional[QColor] = None,
     disabled: Optional[QColor] = None,
+    checked: Optional[QColor] = None,
 ) -> Optional[QIcon]:
     """An SF Symbol as a multi-state QIcon, or None if unavailable.
 
-    The three states are baked in as separate pixmaps because a stylesheet
+    The states are baked in as separate pixmaps because a stylesheet
     colours text, not icons: Qt picks Active while the cursor is over the
-    button and Disabled while the line is being spoken, which is the same
+    button and Disabled while the line is being spoken, which are the same
     hover/speaking pair the stylesheet used to draw.
+
+    ``checked`` is a STATE rather than a mode, and that distinction is the
+    whole of why the first attempt did nothing visible: a checked
+    QPushButton draws its icon in ``QIcon.State.On``, still in Normal or
+    Active mode. ``QIcon.Mode.Selected`` is for items in a view and a
+    button never asks for it. Verified by screenshot — the engaged colour
+    was baked in and never appeared.
+
+    Each state falls back to ``normal`` rather than to Qt's own washed-out
+    derivation, so a caller that has an opinion about only some of them
+    still gets its own colour everywhere else.
     """
     if not available():
         return None
@@ -140,6 +163,10 @@ def symbol_icon(
     icon.addPixmap(tinted(template, normal), QIcon.Mode.Normal)
     icon.addPixmap(tinted(template, active or normal), QIcon.Mode.Active)
     icon.addPixmap(tinted(template, disabled or normal), QIcon.Mode.Disabled)
+    if checked is not None:
+        on = tinted(template, checked)
+        icon.addPixmap(on, QIcon.Mode.Normal, QIcon.State.On)
+        icon.addPixmap(on, QIcon.Mode.Active, QIcon.State.On)
     return icon
 
 

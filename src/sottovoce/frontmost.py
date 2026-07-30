@@ -64,7 +64,7 @@ def _workspace():
     try:
         from AppKit import NSWorkspace
     except Exception:  # pragma: no cover - pyobjc missing
-        logger.info("AppKit unavailable — no per-app position memory")
+        logger.info("AppKit unavailable: no per-app position memory")
         return None
     return NSWorkspace.sharedWorkspace()
 

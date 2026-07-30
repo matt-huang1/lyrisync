@@ -45,6 +45,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QFontMetricsF,
     QIcon,
     QPainter,
     QPen,
@@ -64,6 +65,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
+from sottovoce import accessibility
 from sottovoce import appearance
 from sottovoce.app_positions import (
     ActivationDebounce,
@@ -81,6 +83,7 @@ from sottovoce.app_positions import (
 from sottovoce.artwork import ArtworkProvider
 from sottovoce.geometry import (
     RESIZE_MARGIN,
+    beside_centred_text,
     button_margin,
     button_side,
     clamped_position,
@@ -91,6 +94,7 @@ from sottovoce.geometry import (
     sync_bar_reserve,
     text_gutter,
 )
+from sottovoce.failure import UNKNOWN, FetchFailure
 from sottovoce.gestures import opacity_step, scroll_step, wheel_action
 from sottovoce import flight
 from sottovoce import frontmost
@@ -150,6 +154,8 @@ from sottovoce import symbols
 from sottovoce.symbols import (
     SPEAK_FALLBACK_GLYPH,
     SPEAK_SYMBOL,
+    WHY_FALLBACK_GLYPH,
+    WHY_SYMBOL,
     icon_size,
     symbol_icon,
 )
@@ -351,14 +357,15 @@ QScrollArea#plainScroll QScrollBar::add-line:vertical,
 QScrollArea#plainScroll QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollArea#plainScroll QScrollBar::add-page:vertical,
 QScrollArea#plainScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
-QPushButton#loop, QPushButton#speak {{
+QPushButton#loop, QPushButton#speak, QPushButton#why {{
     color: {rgba(palette.control_idle)}; background: transparent; border: none;
     border-radius: {round(6 * scale)}px;
     font-size: {round(15 * scale)}px;
 }}
-QPushButton#loop:hover, QPushButton#speak:hover {{
+QPushButton#loop:hover, QPushButton#speak:hover, QPushButton#why:hover {{
     color: {rgba(palette.control_hover)}; background: {rgba(palette.control_wash)};
 }}
+QPushButton#why:checked {{ color: {rgba(palette.control_engaged)}; }}
 QPushButton#loop:checked {{ color: {rgba(palette.control_engaged)}; }}
 QPushButton#speak:disabled {{ color: {rgba(palette.control_engaged)}; }}
 QPushButton#attempt {{
@@ -645,12 +652,14 @@ class ArtworkTask(QRunnable):
 
 
 class _FetchSignals(QObject):
-    finished = Signal(str, object, bool)  # track_id, TrackLyrics | None, ok
+    # track_id, TrackLyrics | None, ok, FetchFailure | None
+    finished = Signal(str, object, bool, object)
 
 
 class FetchTask(QRunnable):
     """Runs one lyrics lookup off the UI thread. Failures are logged and
-    reported as ok=False — never silently converted to "no lyrics"."""
+    reported as ok=False — never silently converted to "no lyrics" — and
+    carry what went wrong, so the window can answer "why" if asked."""
 
     def __init__(self, provider: LyricsProvider, snapshot: PlayerSnapshot) -> None:
         super().__init__()
@@ -660,16 +669,22 @@ class FetchTask(QRunnable):
 
     def run(self) -> None:
         track_id = self._snapshot.track_id
-        lyrics, ok = None, False
+        lyrics, ok, why = None, False, None
         try:
             lyrics = self._provider.get_lyrics(self._snapshot)
             ok = True
-        except LyricsError:
+        except LyricsError as exc:
             logger.exception("lyrics fetch failed for %s", track_id)
-        except Exception:
+            why = exc.failure
+        except Exception as exc:  # noqa: BLE001 - reported, never swallowed
             logger.exception("unexpected error fetching lyrics for %s", track_id)
+            # Still a reason, and still an honest one: something went wrong
+            # that the provider did not expect. A window that said only
+            # "lyrics unavailable" here would be hiding the more
+            # interesting of the two failures.
+            why = FetchFailure(kind=UNKNOWN, detail=str(exc))
         try:
-            self.signals.finished.emit(track_id, lyrics, ok)
+            self.signals.finished.emit(track_id, lyrics, ok, why)
         except RuntimeError:
             pass  # app tore down the signal object while we were fetching
 
@@ -772,12 +787,26 @@ class LyricsWindow(QWidget):
         # mid-song picks up where the song is.
         self._menubar_animation = False  # restored from settings below
         self._menubar_step = 0
+        # What macOS's accessibility display settings ask of this window:
+        # less motion, no transparency, more contrast. Live for the same
+        # reason the appearance is — somebody who switches Reduce Motion on
+        # because a migraine has started should not have to relaunch the
+        # app to be believed — so this is read now and re-read on every
+        # change, and the watcher is started below.
+        self._display_options = accessibility.current_options()
+        logger.info(
+            "accessibility display options: %s",
+            accessibility.describe(self._display_options),
+        )
+        self._display_watcher = accessibility.DisplayOptionsWatcher(
+            self._on_display_options_changed
+        )
         # Which palette the window is painting with. Resolved from the
         # system now and re-resolved on every change for as long as the
         # app runs — reading it once at startup would be wrong by the
         # afternoon on a Mac set to Auto.
         self._appearance = _system_appearance()
-        self._palette = appearance.palette_for(self._appearance)
+        self._palette = self._palette_now()
         # Open at Login: only meaningful from a bundle, and the status is
         # the system's to report. Read once here so the menu bar item is
         # already right the first time it is opened, then re-read on every
@@ -947,7 +976,7 @@ class LyricsWindow(QWidget):
             # U+FE0E asks for text presentation: the mic then draws as a
             # monochrome glyph instead of a colour emoji, which is the only
             # thing separating these controls from an iMessage sticker.
-            "attempt", "🎤︎", "Done — play the line again"
+            "attempt", "🎤︎", "Done · play the line again"
         )
         self._attempt_button.clicked.connect(self._on_attempt_done_clicked)
         self._loop_button = self._make_overlay_button("loop", "↻", "Loop this line")
@@ -967,6 +996,31 @@ class LyricsWindow(QWidget):
             "speak", SPEAK_FALLBACK_GLYPH, "Speak this line aloud"
         )
         self._speak_button.clicked.connect(self._on_speak_clicked)
+
+        # Why the lyrics could not be fetched. The only control here that
+        # reveals rather than does, and the only one that is not offered
+        # all the time: it exists beside the "lyrics unavailable" message
+        # and nowhere else, so a song that simply has no lyrics is still
+        # answered with one plain line and no invitation to dig.
+        #
+        # Mouse-only, like every other interaction on this window: it never
+        # takes focus, so there is no keyboard to reach it with.
+        self._why_button = self._make_overlay_button(
+            "why", WHY_FALLBACK_GLYPH, "Why?"
+        )
+        # Checkable so the control says whether it is currently showing
+        # anything, in the same engaged colour the loop button uses. Its
+        # clicked signal rather than toggled, for the reason the menu's
+        # checkable entries give: the render sets the check itself.
+        self._why_button.setCheckable(True)
+        self._why_button.clicked.connect(self._toggle_why)
+        # Whether the reason is currently on screen. Kept across the 30s
+        # retries on purpose: the mode goes ERROR -> FETCHING -> ERROR every
+        # time one runs, and hiding the reason under someone who had just
+        # asked for it would make the affordance feel broken. Cleared with
+        # the song, in _render.
+        self._why_shown = False
+        self._why_track: Optional[str] = None
 
         # Tap-to-sync. The track key is captured on entry: a same-track
         # re-announcement (metadata settling) must not cancel the pass,
@@ -1004,6 +1058,11 @@ class LyricsWindow(QWidget):
         QApplication.instance().styleHints().colorSchemeChanged.connect(
             self._on_color_scheme_changed
         )
+        # Unconditional, unlike the activation watcher beside it: this is
+        # not an opt-in layer whose "off" must remove the work, it is the
+        # system being followed, and there is no setting that could ask the
+        # app to stop following it.
+        self._display_watcher.start()
         QApplication.instance().aboutToQuit.connect(self._shutdown)
 
         self._monitor_thread = MonitorThread(self)
@@ -1061,10 +1120,14 @@ class LyricsWindow(QWidget):
             self._request_artwork(snapshot)
         self._render()
 
-    def _on_fetch_finished(self, track_id: str, lyrics: object, ok: bool) -> None:
+    def _on_fetch_finished(
+        self, track_id: str, lyrics: object, ok: bool, failure: object = None
+    ) -> None:
         # Stale results (track changed while the fetch was in flight) are
         # rejected by the view model; the provider already cached them.
-        if self._view_model.fetch_completed(track_id, lyrics, ok, now=time.monotonic()):
+        if self._view_model.fetch_completed(
+            track_id, lyrics, ok, now=time.monotonic(), failure=failure
+        ):
             self._release_loop()  # lyrics changed under the loop
             self._render()
 
@@ -1559,6 +1622,16 @@ class LyricsWindow(QWidget):
         )
         if display.mode is not Mode.SYNCED:
             self._speak_button.setVisible(False)  # synced path updates it per line
+        # Hidden for every mode by default and offered back at the very
+        # bottom of this method, which is the only path that can reach
+        # ERROR: every branch between here and there returns.
+        self._why_button.setVisible(False)
+        if self._view_model.track_id != self._why_track:
+            # A new song asks its own question. The reveal survives the 30s
+            # retries (which pass through FETCHING and back) but not a
+            # track change, which is a different failure or none at all.
+            self._why_track = self._view_model.track_id
+            self._why_shown = False
         self._render_sync_controls(display)
 
         # Persistent compact header whenever a track is known.
@@ -1607,6 +1680,69 @@ class LyricsWindow(QWidget):
         self._current.setText(current)
         self._set_pronunciation(display.pronunciation)
         self._upcoming.setText(display.upcoming)
+        self._render_why(display)
+
+    def _render_why(self, display) -> None:
+        """The quiet way to ask why the lyrics are not here, and what it
+        answers with.
+
+        Offered only in ERROR mode, which is the whole point: a song that
+        genuinely has no lyrics says "no lyrics found" and offers nothing
+        to click, so the difference between "this service is having a bad
+        day" and "nobody has written this song's lyrics down" stays a
+        difference you can see without reading either message twice.
+
+        The reason lands in the upcoming row — already empty here, already
+        the dim context colour, already directly under the message it
+        explains. A second widget for it would be a second thing to place,
+        style and keep in the type scale, for a line that is on screen
+        about as often as a track fails.
+        """
+        offered = display.mode is Mode.ERROR and bool(display.detail)
+        self._why_button.setVisible(offered)
+        self._why_button.setChecked(self._why_shown)
+        if not offered:
+            return
+        if self._why_shown:
+            self._upcoming.setText(display.detail)
+        self._place_why_button()
+
+    def _toggle_why(self, shown: bool) -> None:
+        """Show the reason, or put it away again. Reversible on purpose:
+        this is a thing to glance at, not a state to get stuck in."""
+        self._why_shown = shown
+        logger.debug("lyrics failure reason %s", "revealed" if shown else "hidden")
+        self._render()
+
+    def _place_why_button(self) -> None:
+        """Just after the end of the message, wherever that falls.
+
+        Measured from the text rather than pinned to a corner: "lyrics
+        unavailable, will retry" is centred and the window is resizable, so
+        a fixed position would be beside the message at one width and
+        stranded in white space at every other. geometry.py owns the rule,
+        including what to do when the message wraps and its laid-out width
+        IS the row.
+        """
+        side = button_side(self._scale)
+        self._why_button.setFixedSize(side, side)
+        top_left = self._current.mapTo(self, QPoint(0, 0))
+        self._current.ensurePolished()
+        advance = QFontMetricsF(self._current.font()).horizontalAdvance(
+            self._current.text()
+        )
+        self._why_button.move(
+            beside_centred_text(
+                top_left.x(),
+                self._current.width(),
+                advance,
+                side,
+                self._scale,
+                self.width(),
+            ),
+            top_left.y() + (self._current.height() - side) // 2,
+        )
+        self._why_button.raise_()
 
     def _render_sync_controls(self, display) -> None:
         """The tap row and its status line. The tap bar goes inert while
@@ -1866,14 +2002,32 @@ class LyricsWindow(QWidget):
             # evenly spaced list with one of them in bold.
             current_air = max(1, round(CURRENT_SPACING * scale))
             self._current_layout.setContentsMargins(0, current_air, 0, current_air)
-            # How far a line travels as it is replaced, at this scale.
-            self._current_fx.travel = max(1.0, LINE_TRAVEL * scale)
+            self._apply_motion()
             self._apply_tracking()
             side = button_side(scale)
             for button in (self._loop_button, self._speak_button, self._attempt_button):
                 button.setFixedSize(side, side)
             self._apply_speak_icon(side)
+            self._apply_why_icon(side)
             self._place_buttons()
+
+    def _apply_motion(self) -> None:
+        """How far a line travels as it is replaced, at this scale: its
+        full rise, or none of it.
+
+        Reduce Motion takes the travel and leaves the fade, which is what
+        that setting asks for rather than a compromise — the whole point
+        of ``progress`` being ONE signed number is that the opacity and
+        the offset are the same journey, so removing the offset is setting
+        its length to zero and changing nothing else. The choreography, its
+        timing and its arrival on the timestamp are all untouched: what was
+        a rise becomes a cross-fade of exactly the same length.
+        """
+        self._current_fx.travel = (
+            0.0
+            if self._display_options.reduce_motion
+            else max(1.0, LINE_TRAVEL * self._scale)
+        )
 
     def _apply_tracking(self) -> None:
         """Tighten the sung line's letter-spacing.
@@ -1922,6 +2076,29 @@ class LyricsWindow(QWidget):
         self._speak_button.setIcon(icon)
         self._speak_button.setIconSize(icon_size(side))
 
+    def _apply_why_icon(self, side: int) -> None:
+        """The same treatment for the reveal control: the system's own
+        info glyph, tinted from the same three control colours, falling
+        back to the text glyph it was built with.
+
+        Its engaged colour is the icon's On state rather than a mode: this
+        button is checkable and is never disabled, so what says "the reason
+        is on screen" is the same thing the loop button's stylesheet says
+        with ``:checked``.
+        """
+        icon = symbol_icon(
+            WHY_SYMBOL,
+            float(icon_size(side).width()),
+            _qcolor(self._palette.control_idle),
+            active=_qcolor(self._palette.control_hover),
+            checked=_qcolor(self._palette.control_engaged),
+        )
+        if icon is None:
+            return
+        self._why_button.setText("")
+        self._why_button.setIcon(icon)
+        self._why_button.setIconSize(icon_size(side))
+
     def _apply_layout_margins(self) -> None:
         """Side margins reserve the button gutters (geometry.py owns the
         shared math) so wrapped text can never run under a button; during a
@@ -1949,6 +2126,10 @@ class LyricsWindow(QWidget):
         # The done-button mirrors the speaker on the left, beside the line.
         self._attempt_button.move(margin, (self.height() - side) // 2)
         self._place_sync_controls()
+        if self._why_button.isVisibleTo(self):
+            # Placed from the message rather than from a corner, so it has
+            # to be re-placed whenever the window's shape changes.
+            self._place_why_button()
         for button in (
             self._loop_button,
             self._speak_button,
@@ -1956,6 +2137,7 @@ class LyricsWindow(QWidget):
             self._tap_button,
             self._undo_button,
             self._sync_exit_button,
+            self._why_button,
         ):
             button.raise_()
 
@@ -2118,7 +2300,7 @@ class LyricsWindow(QWidget):
         ours = self._own_bundle_id
         if identity is None or (ours is not None and identity.bundle_id == ours):
             if identity is not None:
-                logger.debug("frontmost app is us — treating it as unknown for now")
+                logger.debug("frontmost app is us, treating it as unknown for now")
             self._frontmost, self._frontmost_name = None, None
             return
         self._frontmost, self._frontmost_name = identity.bundle_id, identity.name
@@ -2239,7 +2421,7 @@ class LyricsWindow(QWidget):
             return
         if self._own_bundle_id is not None and bundle_id == self._own_bundle_id:
             logger.debug(
-                "activation: %s is us — keeping %s as the frontmost app",
+                "activation: %s is us, keeping %s as the frontmost app",
                 bundle_id,
                 self._frontmost,
             )
@@ -2264,7 +2446,7 @@ class LyricsWindow(QWidget):
             remaining = self._debounce.remaining(now)
             if remaining > 0:
                 logger.debug(
-                    "settling: %s has %.0fms left — asking again",
+                    "settling: %s has %.0fms left, asking again",
                     self._debounce.pending,
                     remaining * 1000,
                 )
@@ -2278,16 +2460,16 @@ class LyricsWindow(QWidget):
             flying=self._flight_anim is not None,
         )
         if refusal is not None:
-            logger.debug("settled: %s — not moving, %s", bundle_id, refusal)
+            logger.debug("settled: %s, not moving: %s", bundle_id, refusal)
             return
         remembered = self._positions.recall(bundle_id)
         if remembered is None:
             # Never learned here: leave the window exactly where it is.
             logger.debug(
-                "settled: %s — no position remembered, leaving the window", bundle_id
+                "settled: %s has no position remembered, leaving the window", bundle_id
             )
             return
-        logger.debug("settled: %s — remembered at %d, %d", bundle_id, *remembered)
+        logger.debug("settled: %s, remembered at %d, %d", bundle_id, *remembered)
         self._move_to(QPoint(*remembered))
 
     def _move_to(self, target: QPoint) -> None:
@@ -2303,7 +2485,7 @@ class LyricsWindow(QWidget):
         )
         if clamped != target:
             logger.debug(
-                "move: %d, %d is off this screen — clamped to %d, %d",
+                "move: %d, %d is off this screen, clamped to %d, %d",
                 target.x(),
                 target.y(),
                 clamped.x(),
@@ -2320,6 +2502,13 @@ class LyricsWindow(QWidget):
             clamped.y(),
         )
         self._stop_move()
+        if self._display_options.reduce_motion:
+            # The window still goes where it was asked to go — the layer is
+            # about where it lives, not about how it gets there — it simply
+            # arrives without travelling.
+            self.move(clamped)
+            logger.debug("reduce motion: moved without travelling")
+            return
         animation = QPropertyAnimation(self, b"pos", self)
         animation.setDuration(_MOVE_MS)
         animation.setEasingCurve(_MOVE_CURVE)
@@ -2674,7 +2863,7 @@ class LyricsWindow(QWidget):
         is a template image, so macOS tints it for light and dark menu bars
         instead of us shipping two of each."""
         if not QSystemTrayIcon.isSystemTrayAvailable():
-            logger.info("no system tray — menu bar item unavailable")
+            logger.info("no system tray: menu bar item unavailable")
             self._tray = None
             return
         self._tray_icons = {}
@@ -2865,7 +3054,7 @@ class LyricsWindow(QWidget):
             for screen in QApplication.screens()
         )
         if not flight.item_usable(item, screens):
-            logger.debug("no usable menu bar item (%s) — fading in place", item)
+            logger.debug("no usable menu bar item (%s): fading in place", item)
             return None
         return item
 
@@ -2882,6 +3071,20 @@ class LyricsWindow(QWidget):
         proportionally less time, so a hotkey pressed twice quickly reverses
         the movement instead of queueing a second one.
         """
+        if self._display_options.reduce_motion:
+            # No journey at all, rather than a quick one. The flight is
+            # movement in every dimension it has — position, scale, opacity
+            # — so there is no part of it left to keep once the movement is
+            # taken out, and a fade in place would be answering a question
+            # nobody asked. Any flight already in the air gives back
+            # everything it borrowed first.
+            self._stop_flight()
+            self.setVisible(showing)
+            logger.debug(
+                "reduce motion: %s without the flight",
+                "showing" if showing else "hiding",
+            )
+            return
         running = self._flight_anim is not None
         start = self._flight_progress if running else (1.0 if showing else 0.0)
         end = 0.0 if showing else 1.0
@@ -3087,7 +3290,7 @@ class LyricsWindow(QWidget):
         if covered == self._yielding:
             return
         logger.debug(
-            "yield: %s — window at %r, notification at %r",
+            "yield: %s, window at %r, notification at %r",
             "fading" if covered else "clearing",
             window,
             occupied,
@@ -3219,6 +3422,22 @@ class LyricsWindow(QWidget):
             self._apply_shadow()
             self._apply_all_desktops(self._all_desktops)
 
+    def _palette_now(self) -> appearance.Palette:
+        """The colours to paint with: this appearance, as the accessibility
+        settings ask for it.
+
+        One place that composes the two, so a change to either arrives the
+        same way. With nothing switched on it hands back the shipped
+        palette object itself, which is what makes "no accessibility
+        setting on" and "this app before those settings were followed" the
+        same pixels rather than nearly the same.
+        """
+        return appearance.palette_for(
+            self._appearance,
+            high_contrast=self._display_options.increase_contrast,
+            opaque_background=self._display_options.solid_background,
+        )
+
     def _on_color_scheme_changed(self, scheme) -> None:
         """The system changed appearance under us — follow it.
 
@@ -3234,8 +3453,69 @@ class LyricsWindow(QWidget):
             "system appearance -> %s, following", resolved.value
         )
         self._appearance = resolved
-        self._palette = appearance.palette_for(resolved)
+        self._palette = self._palette_now()
         self._apply_appearance()
+
+    def _on_display_options_changed(self, options) -> None:
+        """An accessibility display setting moved — follow it, live.
+
+        The same shape as the appearance change above, and deliberately:
+        both are the system telling a running app that what it should look
+        like has changed, and an app that only looked at startup is the app
+        that is wrong for the rest of the session.
+
+        Three things can follow, and each is checked rather than assumed.
+        The palette is re-resolved always, because Increase Contrast moves
+        colours and dropping the material moves which background is
+        painted. The material is installed or removed only when the answer
+        to "is there a material" actually changed — reinstalling one that
+        is already there would stack effect views. The line's travel is
+        re-applied always, because ``_apply_scale`` early-outs when the
+        width has not moved, which is exactly this case.
+        """
+        if options == self._display_options:
+            return
+        logger.info(
+            "accessibility display options -> %s, following",
+            accessibility.describe(options),
+        )
+        wanted_solid = options.solid_background
+        had_solid = self._display_options.solid_background
+        self._display_options = options
+        self._palette = self._palette_now()
+        if wanted_solid != had_solid:
+            self._apply_material_presence()
+        self._apply_motion()
+        self._apply_appearance()
+
+    def _apply_material_presence(self) -> None:
+        """Install the vibrancy material, or take it away.
+
+        Reduce Transparency is the one accessibility setting that changes
+        something native rather than something painted: the frost is an
+        NSVisualEffectView, so honouring the request means the view has to
+        go, not merely be painted over. Removed from its superview rather
+        than hidden — a hidden effect view is still an effect view, and
+        ``_begin_native_flight`` hides and shows this one for its own
+        reasons, which would put a suppressed material straight back.
+
+        A no-op before the window has ever been shown: the first install
+        happens in ``showEvent``, and it consults the same options.
+        """
+        if not self._native_applied:
+            return
+        if self._display_options.solid_background:
+            material, self._material = self._material, None
+            if material is not None:
+                try:
+                    material.removeFromSuperview()
+                except Exception:
+                    logger.exception("could not remove the vibrancy material")
+                logger.info("reduce transparency: material removed, solid background")
+            self._resnap_tint()  # a different background, so a re-derived tint
+            return
+        if self._material is None:
+            self._apply_vibrancy()
 
     def _apply_appearance(self) -> None:
         """Repaint everything the palette owns.
@@ -3250,6 +3530,7 @@ class LyricsWindow(QWidget):
         self.setStyleSheet(_style_for(self._scale, self._family_stack, self._palette))
         self._apply_material_appearance()
         self._apply_speak_icon(button_side(self._scale))
+        self._apply_why_icon(button_side(self._scale))
         # The cover colour survives the switch; what it derives from does
         # not. Re-derived against the new palette, without a fade.
         self._resnap_tint()
@@ -3360,7 +3641,7 @@ class LyricsWindow(QWidget):
         try:
             import objc
         except ImportError:
-            logger.warning("pyobjc unavailable — native window features disabled")
+            logger.warning("pyobjc unavailable: native window features disabled")
             return None
         try:
             return objc.objc_object(c_void_p=int(self.winId()))
@@ -3456,13 +3737,22 @@ class LyricsWindow(QWidget):
         to a solid background when it is not, so a failure here costs the
         blur and nothing else. Verified by readback, not assumed.
         """
+        if self._display_options.solid_background:
+            # The setting is about this view and nothing else, so the
+            # honest answer is not to build one. Checked here rather than
+            # only at the call sites because showEvent installs the first
+            # material before anything else has had a chance to ask.
+            logger.info(
+                "reduce transparency: no vibrancy material, solid background instead"
+            )
+            return False
         nsview = self._nsview()
         if nsview is None:
             return False
         try:
             from AppKit import NSAppearance, NSVisualEffectView
         except ImportError:
-            logger.warning("pyobjc unavailable — no vibrancy material")
+            logger.warning("pyobjc unavailable: no vibrancy material")
             return False
         try:
             container = nsview.superview()
@@ -3635,7 +3925,7 @@ class LyricsWindow(QWidget):
             )
         else:
             logger.info(
-                "per-app positions off (%d remembered) — not watching activations",
+                "per-app positions off (%d remembered): not watching activations",
                 len(self._positions),
             )
         # Assigned rather than routed through the setter, for the same
@@ -3662,7 +3952,7 @@ class LyricsWindow(QWidget):
         wanted = self._settings.value("window/open_at_login", False, type=bool)
         if self._bundled and wanted != login_item.is_enabled(self._login_status):
             logger.info(
-                "Open at Login was last set to %s here but macOS says %s — "
+                "Open at Login was last set to %s here but macOS says %s, "
                 "following macOS",
                 wanted,
                 self._login_status.value,
@@ -3707,10 +3997,11 @@ class LyricsWindow(QWidget):
         teardown.
         """
         self._hotkey.unregister()
-        # The other thing that can still call in: NSWorkspace holds a block
-        # that moves a window being torn down. Removed beside the hotkey,
-        # and for the same reason.
+        # The other things that can still call in: NSWorkspace holds two
+        # blocks, one that moves a window being torn down and one that
+        # repaints it. Removed beside the hotkey, and for the same reason.
         self._watcher.stop()
+        self._display_watcher.stop()
         self._settle_timer.stop()
         self._stop_move()
         # Stopped before the save, like the flight below and for a milder
@@ -3757,7 +4048,7 @@ def apply_accessory_policy() -> None:
     try:
         from AppKit import NSApplication
     except ImportError:
-        logger.warning("pyobjc unavailable — activation policy unchanged")
+        logger.warning("pyobjc unavailable: activation policy unchanged")
         return
     try:
         shared = NSApplication.sharedApplication()

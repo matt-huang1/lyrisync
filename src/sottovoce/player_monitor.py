@@ -36,6 +36,26 @@ _OSASCRIPT_TIMEOUT = 2.0
 # `artwork url` would fail the whole expression and take the six fields
 # with it — the app would show a running player and never find a song,
 # for the sake of a colour. Nested, the cost of that is one missing line.
+# The one question that needs no dictionary, and therefore the only one
+# that can be asked on a Mac with no Spotify on it.
+#
+# ``running`` is a property of AppleScript's own generic application class,
+# so this compiles anywhere. Everything in the snapshot script below is
+# Spotify's OWN terminology — `player state`, `spotify url`, even `current
+# track` — and AppleScript resolves terminology at COMPILE time, out of the
+# application bundle on disk. With no bundle to read, the snapshot script
+# does not fail at runtime with "not running": it fails to compile at all,
+# with a syntax error, before its first line is ever reached. Measured on a
+# Mac by asking with an application name that is not installed:
+# "141:146: syntax error: Expected “,” but found identifier. (-2741)".
+#
+# That is why this exists as a second script rather than as the first line
+# of the first one, where it already is and where it is unreachable.
+_RUNNING_SCRIPT = (
+    'if application "Spotify" is not running then return "not_running"\n'
+    'return "running"'
+)
+
 _SNAPSHOT_SCRIPT = '''
 if application "Spotify" is not running then return "not_running"
 tell application "Spotify"
@@ -182,10 +202,67 @@ def resume_playback() -> None:
     _osascript('tell application "Spotify" to play')
 
 
+# Whether the snapshot script was last found to be uncompilable, which on
+# a fixed script can only mean Spotify's terminology could not be resolved,
+# which can only mean Spotify is not installed.
+#
+# Remembered rather than rediscovered every 300ms because the two questions
+# cost very different amounts, measured on a Mac: asking for a snapshot
+# takes 184ms where Spotify exists, and the dictionary-free probe takes
+# 37ms there but 182ms where the application is absent (LaunchServices
+# searching for something that is not there). Without this, a Mac with no
+# Spotify would spend a doomed compile AND a probe on every poll; with it,
+# it settles into the probe alone — which is also what notices Spotify
+# being installed later, because it is asked again every time.
+_no_spotify_installed = False
+
+
+def spotify_running() -> bool:
+    """Whether Spotify is running, asked in a way that needs no dictionary.
+
+    False both for "installed and not running" and for "not installed at
+    all", and the difference does not matter to any caller: from the
+    window's point of view they are the same silence.
+    """
+    return _osascript(_RUNNING_SCRIPT) != "not_running"
+
+
+def _not_running(polled_at: float) -> PlayerSnapshot:
+    return PlayerSnapshot(state=PlaybackState.NOT_RUNNING, polled_at=polled_at)
+
+
 def read_snapshot() -> PlayerSnapshot:
     """Query Spotify once. Raises SpotifyQueryError only if the state itself
-    is unreadable; a missing track degrades to a track-less snapshot."""
-    output = _osascript(_SNAPSHOT_SCRIPT)
+    is unreadable; a missing track degrades to a track-less snapshot, and a
+    Mac with no Spotify on it degrades to "not running" — which is the
+    truth, and is what it was always meant to report."""
+    global _no_spotify_installed
+    if _no_spotify_installed:
+        # Nothing here to ask a snapshot of. Keep asking the cheap
+        # question, which is also the one that notices Spotify arriving.
+        polled_at = time.monotonic()
+        if not spotify_running():
+            return _not_running(polled_at)
+        logger.info("Spotify is installed now: asking for snapshots again")
+        _no_spotify_installed = False
+    try:
+        output = _osascript(_SNAPSHOT_SCRIPT)
+    except SpotifyQueryError:
+        # A snapshot that could not be taken is normally transient and is
+        # re-raised. But it is also what a Mac with no Spotify produces,
+        # every single poll, for a reason that will not clear: the script
+        # cannot be compiled without Spotify's dictionary. One question
+        # that needs no dictionary tells the two apart.
+        if spotify_running():
+            raise
+        _no_spotify_installed = True
+        logger.warning(
+            "Spotify does not answer and is not running: reporting it as "
+            "not running. If it is not installed, this is the whole app: "
+            "the lyrics window follows the Spotify desktop app and there is "
+            "nothing else to follow."
+        )
+        return _not_running(time.monotonic())
     # Stamped the instant the query returns: this is how fresh the position
     # below is, and callers extrapolate from it.
     polled_at = time.monotonic()
@@ -193,7 +270,7 @@ def read_snapshot() -> PlayerSnapshot:
     if not lines:
         raise SpotifyQueryError("empty osascript output")
     if lines[0] == "not_running":
-        return PlayerSnapshot(state=PlaybackState.NOT_RUNNING, polled_at=polled_at)
+        return _not_running(polled_at)
 
     state = _parse_state(lines[0])
     # 7 lines is a track whose artwork URL was not reported, 8 is one with
@@ -279,7 +356,14 @@ class PlayerMonitor:
         transiently failed (the previous state is kept)."""
         try:
             snapshot = read_snapshot()
-        except SpotifyQueryError:
+        except SpotifyQueryError as exc:
+            # Said out loud, at last. This used to be swallowed entirely,
+            # which meant a Mac where every poll failed looked exactly like
+            # a Mac where nothing was playing — with nothing anywhere to
+            # say which. Debug rather than warning: a genuinely transient
+            # failure happens, and one line three times a second is not a
+            # diagnostic, it is a stream.
+            logger.debug("poll failed: %s", exc)
             return None
 
         previous = self._last

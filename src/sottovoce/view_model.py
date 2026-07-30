@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+from sottovoce.failure import FetchFailure, describe
 from sottovoce.lyrics_provider import TrackLyrics
 from sottovoce.player_monitor import PlaybackState, PlayerSnapshot
 from sottovoce.romanize import contains_hangul, romanize_korean
@@ -60,6 +61,10 @@ class Display:
     plain_text: str = ""   # full text, only in PLAIN mode
     pronunciation: str = ""  # romanised current line, SYNCED/SYNCING modes
     progress: str = ""     # "12 / 34 lines", SYNCING mode only
+    # Why the lookup failed, ERROR mode only. Never shown unasked: the
+    # window keeps it behind an affordance beside the message, because the
+    # answer to "why" is wanted by a few people and by nobody twice.
+    detail: str = ""
 
 
 RETRY_INTERVAL_SECONDS = 30.0
@@ -102,6 +107,7 @@ class LyricsViewModel:
         self._lyrics: Optional[TrackLyrics] = None
         self._index = -1
         self._error_at = 0.0
+        self._failure: Optional[FetchFailure] = None
         self._suspended_mode: Optional[Mode] = None
         self._has_hangul_synced = False
         self._has_hangul_sync = False
@@ -131,6 +137,10 @@ class LyricsViewModel:
         self._header = header_text(snapshot)
         self._lyrics = None
         self._index = -1
+        # A failure belongs to the song it happened on. Cleared on the way
+        # in rather than only on the way out, so a new song in FETCHING can
+        # never be carrying the last song's reason.
+        self._failure = None
         self._has_hangul_synced = False
         self._has_hangul_sync = False
         # A sync pass belongs to the song it started on.
@@ -149,17 +159,20 @@ class LyricsViewModel:
         lyrics: Optional[TrackLyrics],
         ok: bool = True,
         now: float = 0.0,
+        failure: Optional[FetchFailure] = None,
     ) -> bool:
         """Returns False for stale results, which must not be displayed.
         ``ok=False`` means the fetch errored: show the retryable
         "unavailable" state rather than claiming there are no lyrics;
-        ``now`` timestamps the failure for the retry schedule."""
+        ``now`` timestamps the failure for the retry schedule and
+        ``failure`` says what went wrong, for anyone who asks."""
         if track_id != self._track_id:
             return False
         if not ok:
             resolved = Mode.ERROR
             self._lyrics = None
             self._error_at = now
+            self._failure = failure
         elif lyrics is None:
             resolved = Mode.NO_LYRICS
             self._lyrics = None
@@ -347,6 +360,7 @@ class LyricsViewModel:
         self._header = ""
         self._lyrics = None
         self._index = -1
+        self._failure = None
         self._suspended_mode = None
         self._has_hangul_synced = False
         self._has_hangul_sync = False
@@ -369,13 +383,14 @@ class LyricsViewModel:
             return Display(
                 mode=mode,
                 header=self._header,
-                current="lyrics unavailable — will retry",
+                current="lyrics unavailable, will retry",
+                detail=describe(self._failure),
             )
         if mode is Mode.PLAIN:
             return Display(
                 mode=mode,
                 header=self._header,
-                previous="plain lyrics — not synced",
+                previous="plain lyrics · not synced",
                 plain_text=self._lyrics.plain or "",
             )
         if mode is Mode.SYNCING:

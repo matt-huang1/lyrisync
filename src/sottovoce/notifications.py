@@ -418,7 +418,7 @@ def _quartz():
         import Quartz
         from AppKit import NSRunningApplication
     except Exception:  # pragma: no cover - pyobjc missing
-        logger.info("Quartz unavailable — not yielding to notifications")
+        logger.info("Quartz unavailable: not yielding to notifications")
         return None
     return Quartz, NSRunningApplication
 

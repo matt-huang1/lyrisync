@@ -178,6 +178,24 @@ def _no_real_world():
 
     patch.setattr(frontmost, "_workspace", guard_workspace)
 
+    # -- the developer's own accessibility settings -----------------------
+    # NSWorkspace answers how this Mac is set up — Reduce Motion, Reduce
+    # Transparency, Increase Contrast — and the window follows all three.
+    # A test that read them would be a test whose result depends on the
+    # developer's System Settings, which is the same failure the window
+    # list guard below exists for; and the observer it registers would sit
+    # on the workspace for the life of the process, repainting a window the
+    # test has since destroyed. One door in the module, shut here.
+    from sottovoce import accessibility
+
+    def guard_display_options():
+        raise _violation(
+            "NSWorkspace — a test may not read the developer's accessibility "
+            "display settings; set the window's options directly"
+        )
+
+    patch.setattr(accessibility, "_workspace", guard_display_options)
+
     # -- the developer's own windows --------------------------------------
     # CGWindowListCopyWindowInfo answers with every window open on the
     # machine — which apps are running, where their windows are, how big

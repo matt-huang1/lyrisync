@@ -33,24 +33,33 @@ Everything that can be logic rather than widget is:
 | `app_positions.py` | the per-app position map, the settling rule, the gates |
 | `notifications.py` | the overlap and opacity rules for yielding — plus one native door |
 | `typography.py` | the type scale — imported by `geometry.py` |
-| `appearance.py` | both palettes, the album tint maths |
+| `appearance.py` | both palettes, the album tint maths, the high-contrast overrides |
 | `gestures.py` | scroll and wheel routing |
 | `romanize.py` | hangul detection and romanisation |
 | `settings.py` | where the preferences live, and the one-time carry from the LyriSync name — plus one native door |
 | `http_client.py` | connections to one host, kept alive between requests |
+| `failure.py` | why a lookup could not be answered, in words |
+| `accessibility.py` | the three macOS display settings the window follows — plus one native door |
 
 None of them imports Qt. That is why the contrast floor, the type scale
 and the state machine can all be tested on a Linux runner with no display,
 and why `window.py` is wiring rather than logic.
 
-`notifications.py` and `settings.py` are the two entries above that are
-not purely pure: their rules are, and one function each —
-`_quartz()` and `_legacy_settings()` — is the single door to the window
-list and to the preferences the old name left behind, the same shape as
+`notifications.py`, `settings.py` and `accessibility.py` are the three
+entries above that are not purely pure: their rules are, and one function
+each — `_quartz()`, `_legacy_settings()` and `_workspace()` — is the
+single door to the window list, to the preferences the old name left
+behind, and to how the developer's Mac is configured. Same shape as
 `frontmost._workspace()`, `hotkey._carbon()` and
-`login_item._main_app_service()`. Each of those five doors is shut by
+`login_item._main_app_service()`. Each of those six doors is shut by
 `tests/conftest.py`, so a test can never reach the developer's keyboard,
-workspace, login items, windows or saved settings.
+workspace, login items, windows, saved settings or accessibility
+preferences.
+
+`frontmost` and `accessibility` both stand on NSWorkspace and still have
+separate doors: one is an opt-in layer that unsubscribes when it is
+switched off, the other is a system setting followed for as long as the
+app runs, and one door could not be blocked without blocking the other.
 
 ## Threads
 

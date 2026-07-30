@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-986 tests, run on every push. The interesting part is not the count — it
+1143 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -25,7 +25,7 @@ than by the suite: real `QSettings` writes, real player commands, a tray
 test that never actually ran, and a live LRCLIB fetch that aborted CI
 mid-handshake.
 
-Nine doors are shut for the whole session:
+Ten doors are shut for the whole session:
 
 | guard | catches |
 |---|---|
@@ -38,22 +38,30 @@ Nine doors are shut for the whole session:
 | `hotkey._carbon()` | claiming ⇧⌘J from whoever is running the suite |
 | `frontmost._workspace()` | observing the developer's own app switching |
 | `notifications._quartz()` | reading every window open on the machine |
+| `accessibility._workspace()` | how the developer's Mac is set up, and an observer left sitting on it |
 | `settings._legacy_settings()` | the plist the LyriSync name left behind |
 
-The last five are the same shape and each module has exactly **one** native
+The last six are the same shape and each module has exactly **one** native
 door for that reason. Three of them would outlive the test that started
 them and keep calling into a window that has since been destroyed; the
-fourth reads which apps are running and where their windows are, which is
-both none of the suite's business and a result that would depend on what
-the developer happens to have open. The fifth is a **read** of the user's
-old preferences, which is the kind of escape that leaves nothing behind to
-notice afterwards — the migration takes a factory so every test of it
-supplies its own file.
+window list reads which apps are running and where their windows are,
+which is both none of the suite's business and a result that would depend
+on what the developer happens to have open; the accessibility door is the
+same hazard twice over — a test that read Reduce Motion would pass or fail
+depending on how the developer has System Settings configured, and the
+observer it registers would sit on the workspace repainting a destroyed
+window. The last is a **read** of the user's old preferences, which is the
+kind of escape that leaves nothing behind to notice afterwards — the
+migration takes a factory so every test of it supplies its own file.
 
-Two of those doors have structural tests as well as behavioural ones — the
-native imports must appear in exactly one place, inside the door — because
-a second import site would pass every behavioural test while quietly
-reopening it.
+`frontmost` and `accessibility` both stand on NSWorkspace and have
+separate doors anyway: two capabilities with two lifetimes, and one door
+could not be blocked without blocking the other.
+
+Three of those doors have structural tests as well as behavioural ones —
+the native imports must appear in exactly one place, inside the door —
+because a second import site would pass every behavioural test while
+quietly reopening it.
 
 Loopback sockets are allowed — Qt and pytest use them internally.
 
@@ -120,3 +128,25 @@ runner fails loudly instead of skipping quietly.
 The artefact is macOS-only, and the things worth checking about it — menu
 bar icon, no Dock icon, the Automation prompt — can only be accepted by a
 person. A green tick would be claiming more than it checked.
+
+## No em dash reaches a person
+
+Every string the package builds that is not a docstring is scanned, and
+none of them may contain an em dash. The rule and its three replacements
+are in [CLAUDE.md](../CLAUDE.md#the-window); what matters here is *how* it
+is checked.
+
+It is scanned as **syntax**, not as text. The file explaining the rule
+contains em dashes, and so do dozens of module docstrings, which are
+documentation and are allowed to read like prose. A substring scan over
+the files could only ever be satisfied by deleting the explanations —
+which is the same trap `test_notifications.py` documents for
+`kCGWindowName` and `test_packaging.py` for the version literal.
+
+Docstrings are identified **by position** — the first statement of a
+module, class or function — rather than by content, so the same text
+appearing somewhere it can reach a person is still caught. f-strings need
+no special handling: their literal parts are `Constant` nodes inside a
+`JoinedStr`.
+
+The guard has tests of its own, as every guard here does.

@@ -21,14 +21,25 @@ def batched_output(
 
 
 class FakeOsascript:
-    """Stands in for _osascript: returns .output, or raises it if it is an
-    exception. Asserts the batched snapshot script is what gets run."""
+    """Stands in for _osascript.
 
-    def __init__(self, output):
+    Answers the batched snapshot script with ``.output`` (raising it if it
+    is an exception), and the dictionary-free running probe with
+    ``.running`` — which defaults to "yes", so a snapshot failure means
+    what it always meant here: a transient one, on a Mac that has Spotify.
+    Anything else is a script this module did not mean to run.
+    """
+
+    def __init__(self, output, running=True):
         self.output = output
+        self.running = running
         self.calls = 0
+        self.probes = 0
 
     def __call__(self, script):
+        if script == pm._RUNNING_SCRIPT:
+            self.probes += 1
+            return "running" if self.running else "not_running"
         assert script == pm._SNAPSHOT_SCRIPT
         self.calls += 1
         if isinstance(self.output, Exception):
@@ -36,10 +47,18 @@ class FakeOsascript:
         return self.output
 
 
-def use_output(monkeypatch, output):
-    fake = FakeOsascript(output)
+def use_output(monkeypatch, output, running=True):
+    fake = FakeOsascript(output, running=running)
     monkeypatch.setattr(pm, "_osascript", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def _forget_whether_spotify_exists(monkeypatch):
+    """``read_snapshot`` remembers a Mac with no Spotify on it, so that it
+    stops paying for a compile that cannot succeed. Module state, and
+    therefore state one test can leave lying around for the next."""
+    monkeypatch.setattr(pm, "_no_spotify_installed", False)
 
 
 # -- snapshot parsing ----------------------------------------------------
@@ -473,3 +492,133 @@ def test_artwork_is_not_part_of_track_identity():
         state=pm.PlaybackState.PLAYING, track_id="t1", artwork_url="http://cover"
     )
     assert without.track_key == with_art.track_key
+
+
+# -- a Mac with no Spotify on it -------------------------------------------
+#
+# Never tested, and it turned out not to work the way the script implies.
+# `if application "Spotify" is not running then return "not_running"` is the
+# first line and reads like the answer, but everything below it is
+# Spotify's OWN terminology and AppleScript resolves terminology at COMPILE
+# time out of the application bundle. With no bundle there is nothing to
+# resolve, so the script never runs at all: it fails to compile, with a
+# syntax error, and the first line is never reached.
+#
+# Measured by asking with an application name that is not installed:
+#   141:146: syntax error: Expected “,” but found identifier. (-2741)
+#
+# What that produced was an app that reported NOTHING — poll_once swallowed
+# the error, no state callback ever fired, and osascript was spawned three
+# times a second forever for a script that could not run.
+
+
+COMPILE_ERROR = pm.SpotifyQueryError(
+    "141:146: syntax error: Expected “,” but found identifier. (-2741)"
+)
+
+
+def test_no_spotify_installed_reports_not_running(monkeypatch):
+    """The whole point. "Not running" is the truth on a Mac with no
+    Spotify, and it is what the monitor is supposed to report."""
+    fake = use_output(monkeypatch, COMPILE_ERROR, running=False)
+    snapshot = pm.read_snapshot()
+    assert snapshot.state is pm.PlaybackState.NOT_RUNNING
+    assert not snapshot.has_track
+    assert snapshot.polled_at is not None
+
+
+def test_the_window_sits_in_its_idle_state(monkeypatch):
+    """What the display does with that, end to end through the pure view
+    model: the idle line, no header, no fetch, no error."""
+    from sottovoce.view_model import LyricsViewModel, Mode
+
+    use_output(monkeypatch, COMPILE_ERROR, running=False)
+    model = LyricsViewModel()
+    snapshot = pm.read_snapshot()
+    assert model.track_changed(snapshot) is False  # nothing to look up
+    model.player_state_changed(snapshot.state)
+    display = model.display()
+    assert display.mode is Mode.IDLE
+    assert display.current == "Spotify is not playing"
+    assert display.header == ""
+    assert display.detail == ""
+
+
+def test_the_monitor_fires_the_state_callback(monkeypatch):
+    """It used to fire nothing at all: poll_once returned None before any
+    callback, so a Mac with no Spotify was indistinguishable from a Mac
+    where the app had not started polling yet."""
+    use_output(monkeypatch, COMPILE_ERROR, running=False)
+    states, tracks = [], []
+    monitor = pm.PlayerMonitor(
+        on_state_change=lambda s: states.append(s.state),
+        on_track_change=lambda s: tracks.append(s.track_key),
+    )
+    assert monitor.poll_once() is not None
+    assert states == [pm.PlaybackState.NOT_RUNNING]
+    assert tracks == [None]
+
+
+def test_it_stops_paying_for_a_compile_that_cannot_succeed(monkeypatch):
+    """Measured: the snapshot script costs 184ms where Spotify exists, and
+    the dictionary-free probe costs 37ms there and 182ms where the
+    application is absent. Asking both, three times a second, forever, is
+    what the first version of this did."""
+    fake = use_output(monkeypatch, COMPILE_ERROR, running=False)
+    for _ in range(5):
+        assert pm.read_snapshot().state is pm.PlaybackState.NOT_RUNNING
+    assert fake.calls == 1, "kept trying to compile the snapshot script"
+    assert fake.probes == 5
+
+
+def test_spotify_arriving_later_is_noticed(monkeypatch):
+    """The probe that keeps answering is also the one that watches for
+    Spotify being installed, so this never needs a restart."""
+    fake = use_output(monkeypatch, COMPILE_ERROR, running=False)
+    assert pm.read_snapshot().state is pm.PlaybackState.NOT_RUNNING
+
+    fake.running = True
+    fake.output = batched_output()
+    snapshot = pm.read_snapshot()
+    assert snapshot.state is pm.PlaybackState.PLAYING
+    assert snapshot.title == "Song"
+
+
+def test_a_transient_failure_on_a_running_spotify_is_still_a_failure(monkeypatch):
+    """The distinction the probe exists to make. An osascript that timed
+    out while Spotify is right there is not "Spotify is not installed" —
+    it is the transient failure the poll loop has always kept state
+    across."""
+    fake = use_output(monkeypatch, pm.SpotifyQueryError("timed out"), running=True)
+    with pytest.raises(pm.SpotifyQueryError):
+        pm.read_snapshot()
+    assert fake.probes == 1
+    # And nothing was remembered: the next poll asks properly again.
+    fake.output = batched_output()
+    assert pm.read_snapshot().state is pm.PlaybackState.PLAYING
+
+
+def test_the_probe_needs_no_dictionary():
+    """The property the whole fix rests on, asserted on the script itself:
+    it may use nothing but AppleScript's own generic application class.
+    Every term Spotify supplies — `player state`, `current track`,
+    `spotify url` — is a term that cannot be compiled without Spotify."""
+    assert "running" in pm._RUNNING_SCRIPT
+    for spotify_term in (
+        "player state",
+        "current track",
+        "spotify url",
+        "player position",
+        "artwork url",
+    ):
+        assert spotify_term not in pm._RUNNING_SCRIPT
+    # And the snapshot script is exactly the one that cannot: this is what
+    # makes the two separate scripts rather than one.
+    assert "player state" in pm._SNAPSHOT_SCRIPT
+
+
+def test_the_probe_answers_a_yes_or_no(monkeypatch):
+    use_output(monkeypatch, "", running=True)
+    assert pm.spotify_running() is True
+    use_output(monkeypatch, "", running=False)
+    assert pm.spotify_running() is False

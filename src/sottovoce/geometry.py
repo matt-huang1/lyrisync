@@ -139,6 +139,30 @@ def min_window_height(scale: float, sync_bar: bool = False) -> int:
     return height + sync_bar_reserve(scale) if sync_bar else height
 
 
+def beside_centred_text(
+    row_left: int,
+    row_width: int,
+    text_width: float,
+    side: int,
+    scale: float,
+    window_width: int,
+) -> int:
+    """Left edge for a small control that sits just after a centred line.
+
+    The window's message rows are centred and word-wrapped, so "beside the
+    message" is not a fixed corner: it moves with how long the message is.
+    This puts the control one gap past the text's right edge and no further
+    right than the button gutter, which means a message that wraps — and
+    whose laid-out width is therefore the whole row — gets the control at
+    the gutter instead of off the edge of the window. Both are beside it;
+    only one of them is on screen.
+    """
+    gap = max(3, round(4 * scale))
+    text_right = row_left + (row_width + min(float(text_width), float(row_width))) / 2
+    limit = window_width - side - button_margin(scale)
+    return int(max(row_left, min(limit, round(text_right + gap))))
+
+
 def clamped_position(
     frame: tuple[int, int, int, int],
     available: tuple[int, int, int, int],

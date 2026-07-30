@@ -21,7 +21,7 @@ import logging
 import re
 import threading
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -30,6 +30,17 @@ from typing import Iterator, Optional
 # have always read it from this module; what it must never be again is a
 # second copy of the version, written by hand and right for one release.
 from sottovoce import USER_AGENT
+from sottovoce.failure import (
+    ATTEMPT_ALBUM,
+    ATTEMPT_EXACT,
+    ATTEMPT_SEARCH,
+    CONNECTION,
+    FetchFailure,
+    HTTP,
+    PAYLOAD,
+    TIMEOUT,
+    UNKNOWN,
+)
 from sottovoce.http_client import ConnectionPool
 from sottovoce.player_monitor import PlayerSnapshot
 
@@ -66,7 +77,37 @@ _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_-]")
 class LyricsError(Exception):
     """Transient LRCLIB failure (network trouble, 4xx/5xx, bad payload).
     The outcome is unknown, so callers must not cache it — retrying later
-    may succeed."""
+    may succeed.
+
+    Carries a ``FetchFailure`` saying which of those it was and where in
+    the fallback chain it happened, so the window can offer the reason to
+    anyone who asks for it. The message stays what it always was; a raise
+    that gives no failure gets an UNKNOWN one built from it, which is what
+    keeps every existing ``LyricsError("...")`` a valid thing to raise.
+    """
+
+    def __init__(self, message: object, failure: Optional[FetchFailure] = None) -> None:
+        super().__init__(message)
+        self.failure = (
+            failure
+            if failure is not None
+            else FetchFailure(kind=UNKNOWN, detail=str(message))
+        )
+
+    def at(self, attempt: str) -> "LyricsError":
+        """The same failure, told where in the chain it happened.
+
+        The attempt is known one level up from where the error is raised —
+        ``_fetch_json`` makes a request and does not know which link of the
+        chain it is — so it is stamped on the way past rather than passed
+        down. A new exception rather than a mutated one: an exception that
+        rewrites itself as it propagates is a poor thing to read a
+        traceback from.
+        """
+        return LyricsError(
+            self.args[0] if self.args else str(self),
+            replace(self.failure, attempt=attempt),
+        )
 
 
 @dataclass(frozen=True)
@@ -142,18 +183,28 @@ def _fetch_json(url: str):
     try:
         response = _lrclib_pool().get(path, headers={"User-Agent": USER_AGENT})
     except (OSError, http.client.HTTPException) as exc:
+        # The socket's own words go on the record here and nowhere else:
+        # this is the log line that has room for them, and the window's
+        # reveal is a HUD (see failure.describe).
         logger.warning("GET %s -> error: %s", url, exc)
-        raise LyricsError(str(exc)) from exc
+        raise LyricsError(
+            str(exc), FetchFailure(kind=CONNECTION, detail=str(exc))
+        ) from exc
 
     logger.info("GET %s -> %d", url, response.status)
     if response.status == 404:
         return None
     if response.status != 200:
-        raise LyricsError(f"LRCLIB returned HTTP {response.status}")
+        raise LyricsError(
+            f"LRCLIB returned HTTP {response.status}",
+            FetchFailure(kind=HTTP, status=response.status),
+        )
     try:
         return json.loads(response.body)
     except ValueError as exc:
-        raise LyricsError(str(exc)) from exc
+        raise LyricsError(
+            str(exc), FetchFailure(kind=PAYLOAD, detail=str(exc))
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -165,7 +216,7 @@ class _Outcome:
     error: Optional[BaseException] = None
 
 
-def _run_attempts(urls: list[str]) -> Iterator[_Outcome]:
+def _run_attempts(urls: list[str], labels: list[str]) -> Iterator[_Outcome]:
     """Make every attempt at once; hand the results back in the order they
     were given, which is PRIORITY order and not completion order.
 
@@ -207,39 +258,60 @@ def _run_attempts(urls: list[str]) -> Iterator[_Outcome]:
             # A higher-priority attempt that never came back is not a
             # licence to use a lower-priority answer: the outcome is
             # unknown, which is a retry state.
-            yield _Outcome(error=LyricsError("LRCLIB did not answer in time"))
+            yield _Outcome(
+                error=LyricsError(
+                    "LRCLIB did not answer in time",
+                    FetchFailure(kind=TIMEOUT, attempt=labels[index]),
+                )
+            )
             return
         yield outcomes[index]
 
 
-def attempt_urls(snapshot: PlayerSnapshot) -> list[str]:
-    """The fallback chain as URLs, most precise first.
+def attempts(snapshot: PlayerSnapshot) -> list[tuple[str, str]]:
+    """The fallback chain as (label, URL) pairs, most precise first.
 
     /get with the album is the exact match; without it, the same question
     with one fewer thing to disagree about; /search is the loose one. Two
     attempts rather than three when Spotify reports no album, because the
     first two would then be the same request.
+
+    The label travels WITH the url rather than being a second list beside
+    it: the chain is two attempts long or three depending on the track,
+    and two lists that have to stay the same length are how a failure comes
+    to name the wrong attempt.
     """
     params = {"track_name": snapshot.title, "artist_name": snapshot.artist}
     if snapshot.duration_ms is not None:
         params["duration"] = str(round(snapshot.duration_ms / 1000))
 
-    urls = []
+    chain = []
     if snapshot.album:
-        urls.append(
-            LRCLIB_GET_URL
-            + "?"
-            + urllib.parse.urlencode({**params, "album_name": snapshot.album})
+        chain.append(
+            (
+                ATTEMPT_ALBUM,
+                LRCLIB_GET_URL
+                + "?"
+                + urllib.parse.urlencode({**params, "album_name": snapshot.album}),
+            )
         )
-    urls.append(LRCLIB_GET_URL + "?" + urllib.parse.urlencode(params))
-    urls.append(
-        LRCLIB_SEARCH_URL
-        + "?"
-        + urllib.parse.urlencode(
-            {"track_name": snapshot.title, "artist_name": snapshot.artist}
+    chain.append((ATTEMPT_EXACT, LRCLIB_GET_URL + "?" + urllib.parse.urlencode(params)))
+    chain.append(
+        (
+            ATTEMPT_SEARCH,
+            LRCLIB_SEARCH_URL
+            + "?"
+            + urllib.parse.urlencode(
+                {"track_name": snapshot.title, "artist_name": snapshot.artist}
+            ),
         )
     )
-    return urls
+    return chain
+
+
+def attempt_urls(snapshot: PlayerSnapshot) -> list[str]:
+    """The fallback chain as URLs alone."""
+    return [url for _, url in attempts(snapshot)]
 
 
 class LyricsProvider:
@@ -296,15 +368,27 @@ class LyricsProvider:
         preference between answers, and never depended on asking one
         question only after another had failed.
         """
-        urls = attempt_urls(snapshot)
-        for url, outcome in zip(urls, _run_attempts(urls)):
+        chain = attempts(snapshot)
+        labels = [label for label, _ in chain]
+        urls = [url for _, url in chain]
+        for (label, url), outcome in zip(chain, _run_attempts(urls, labels)):
             if outcome.error is not None:
                 # An attempt that outranks the rest could not be answered,
                 # so the outcome of the chain is unknown — exactly as when
                 # it was sequential and stopped here. Never cached.
+                #
+                # Stamped with the attempt on the way past: this is the one
+                # place that knows which link of the chain the error came
+                # from, and it is what lets the window answer "which one"
+                # rather than only "it failed".
                 if isinstance(outcome.error, LyricsError):
-                    raise outcome.error
-                raise LyricsError(str(outcome.error)) from outcome.error
+                    raise outcome.error.at(label)
+                raise LyricsError(
+                    str(outcome.error),
+                    FetchFailure(
+                        kind=UNKNOWN, attempt=label, detail=str(outcome.error)
+                    ),
+                ) from outcome.error
             if outcome.data is None:
                 continue  # a definitive 404: the next attempt has the floor
             if url.startswith(LRCLIB_SEARCH_URL):

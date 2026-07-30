@@ -131,11 +131,11 @@ def _main_app_service():
     try:
         import ServiceManagement
     except ImportError:
-        logger.info("ServiceManagement unavailable — no Open at Login")
+        logger.info("ServiceManagement unavailable: no Open at Login")
         return None
     service_class = getattr(ServiceManagement, "SMAppService", None)
     if service_class is None:  # macOS 12 or older
-        logger.info("SMAppService needs macOS 13 — no Open at Login")
+        logger.info("SMAppService needs macOS 13: no Open at Login")
         return None
     try:
         return service_class.mainAppService()

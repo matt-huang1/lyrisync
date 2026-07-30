@@ -20,7 +20,8 @@ can be logic rather than widget is a **Qt-free pure module** —
 `view_model.py`, `sync.py`, `sync_session.py`, `loop.py`, `menu.py`,
 `geometry.py`, `typography.py`, `appearance.py`, `transition.py`,
 `flight.py`, `app_positions.py`, `gestures.py`, `romanize.py`,
-`menubar.py`, `http_client.py`, `settings.py`, `notifications.py`. That is
+`menubar.py`, `http_client.py`, `settings.py`, `notifications.py`,
+`failure.py`. That is
 why the contrast floor is a test rather than a judgement, and why the
 whole suite runs headless on Linux.
 
@@ -55,7 +56,7 @@ Threads: the UI thread (Qt only — it never runs a subprocess), one monitor
 
 ## The testing guards
 
-`tests/conftest.py` shuts nine doors for the whole session. They are the
+`tests/conftest.py` shuts ten doors for the whole session. They are the
 alarm, not the fix — the seams are the fix.
 
 | guard | catches |
@@ -69,6 +70,7 @@ alarm, not the fix — the seams are the fix.
 | `hotkey._carbon()` | claiming ⇧⌘J from whoever is running the suite |
 | `frontmost._workspace()` | watching the developer switch apps |
 | `notifications._quartz()` | reading every window open on the machine |
+| `accessibility._workspace()` | how the developer's Mac is set up, and an observer on it |
 | `settings._legacy_settings()` | the plist the old name left behind |
 
 Rules that come with them:
@@ -147,6 +149,17 @@ Rules that come with them:
   `window.py`'s control colours, which are the one source for both.
 - **Everything that scales the window's opacity composes in one
   multiply** — the user's setting, the notification yield, the flight.
+- **No em dash in anything a person can see.** A middle dot where two
+  things are named side by side, a colon where the second half follows
+  from the first, a comma where the two halves are one sentence.
+  Docstrings and the history files are exempt; a test scans the syntax of
+  every module, because a text scan could only be satisfied by deleting
+  the explanations.
+- A failed lookup says **"lyrics unavailable, will retry" and no more**
+  unless asked. The reason (kind, HTTP status, the attempt it came from)
+  lives one click away, in the HUD's own register, and never carries the
+  socket's own message. **A track with no lyrics offers nothing to
+  click** — that distinction is the point.
 
 ### Motion
 
@@ -167,8 +180,40 @@ Rules that come with them:
   motion is measured, not photographed. A screenshot harness must pump the
   event loop, never `sleep` in it.
 
+### Accessibility
+
+- The three display settings are **observed live, like the appearance** —
+  one NSWorkspace observer, its own door, never frontmost.py's. Qt
+  publishes none of them.
+- **Reduce Motion takes the travel and leaves the fade.** The line's rise
+  is `travel = 0` (one signed `progress` is what makes that possible; the
+  choreography, its timing and its arrival on the timestamp are
+  untouched); the flight and the travel to a remembered position go
+  entirely, because movement is all they are. The tint cross-fade, the
+  yield and the glow stay: they are fades already.
+- **Reduce Transparency removes the material, it does not hide it.** A
+  hidden effect view is still one, and the flight hides and shows this one
+  for its own reasons. The background becomes the solid palette at alpha
+  255; the shipped 232/236 belong to a different case (vibrancy that would
+  not install) and stay.
+- **Increase Contrast implies Reduce Transparency** and the app derives
+  that rather than trusting the pair to arrive together.
+- Increase Contrast is a **short list of overrides, not a third palette**,
+  and each one is the alpha that clears a measured floor over the opaque
+  panel: 4.5:1 for anything read to follow a song, 3:1 for marks and
+  switched-off labels. Dropping the material does most of the work.
+- **The album tint's hairline is not lifted** to 3:1 and that is measured,
+  not forgotten: reaching it would cost the hue-only design, and nothing
+  is read against the hairline.
+
 ### System integration
 
+- **A `tell` block needs the app's dictionary at COMPILE time**, so the
+  snapshot script cannot run at all where Spotify is not installed and its
+  own "is not running" first line is never reached. The dictionary-free
+  probe is a **second script**, asked only when the snapshot fails, and
+  the answer is remembered — a Mac with no Spotify must not pay for a
+  compile that cannot succeed, three times a second, forever.
 - **Accessory activation policy is unconditional** and applied before any
   window exists, with `LSUIElement` in the plist for the instant before it
   runs. There is no Regular policy to fall back to.

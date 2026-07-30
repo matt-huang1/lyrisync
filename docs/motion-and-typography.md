@@ -184,3 +184,29 @@ One source for control colours: the window owns idle/hover/engaged, the
 stylesheet paints text with them and the symbol module tints the icon with
 them, so a glyph and the icon that replaced it cannot describe different
 states.
+
+## When the system asks for less of it
+
+Reduce Motion (System Settings → Accessibility → Display) is followed
+live, and what it takes is the **travel**, not the choreography.
+
+The line change is one signed `progress` carrying opacity and offset
+together, which is what makes this a length rather than a redesign:
+`travel = 0` leaves the same phase length, the same sine easing, the same
+In-then-Out pairing and the same arrival exactly on the timestamp. A rise
+becomes a cross-fade of identical duration.
+
+The flight to the menu bar item and the travel to a remembered position go
+entirely, rather than becoming quick versions of themselves. Movement is
+all they are — position, scale and opacity in the flight's case — so there
+is nothing left to keep once the movement is taken out, and a fade in
+place would be answering a question nobody asked. The window still hides,
+shows, and arrives where it was going. Any flight in the air when the
+setting changes gives back everything it borrowed first.
+
+The album-colour cross-fade, the notification yield and the
+learned-position glow are untouched: they are fades already, which is what
+Reduce Motion asks to be given *instead* of movement.
+
+Details and the measurements are in
+[contrast and accessibility](contrast-and-accessibility.md#reduce-motion).

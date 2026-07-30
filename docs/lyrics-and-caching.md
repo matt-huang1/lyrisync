@@ -195,3 +195,69 @@ cancelling lands.
 
 The two derived directories can be thrown away at any time: everything in
 them can be fetched again. The third cannot.
+
+## Why a lookup failed
+
+The window says **"lyrics unavailable, will retry"** and, on its own,
+nothing else. That is the right default: most people want to know the
+lyrics are not there and are coming back, and no more.
+
+It was also the only thing the app *could* say. The provider knew whether
+it was a 503, a timeout, a socket that never got there or a body that
+would not parse, and which of the two or three fallback attempts it
+happened on, and threw all of it away at `except LyricsError:`.
+
+Now a failure carries a `FetchFailure(kind, attempt, status, detail)` from
+the provider, through the fetch signal, into the view model, and out as
+`Display.detail`. `failure.describe` turns it into one line — and it is
+the *only* rendering of it, shared by the window and `sottovoce-lyrics`,
+because two surfaces writing their own sentence about one fact is how the
+window and a terminal tool came to disagree about a song's title once
+already.
+
+| what happened | what it says |
+|---|---|
+| a status that is neither 200 nor 404 | `LRCLIB answered HTTP 503 · album match` |
+| nothing came back in time | `LRCLIB did not answer in time · search` |
+| the socket never got there | `could not reach lrclib.net · title and artist` |
+| an answer arrived and was not JSON | `LRCLIB's answer could not be read · search` |
+
+The attempt is stamped **on the way past**: `_fetch_json` makes a request
+and does not know which link of the chain it is, `_fetch` does, and
+`LyricsError.at(label)` returns a *new* exception rather than mutating
+one. `attempt_urls` became `attempts()`, returning `(label, url)` pairs —
+the chain is two attempts long or three depending on whether Spotify
+reported an album, and two lists that have to stay the same length is
+exactly how a failure comes to name the wrong attempt.
+
+**The socket's own message does not go on the window.** "[Errno 8]
+nodename nor servname provided, or not known" is the right thing for a log
+and the wrong thing for a 460-point HUD; the kind already says which of
+the four things happened. It stays on the failure, and on the log line
+that already reported it.
+
+### The affordance
+
+A small ⓘ (`info.circle`, with a text glyph to fall back to) beside the
+message, mouse-only like everything else on this window. Clicking it puts
+the reason in the row underneath, which in this mode is empty, already the
+dim context colour, and already directly under the message it explains — a
+second widget would have been a second thing to place, style and keep in
+the type scale for a line on screen about as often as a track fails.
+Clicking again puts it away.
+
+It is placed from the *text* rather than pinned to a corner: the message
+is centred and the window is resizable, so a fixed position is beside the
+message at one width and stranded at every other.
+`geometry.beside_centred_text` owns the rule, including the wrapping case
+— where the laid-out width *is* the row and the control goes to the button
+gutter.
+
+The reveal survives the 30-second retry (which takes the mode ERROR →
+FETCHING → ERROR) and not a track change. Hiding the reason under somebody
+who had just asked for it would make the control feel broken; a new song is
+a different failure or none at all.
+
+**A track that genuinely has no lyrics offers nothing to click.** It says
+"no lyrics found", plainly, and that difference is the point of the whole
+thing.

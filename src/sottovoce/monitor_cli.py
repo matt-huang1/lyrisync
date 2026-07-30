@@ -73,7 +73,7 @@ def main() -> int:
         on_track_change=printer.on_track_change,
         on_position_update=printer.on_position_update,
     )
-    print("sottovoce player monitor — polling Spotify every 300ms, Ctrl-C to quit")
+    print("sottovoce player monitor · polling Spotify every 300ms, Ctrl-C to quit")
     print("(first run may trigger a macOS Automation permission prompt)")
     try:
         monitor.run()

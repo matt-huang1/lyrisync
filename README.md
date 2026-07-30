@@ -2,13 +2,16 @@
 
 Synced lyrics for the Spotify desktop app on macOS, in a floating window built for language learners.
 
-![Demo](docs/demo.gif)
+<p align="center">
+  <img src="docs/demo.gif" alt="The window following a song in Spotify, then shrinking into the menu bar" width="720">
+</p>
 
 ## Features
 
 - **Synced lyrics that float** — a frameless, always-on-top window shows the previous, current and next line, in time with playback.
 - **Lives in the menu bar**, not the Dock. The window shrinks into the menu bar item when you hide it and grows back out of it when you return. The item's glyph says three things at once, and each independently: its shape says whether a song is playing, its brightness says whether the lyrics are on screen, and a dot says a practice mode is running. Optionally the shape steps along as the lyric advances. Right-clicking the window gives you the same menu.
 - **Looks like macOS** — real vibrancy behind the lyrics, follows light and dark, and the sung line stays readable over a white document, a dark editor or video.
+- **Follows your accessibility settings**, live, the way it follows light and dark. Reduce Motion takes out the flight to the menu bar, the travel to a remembered position and the rise of each lyric, and leaves the fades. Reduce Transparency swaps the vibrancy for a solid panel. Increase Contrast lifts every text role to the 4.5:1 the sung line already promised, and draws the window's edge as an edge.
 - **⇧⌘J from anywhere** shows and hides the lyrics without switching away from what you were doing. No Accessibility permission.
 - **Album colour** — an optional layer that colours the window from the current cover's hue.
 - **Show on all desktops** — an optional mode that keeps the window visible across Spaces and over full-screen apps.
@@ -18,6 +21,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 - **Spoken reference** — pause the music and hear the current line read slowly, then carry on.
 - **Line looping and echo practice** — repeat a line, or alternate hearing it with a silent turn to sing it yourself.
 - **Tap-to-sync** — a song with plain lyrics only can be timed by hand. Your timings are saved and used from then on.
+- **A reason, if you want one** — when a lookup fails the window says "lyrics unavailable, will retry", and nothing else, because that is all most people need. Beside it is a small ⓘ: click it and it says which of the four things went wrong (an HTTP status, a timeout, an unreachable server, an unreadable answer) and which attempt in the fallback chain it came from. A song that simply has no lyrics says so plainly and offers nothing to click.
 - **Everything optional** — every learning feature is a toggle. With them all off, this is a simple synced-lyrics window.
 
 ## Requirements
@@ -34,10 +38,13 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 git clone git@github.com:matt-huang1/sottovoce.git
 cd sottovoce
 python3 -m venv .venv
-.venv/bin/pip install -e ".[build]"
+.venv/bin/pip install -e ".[build,dev]"
+make test          # optional, and the point of the dev extra
 make app
 mv dist/SottoVoce.app /Applications/
 ```
+
+There are two extras and they are not interchangeable. `build` is PyInstaller, which only `make app` needs; `dev` is pytest, which only `make test` needs. Installing `".[build]"` alone builds a working app and then fails the suite with `No module named pytest`, which is a missing extra rather than a broken checkout. Neither extra is needed to *run* the app — `pip install -e .` is enough for that.
 
 An app you build on your own Mac is never marked as downloaded, so macOS has no reason to question it: **it opens with an ordinary double-click and there is no security warning to click through.** No certificate, keychain or Xcode needed either — `make app` renders the icon, freezes the bundle and signs it ad-hoc in one step.
 
@@ -84,11 +91,12 @@ Your lyrics cache and any syncs you tapped out by hand are files on disk, not pr
 What development uses:
 
 ```sh
-.venv/bin/pip install -e .
+.venv/bin/pip install -e ".[dev]"
 .venv/bin/sottovoce
+make test
 ```
 
-It shares settings with the bundled app, so window position and every toggle carry over. More in [docs/packaging.md](docs/packaging.md).
+The `dev` extra is pytest and nothing else; drop it if you only want to run the app. It shares settings with the bundled app, so window position and every toggle carry over. More in [docs/packaging.md](docs/packaging.md).
 
 ## Usage
 

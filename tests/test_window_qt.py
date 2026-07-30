@@ -58,6 +58,7 @@ try:
 except Exception as exc:  # pragma: no cover - platform plugin missing
     pytest.skip(f"Qt cannot start: {exc}", allow_module_level=True)
 
+from sottovoce import accessibility  # noqa: E402
 from sottovoce import appearance as ap  # noqa: E402
 from sottovoce import frontmost  # noqa: E402
 from sottovoce import hotkey  # noqa: E402
@@ -69,6 +70,7 @@ from sottovoce import settings as preferences  # noqa: E402
 from sottovoce import vibrancy  # noqa: E402
 from sottovoce import window as w  # noqa: E402
 from sottovoce.artwork import ArtworkProvider  # noqa: E402
+from sottovoce.failure import FetchFailure  # noqa: E402
 from sottovoce.lyrics_provider import LyricsProvider, TrackLyrics  # noqa: E402
 from sottovoce.player_monitor import PlaybackState, PlayerSnapshot  # noqa: E402
 from sottovoce.view_model import Mode  # noqa: E402
@@ -135,6 +137,12 @@ def no_real_world(monkeypatch):
     # The conftest guard stays armed for anything that reaches around it.
     monkeypatch.setattr(w.frontmost, "_workspace", lambda: None)
     monkeypatch.setattr(w.frontmost, "own_bundle_id", lambda: None)
+    # Answered rather than blocked for the third time, and for the third
+    # time because every window built here reads it: with no workspace the
+    # accessibility door returns DisplayOptions() — nothing switched on,
+    # which is the plain window every other test in this file describes.
+    # Tests that want a setting on assign window._display_options.
+    monkeypatch.setattr(w.accessibility, "_workspace", lambda: None)
 
 
 @pytest.fixture
@@ -3761,3 +3769,407 @@ def test_a_repeat_poll_does_not_rewrite_the_interval(make_window, monkeypatch):
     for _ in range(5):
         window._check_notifications()
     assert writes == []
+
+
+# -- why the lyrics are not here -------------------------------------------
+#
+# The window's one line about a failed fetch was "lyrics unavailable, will
+# retry", which is true of a 503, of the wifi being off, and of a request
+# that timed out on the third attempt. The reason is now one click away and
+# no closer: it is offered beside that message and nowhere else, so a song
+# that simply has no lyrics still gets one plain line and nothing to dig at.
+
+
+def fail(window, why, track_id="t1"):
+    """A track whose lookup came back with a reason."""
+    window._on_track_change(snapshot(track_id=track_id))
+    window._on_fetch_finished(track_id, None, False, why)
+    window._title_card_until = 0.0
+    window._render()
+    APP.processEvents()
+
+
+HTTP_503 = FetchFailure(kind="http", status=503, attempt="album match")
+
+
+def test_the_message_itself_is_unchanged(make_window):
+    """The default is for the people who do not care why, and there are
+    more of them. Nothing about the affordance may change what the window
+    says on its own."""
+    window = make_window()
+    fail(window, HTTP_503)
+    assert window._current.text() == "lyrics unavailable, will retry"
+    assert window._upcoming.text() == ""
+
+
+def test_the_affordance_is_offered_only_for_a_service_failure(make_window):
+    """The distinction that has to stay obvious: a track with no lyrics is
+    not a track the service failed on."""
+    window = make_window()
+    fail(window, HTTP_503)
+    # isVisibleTo, not isVisible: this window was never shown.
+    assert window._why_button.isVisibleTo(window) is True
+
+    window._on_fetch_finished("t1", None, True)  # a genuine "no lyrics"
+    window._render()
+    assert window._view_model.display().mode is Mode.NO_LYRICS
+    assert window._current.text() == "no lyrics found"
+    assert window._why_button.isVisibleTo(window) is False
+
+
+def test_the_affordance_is_offered_nowhere_else(make_window):
+    """Every other mode: synced, plain, fetching, idle."""
+    window = make_window()
+    for lyrics in (SYNCED, PLAIN):
+        load(window, lyrics)
+        assert window._why_button.isVisibleTo(window) is False
+    window._on_track_change(snapshot(track_id="t9"))
+    window._title_card_until = 0.0
+    window._render()
+    assert window._view_model.display().mode is Mode.FETCHING
+    assert window._why_button.isVisibleTo(window) is False
+
+
+def test_clicking_reveals_the_specific_reason(make_window):
+    window = make_window()
+    fail(window, HTTP_503)
+    window._why_button.click()
+    APP.processEvents()
+    assert window._upcoming.text() == "LRCLIB answered HTTP 503 · album match"
+    assert window._why_button.isChecked()
+
+
+def test_clicking_again_puts_it_away(make_window):
+    """A thing to glance at, not a state to get stuck in."""
+    window = make_window()
+    fail(window, HTTP_503)
+    window._why_button.click()
+    window._why_button.click()
+    APP.processEvents()
+    assert window._upcoming.text() == ""
+    assert not window._why_button.isChecked()
+
+
+def test_each_kind_of_failure_says_which_it_was(make_window):
+    """The four the provider can tell apart, end to end."""
+    window = make_window()
+    for why, expected in (
+        (FetchFailure(kind="http", status=429, attempt="search"),
+         "LRCLIB answered HTTP 429 · search"),
+        (FetchFailure(kind="timeout", attempt="title and artist"),
+         "LRCLIB did not answer in time · title and artist"),
+        (FetchFailure(kind="connection", attempt="album match"),
+         "could not reach lrclib.net · album match"),
+        (FetchFailure(kind="payload", attempt="search"),
+         "LRCLIB's answer could not be read · search"),
+    ):
+        fail(window, why)
+        window._why_shown = True
+        window._render()
+        assert window._upcoming.text() == expected
+
+
+def test_the_reveal_survives_a_retry(make_window):
+    """The retry runs every 30s and takes the mode ERROR -> FETCHING ->
+    ERROR. Hiding the reason under somebody who had just asked for it
+    would make the control feel broken."""
+    window = make_window()
+    fail(window, HTTP_503)
+    window._why_button.click()
+    assert window._why_shown
+
+    window._view_model._error_at = -1000.0  # due now
+    window._tick_retry()
+    APP.processEvents()
+    assert window._view_model.display().mode is Mode.FETCHING
+    assert window._why_shown  # remembered, though nothing is on screen
+
+    window._on_fetch_finished("t1", None, False, HTTP_503)
+    APP.processEvents()
+    assert window._upcoming.text() == "LRCLIB answered HTTP 503 · album match"
+
+
+def test_a_new_song_asks_its_own_question(make_window):
+    """The reveal belongs to the failure that prompted it."""
+    window = make_window()
+    fail(window, HTTP_503)
+    window._why_button.click()
+    assert window._why_shown
+
+    fail(window, FetchFailure(kind="timeout", attempt="search"), track_id="t2")
+    assert not window._why_shown
+    assert window._upcoming.text() == ""
+
+
+def test_a_failure_with_nothing_to_say_offers_nothing(make_window):
+    """A fetch that failed before any reason existed. The message is
+    unchanged and there is simply nothing to click."""
+    window = make_window()
+    fail(window, None)
+    assert window._current.text() == "lyrics unavailable, will retry"
+    assert window._why_button.isVisibleTo(window) is False
+
+
+def test_the_control_sits_beside_the_message(make_window):
+    """Placed from the text rather than pinned to a corner: the message is
+    centred and the window is resizable, so a fixed position would be
+    beside it at one width and stranded at every other."""
+    window = make_window()
+    window.resize(460, 220)
+    fail(window, HTTP_503)
+    narrow = window._why_button.pos().x()
+
+    window.resize(700, 220)
+    APP.processEvents()
+    window._render()
+    wide = window._why_button.pos().x()
+    assert wide > narrow, "the control did not follow the message"
+    # And never off the edge: the gutter is where a wrapped message puts it.
+    assert window._why_button.pos().x() + window._why_button.width() <= window.width()
+
+
+def test_the_control_never_leaves_the_window_at_its_narrowest(make_window):
+    """The wrapping case, where the message's laid-out width IS the row."""
+    window = make_window()
+    window.resize(260, 200)
+    fail(window, HTTP_503)
+    APP.processEvents()
+    right = window._why_button.pos().x() + window._why_button.width()
+    assert 0 < window._why_button.pos().x()
+    assert right <= window.width()
+
+
+# -- macOS accessibility display settings ----------------------------------
+#
+# Read live, like the appearance: somebody who switches Reduce Motion on
+# because a migraine has started should not have to relaunch the app to be
+# believed. The settings themselves cannot be toggled from a test — the
+# domain is TCC-protected — so what is checked here is what the window does
+# when it is told.
+
+
+def tell(window, **options):
+    """Hand the window a set of display options, the way the watcher
+    would."""
+    window._on_display_options_changed(accessibility.DisplayOptions(**options))
+    APP.processEvents()
+
+
+def test_a_window_starts_with_nothing_switched_on(make_window):
+    window = make_window()
+    assert window._display_options == accessibility.NONE
+    assert window._palette is ap.palette_for(window._appearance)
+
+
+def test_the_window_watches_for_changes(make_window):
+    """The wiring, not the effect: an app that only looked at startup is
+    the app that is wrong for the rest of the session."""
+    window = make_window()
+    assert isinstance(window._display_watcher, accessibility.DisplayOptionsWatcher)
+    # No workspace in the suite, so the subscription simply finds nothing
+    # to observe — the same branch a machine without pyobjc takes.
+    assert window._display_watcher.active is False
+
+
+def test_the_observer_is_released_before_anything_is_destroyed(make_window):
+    """NSWorkspace holds a block that repaints a window being torn down,
+    the same hazard the activation watcher has."""
+    window = make_window()
+    stopped = []
+    window._display_watcher.stop = lambda: stopped.append(True)
+    window._shutdown()
+    assert stopped == [True]
+
+
+def test_the_same_options_twice_change_nothing(make_window):
+    window = make_window()
+    palette = window._palette
+    tell(window)
+    assert window._palette is palette
+
+
+# Reduce Motion.
+
+
+def test_reduce_motion_takes_the_travel_out_of_a_line_change(make_window):
+    """The fade stays and the rise goes. ``progress`` is one signed number
+    carrying both, so the travel is a length and this sets it to zero."""
+    window = make_window()
+    load(window, SYNCED)
+    assert window._current_fx.travel > 0
+
+    tell(window, reduce_motion=True)
+    assert window._current_fx.travel == 0.0
+    # And the choreography itself is untouched: the same timers, the same
+    # phase length, the arrival still on the timestamp.
+    window._on_position_update(snapshot(position=0.2))
+    assert window._swap_timer.isActive()
+
+
+def test_the_travel_comes_back(make_window):
+    window = make_window()
+    tell(window, reduce_motion=True)
+    tell(window)
+    assert window._current_fx.travel > 0
+
+
+def test_a_resize_under_reduce_motion_does_not_restore_the_travel(make_window):
+    """_apply_scale recomputes it, so it has to go through the same
+    place."""
+    window = make_window()
+    tell(window, reduce_motion=True)
+    window.resize(640, 300)
+    APP.processEvents()
+    assert window._current_fx.travel == 0.0
+
+
+def test_reduce_motion_hides_the_window_without_the_flight(make_window):
+    window = make_window()
+    tell(window, reduce_motion=True)
+    window._set_lyrics_visible(False)
+    APP.processEvents()
+    assert window._flight_anim is None
+    assert not window.isVisible()
+    window._set_lyrics_visible(True)
+    APP.processEvents()
+    assert window._flight_anim is None
+    assert window.isVisible()
+
+
+def test_reduce_motion_gives_back_everything_the_flight_borrowed(make_window):
+    """Switched on mid-journey: the flight in the air must not be left
+    holding the window's position, opacity or scale."""
+    window = make_window()
+    window.move(400, 300)
+    window._set_lyrics_visible(False)  # a flight is now running
+    assert window._flight_anim is not None
+
+    tell(window, reduce_motion=True)
+    window._set_lyrics_visible(True)
+    APP.processEvents()
+    assert window._flight_anim is None
+    assert window._flight_home is None
+    assert window._flight_opacity == 1.0
+    assert window.pos() == QPoint(400, 300)
+
+
+def test_reduce_motion_moves_the_window_without_travelling(make_window):
+    """Per-app position memory is about where the window lives, not about
+    how it gets there: it still arrives, it simply does not travel."""
+    window = make_window()
+    window.move(100, 100)
+    tell(window, reduce_motion=True)
+    window._move_to(QPoint(300, 240))
+    APP.processEvents()
+    assert window._move_anim is None
+    assert window.pos() == QPoint(300, 240)
+
+
+# Reduce Transparency.
+
+
+def test_reduce_transparency_paints_the_solid_background(make_window):
+    window = make_window()
+    tell(window, reduce_transparency=True)
+    assert window._palette.solid[3] == 255
+    assert window._material is None
+    assert window._current_background() == window._palette.solid
+
+
+def test_reduce_transparency_refuses_to_install_a_material(make_window):
+    """The setting is about that view and nothing else, so the honest
+    answer is not to build one."""
+    window = make_window()
+    tell(window, reduce_transparency=True)
+    assert window._apply_vibrancy() is False
+
+
+def test_the_material_is_removed_rather_than_hidden(make_window):
+    """A hidden effect view is still an effect view, and the flight hides
+    and shows this one for its own reasons — which would put a suppressed
+    material straight back."""
+    window = make_window()
+
+    class FakeMaterial:
+        def __init__(self):
+            self.removed = False
+            self.hidden = None
+
+        def removeFromSuperview(self):
+            self.removed = True
+
+        def setHidden_(self, value):
+            self.hidden = value
+
+    material = FakeMaterial()
+    window._native_applied = True
+    window._material = material
+    tell(window, reduce_transparency=True)
+    assert material.removed
+    assert material.hidden is None
+    assert window._material is None
+
+
+def test_switching_it_off_asks_for_the_material_back(make_window, monkeypatch):
+    window = make_window()
+    window._native_applied = True
+    tell(window, reduce_transparency=True)
+    asked = []
+    monkeypatch.setattr(
+        window, "_apply_vibrancy", lambda: asked.append(True) or False
+    )
+    tell(window)
+    assert asked == [True]
+
+
+def test_the_background_before_the_window_is_shown_is_not_touched(make_window):
+    """The first install happens in showEvent and consults the same
+    options; asking for one before that would be asking about a window
+    that has no native view yet."""
+    window = make_window()
+    window._native_applied = False
+    window._material = None
+    tell(window, reduce_transparency=True)  # must not raise
+    assert window._material is None
+
+
+# Increase Contrast.
+
+
+def test_increase_contrast_lifts_the_palette_and_drops_the_material(make_window):
+    """macOS turns Reduce Transparency on with it, and the app derives the
+    same thing rather than trusting the pair to arrive together."""
+    window = make_window()
+    tell(window, increase_contrast=True)
+    assert window._palette.solid[3] == 255
+    assert window._palette is not ap.palette_for(window._appearance)
+    for role, value in ap.HIGH_CONTRAST_OVERRIDES[window._appearance].items():
+        assert getattr(window._palette, role) == value
+
+
+def test_the_lifted_palette_reaches_the_stylesheet(make_window):
+    """The colours are painted from a stylesheet, so a palette nobody
+    applied is a setting that did nothing."""
+    window = make_window()
+    before = window.styleSheet()
+    tell(window, increase_contrast=True)
+    assert window.styleSheet() != before
+    assert ap.rgba(window._palette.control_idle) in window.styleSheet()
+
+
+def test_an_appearance_change_keeps_the_accessibility_settings(make_window):
+    """Two systems the window follows, one palette. Whichever moves, both
+    are asked again."""
+    window = make_window()
+    tell(window, increase_contrast=True)
+    other = (
+        ap.Appearance.LIGHT
+        if window._appearance is ap.Appearance.DARK
+        else ap.Appearance.DARK
+    )
+    window._appearance = other
+    window._palette = window._palette_now()
+    assert window._palette.solid[3] == 255
+    assert (
+        window._palette.border == ap.HIGH_CONTRAST_OVERRIDES[other]["border"]
+    )

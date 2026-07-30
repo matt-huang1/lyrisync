@@ -222,8 +222,98 @@ LIGHT = Palette(
 _PALETTES = {Appearance.LIGHT: LIGHT, Appearance.DARK: DARK}
 
 
-def palette_for(appearance: Appearance) -> Palette:
-    return _PALETTES[appearance]
+# -- what macOS's accessibility display settings change -------------------
+
+# Increase Contrast, as the roles it moves and nothing else.
+#
+# Stated as overrides rather than as two more whole palettes on purpose:
+# what changes is a short, arguable list, and a third full copy of thirty
+# colours would be three places for a value to drift instead of two. Every
+# number here is the alpha that clears a floor over the OPAQUE panel — the
+# background this setting always comes with, since Increase Contrast
+# implies Reduce Transparency (see accessibility.DisplayOptions) — with a
+# few steps of rounding headroom, the same convention the scrim's own
+# alpha uses.
+#
+# Two floors, because two kinds of thing are being lifted. Text roles are
+# held to 4.5:1, which is the promise the sung line already carries and
+# which the receding roles are deliberately below by default. The
+# scrollbar, the hairline and the DISABLED labels are not text anybody has
+# to read to follow a song, so they are held to 3:1 — visible rather than
+# legible.
+#
+# Most roles need nothing at all, and that is the measurement rather than
+# an omission: dropping the material is worth 2-4x on its own (the sung
+# line goes from 4.70:1 to 17.93:1 in dark), so what is left over is the
+# handful below. Measured in tests/test_accessibility.py, which pins both
+# floors role by role rather than trusting this comment.
+HIGH_CONTRAST_OVERRIDES = {
+    Appearance.DARK: {
+        # 3.98:1 at 105; 115 crosses 4.5:1.
+        "control_idle": (255, 255, 255, 120),
+        # 2.44:1 at 70; 85 crosses 3:1.
+        "scrollbar": (255, 255, 255, 90),
+        # 2.16:1 at 60 over its own fill; 86 crosses 3:1.
+        "sync_text_off": (255, 255, 255, 90),
+        # 1.38:1 at 30; 85 crosses 3:1. This is what Increase Contrast
+        # asks for most literally — macOS draws a border where it had
+        # been drawing an edge.
+        "border": (255, 255, 255, 90),
+    },
+    Appearance.LIGHT: {
+        # 4.03:1 at 140; 149 crosses 4.5:1. Still the dimmest text role,
+        # which is what keeps the hierarchy: context sits at 165.
+        "header": (18, 19, 26, 155),
+        # 3.16:1 at 120; 149 crosses 4.5:1.
+        "control_idle": (18, 19, 26, 155),
+        # 1.84:1 at 70; 116 crosses 3:1.
+        "scrollbar": (18, 19, 26, 124),
+        # 1.65:1 at 60 over its own fill; 119 crosses 3:1.
+        "sync_text_off": (18, 19, 26, 124),
+        # 2.69:1 at 110 over its own fill; 120 crosses 3:1.
+        "tap_text_off": (18, 19, 26, 124),
+        # 1.41:1 at 38; 107 crosses 3:1.
+        "border": (0, 0, 0, 112),
+        # The one role lifted by opacity rather than by alpha arithmetic:
+        # 4.25:1 over the hovered amber fill at 245, 4.56:1 at 255. The
+        # colour is already as dark as the amber pairing allows.
+        "attempt_text": (140, 88, 0, 255),
+    },
+}
+
+
+def opaque(colour: RGBA) -> RGBA:
+    """``colour`` with nothing showing through it.
+
+    Reduce Transparency is a request, not a preference to weigh: a window
+    that answered it with "almost opaque" would be answering a different
+    question. The shipped ``solid`` alphas (232, 236) exist for a
+    different case — the fallback when vibrancy could not be installed at
+    all — and are left exactly as they are.
+    """
+    red, green, blue, _ = colour
+    return (red, green, blue, 255)
+
+
+def palette_for(
+    appearance: Appearance,
+    *,
+    high_contrast: bool = False,
+    opaque_background: bool = False,
+) -> Palette:
+    """The colours to paint with, for this appearance and what the system
+    has been asked for.
+
+    Both keywords default off, so the plain call still returns the shipped
+    palette object itself — "no accessibility setting on" and "this app
+    before those settings were followed" are the same pixels, by identity.
+    """
+    palette = _PALETTES[appearance]
+    if high_contrast:
+        palette = replace(palette, **HIGH_CONTRAST_OVERRIDES[appearance])
+    if opaque_background:
+        palette = replace(palette, solid=opaque(palette.solid))
+    return palette
 
 
 def rgba(colour: RGBA) -> str:

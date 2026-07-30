@@ -136,7 +136,7 @@ def _carbon():
     try:
         lib = ctypes.cdll.LoadLibrary(_CARBON)
     except OSError:
-        logger.info("Carbon unavailable — no global hotkey")
+        logger.info("Carbon unavailable: no global hotkey")
         return None
 
     lib.GetApplicationEventTarget.argtypes = []
@@ -218,7 +218,7 @@ class GlobalHotkey:
             )
             if status != _NO_ERR:
                 logger.warning(
-                    "could not install the hotkey handler (OSStatus %d) — %s "
+                    "could not install the hotkey handler (OSStatus %d): %s "
                     "will do nothing; use the menu bar item to show or hide "
                     "the lyrics",
                     status,
@@ -238,7 +238,7 @@ class GlobalHotkey:
                 # Leave nothing behind on the way out of a failure.
                 lib.RemoveEventHandler(handler_ref)
                 logger.warning(
-                    "could not claim %s (OSStatus %d) — use the menu bar "
+                    "could not claim %s (OSStatus %d): use the menu bar "
                     "item to show or hide the lyrics",
                     describe(self._combination),
                     status,

@@ -138,7 +138,7 @@ def decode_colour(data: bytes) -> Optional[tuple[int, int, int]]:
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QImage
     except ImportError:  # pragma: no cover - PySide6 is a hard dependency
-        raise ArtworkError("PySide6 unavailable — cannot read artwork")
+        raise ArtworkError("PySide6 unavailable: cannot read artwork")
     image = QImage()
     if not image.loadFromData(data):
         raise ArtworkError(f"artwork did not decode ({len(data)} bytes)")

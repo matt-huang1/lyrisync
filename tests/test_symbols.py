@@ -189,3 +189,31 @@ def test_the_practice_dot_adds_ink_without_changing_the_bars():
         symbols.menubar_pixmap(dotted, 44).toImage()
         != symbols.menubar_pixmap(plain, 44).toImage()
     )
+
+
+def test_a_checkable_button_gets_its_engaged_colour_as_a_state():
+    """The distinction that made the first attempt do nothing visible.
+
+    A checked QPushButton draws its icon in ``QIcon.State.On``, still in
+    Normal or Active MODE. ``QIcon.Mode.Selected`` is what an item view
+    asks for and a button never does — so an engaged colour baked in there
+    is a colour nothing ever draws. Found by screenshot: the control
+    stayed grey when checked.
+    """
+    import ast
+    import inspect
+
+    # Scanned as syntax, not as text: this test's own explanation names
+    # the symbol it forbids, and so does the function's docstring. A
+    # substring scan could only be satisfied by deleting the reasoning,
+    # which is the trap test_notifications.py already documents.
+    tree = ast.parse(inspect.getsource(symbols.symbol_icon))
+    body = tree.body[0].body[1:]  # everything after the docstring
+    used = {
+        node.attr
+        for statement in body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Attribute)
+    }
+    assert "Selected" not in used
+    assert "On" in used

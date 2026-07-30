@@ -209,7 +209,7 @@ class AppPositions:
         try:
             decoded = json.loads(raw)
         except (ValueError, TypeError):
-            logger.info("stored app positions were unreadable — starting empty")
+            logger.info("stored app positions were unreadable: starting empty")
             return positions
         if not isinstance(decoded, list):
             return positions
