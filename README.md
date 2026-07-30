@@ -7,7 +7,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 ## Features
 
 - **Synced lyrics that float** — a frameless, always-on-top window shows the previous, current and next line, in time with playback.
-- **Lives in the menu bar**, not the Dock. Right-clicking the window gives you the same menu.
+- **Lives in the menu bar**, not the Dock. The window shrinks into the menu bar item when you hide it and grows back out of it when you return, and the item's glyph says whether anything is playing and whether a practice mode is running. Right-clicking the window gives you the same menu.
 - **Looks like macOS** — real vibrancy behind the lyrics, follows light and dark, and the sung line stays readable over a white document, a dark editor or video.
 - **⇧⌘J from anywhere** shows and hides the lyrics without switching away from what you were doing. No Accessibility permission.
 - **Album colour** — an optional layer that colours the window from the current cover's hue.
@@ -87,7 +87,7 @@ Two terminal tools exist for debugging: `lyrisync-monitor` and `lyrisync-lyrics`
 
 ## Architecture
 
-A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 781 tests run headless on Linux CI without touching the network, your settings or your Spotify.
+A worker thread polls the Spotify desktop app with one batched AppleScript call every ~300 ms — no Web API, no credentials. Lyrics come from [LRCLIB](https://lrclib.net), cached locally by track ID; syncs you tap out yourself live separately in `.user_syncs/` and are never treated as cache. The monitor and the lyrics provider know nothing about the UI. Display state, timing, menu gating, the type scale, geometry and the colour palettes live in pure, Qt-free modules behind a thin PySide6 window — which is why the contrast floor is a test rather than a judgement, and why all 829 tests run headless on Linux CI without touching the network, your settings or your Spotify.
 
 ## Documentation
 

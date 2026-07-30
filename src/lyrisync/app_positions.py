@@ -364,18 +364,21 @@ def may_learn(
 
 
 def move_refusal(
-    *, enabled: bool, visible: bool, dragging: bool, syncing: bool
+    *, enabled: bool, visible: bool, dragging: bool, syncing: bool, flying: bool
 ) -> Optional[str]:
     """Why the window may NOT be moved to a remembered position, or None
     if it may.
 
-    Each refusal is a different kind of "the user is in the middle of
-    something":
+    Each refusal is a different kind of "something else is already
+    happening to this window":
 
-    - **dragging** — they have hold of the window. Moving it under the
-      cursor would be the app fighting the hand.
+    - **dragging** — the user has hold of it. Moving it under the cursor
+      would be the app fighting the hand.
     - **syncing** — a tap-to-sync pass is a rhythm game against a moving
       target; the tap bar moving mid-pass would cost stamps.
+    - **flying** — it is on its way to or from the menu bar item, and that
+      journey owns its position until it lands. Two animations of one
+      window's position could only fight.
     - **hidden** — there is nothing to move, and moving it anyway would
       mean it reappears somewhere it was never seen to go.
 
@@ -388,17 +391,25 @@ def move_refusal(
         return "the window is being dragged"
     if syncing:
         return "a sync pass is running"
+    if flying:
+        return "the window is on its way to or from the menu bar"
     if not visible:
         return "the window is hidden"
     return None
 
 
-def may_move(*, enabled: bool, visible: bool, dragging: bool, syncing: bool) -> bool:
+def may_move(
+    *, enabled: bool, visible: bool, dragging: bool, syncing: bool, flying: bool = False
+) -> bool:
     """Whether the window may be moved to a remembered position. The
     refusal without its reason."""
     return (
         move_refusal(
-            enabled=enabled, visible=visible, dragging=dragging, syncing=syncing
+            enabled=enabled,
+            visible=visible,
+            dragging=dragging,
+            syncing=syncing,
+            flying=flying,
         )
         is None
     )
@@ -465,15 +476,33 @@ def status_summary(
 # back, which is why the tint is not touched and nothing is captured.
 
 
-# How long the whole acknowledgement lasts, rise and fall together. Two
-# line-change phases, deriving from the one constant the window's motion is
-# already built out of rather than inventing a number beside it.
-GLOW_SECONDS = 0.52
+# How long the whole acknowledgement lasts, rise and fall together.
+#
+# Was two line-change phases (520ms) and that was too quick to catch: the
+# edge is one device pixel, so the eye has to already be on it. Three
+# phases, still derived from the one constant the window's motion is built
+# out of, and still short enough that it is over before it becomes a thing
+# being watched.
+GLOW_SECONDS = 0.78
 
 # The most of the warm colour the edge ever carries, as a mix towards it.
-# Short of 1.0 because this is an acknowledgement and not an alert: the
-# hairline should look briefly warmer, not briefly replaced.
-GLOW_PEAK = 0.85
+# Now the whole way: at 0.85 the amber was still being averaged with a
+# hairline that is nearly transparent at rest, and what arrived was a
+# slightly warmer grey. The peak is what makes this perceptible at all, so
+# it is the one that went to the limit.
+GLOW_PEAK = 1.0
+
+# How much wider the hairline gets at the peak, as a multiple of its
+# resting width.
+#
+# The second half of being noticeable, and the half that does the work: a
+# single device pixel changing colour is a change of a few hundred pixels
+# on a 460-point window, which is nothing at the edge of attention. Three
+# device pixels of warm edge is a shape change, and the eye is far better
+# at those. It is still an EDGE — it grows inward from the same line, and
+# the growth is on the same paint-time mix as the colour, so it returns
+# with it.
+GLOW_WIDTH_GAIN = 2.0
 
 
 def glow_intensity(phase: float) -> float:
@@ -488,6 +517,18 @@ def glow_intensity(phase: float) -> float:
     if phase <= 0.0 or phase >= 1.0:
         return 0.0
     return GLOW_PEAK * math.sin(math.pi * phase)
+
+
+def glow_width(base_width: float, intensity: float) -> float:
+    """How wide the hairline is drawn at this much glow.
+
+    Grows from its resting width to ``1 + GLOW_WIDTH_GAIN`` times it and
+    back, on the same intensity as the colour — one number driving both,
+    so the edge cannot be left thick and cool or thin and warm. Returns
+    the resting width exactly at zero, which is what makes the loan
+    return itself.
+    """
+    return base_width * (1.0 + GLOW_WIDTH_GAIN * max(0.0, intensity))
 
 
 def may_acknowledge(*, now: float, last: Optional[float]) -> bool:

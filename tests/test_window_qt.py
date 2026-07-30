@@ -58,6 +58,7 @@ from lyrisync import frontmost  # noqa: E402
 from lyrisync import hotkey  # noqa: E402
 from lyrisync import login_item  # noqa: E402
 from lyrisync import menu as m  # noqa: E402
+from lyrisync import menubar as mb  # noqa: E402
 from lyrisync import vibrancy  # noqa: E402
 from lyrisync import window as w  # noqa: E402
 from lyrisync.artwork import ArtworkProvider  # noqa: E402
@@ -211,6 +212,18 @@ def load(window, lyrics, track_id="t1"):
     APP.processEvents()
 
 
+def land(window):
+    """Run the hide/show flight to its end without waiting it out.
+
+    The window now travels to and from the menu bar item, so "hidden" is
+    where the journey lands rather than what the click does — the same
+    shape as finish_move for the travel to a remembered position.
+    """
+    if window._flight_anim is not None:
+        window._flight_anim.setCurrentTime(window._flight_anim.duration())
+    APP.processEvents()
+
+
 def visible_keys(window):
     """The menu's visible entries, in menu order, as menu.py keys."""
     by_action = {id(a): key for key, a in window._menu_actions.items()}
@@ -274,6 +287,7 @@ def test_no_system_tray_is_survivable(monkeypatch, make_window):
     assert window._menu is not None
     window._refresh_menu()
     window._set_lyrics_visible(False)
+    land(window)
     assert window.isVisible() is False
 
 
@@ -391,7 +405,7 @@ def test_hiding_the_lyrics_leaves_everything_else_running(make_window):
     stamped = window._view_model.sync_session.index
 
     window._menu_actions[m.SHOW_LYRICS].trigger()  # unchecks -> hide
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is False
     assert window._monitor_thread.isRunning() is True
     assert window._view_model.sync_session is not None
@@ -428,7 +442,7 @@ def test_showing_again_restores_the_current_display(make_window):
         )
     )
     window._set_lyrics_visible(True)
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is True
     assert window._current.text() == "two"  # caught up, not the stale line
 
@@ -1616,11 +1630,11 @@ def test_the_learned_name_reaches_the_map(make_window):
 
 
 def listed_apps(window):
-    """The app rows, without the hint that explains what clicking does."""
+    """The app rows, which are all of them: the list is a readout."""
     return [
         action.text()
         for action in window._positions_menu.actions()
-        if action.isEnabled() and not action.isSeparator()
+        if not action.isSeparator()
     ]
 
 
@@ -1650,30 +1664,28 @@ def test_the_remembered_apps_menu_is_rebuilt_from_the_map(make_window):
     assert listed_apps(window) == []
 
 
-def test_clicking_a_remembered_app_forgets_only_that_one(make_window):
+def test_the_list_is_a_readout_with_nothing_to_click(make_window):
+    """Per-app forget was removed rather than kept. Re-dragging the window
+    in an app overwrites its position, so forgetting one app can only mean
+    "stop moving the window for this one" — which is not a thing anybody
+    wants for one app while wanting it for the others. Forget-all covers
+    the wish that is real."""
     window = remembering(make_window)
     end_a_drag(window, 300, 200)
-    window._frontmost, window._frontmost_name = SAFARI, "Safari"
-    end_a_drag(window, 40, 60)
+
     window._rebuild_positions_menu()
 
-    safari = next(
-        a for a in window._positions_menu.actions() if a.text() == "Safari"
-    )
-    safari.trigger()
-
-    assert window._positions.peek(SAFARI) is None
-    assert window._positions.peek(VSCODE) == (300, 200)
-    assert window._settings.value("window/app_positions") == window._positions.to_json()
+    rows = [a for a in window._positions_menu.actions() if not a.isSeparator()]
+    assert rows and not any(row.isEnabled() for row in rows)
+    assert m.FORGET_POSITIONS in visible_keys(window)
 
 
-def test_forgetting_the_last_app_takes_the_list_away_with_it(make_window):
+def test_forgetting_everything_takes_the_list_away_with_it(make_window):
     window = remembering(make_window)
     end_a_drag(window, 300, 200)
     assert m.POSITION_LIST in visible_keys(window)
 
-    window._rebuild_positions_menu()
-    next(a for a in window._positions_menu.actions() if a.text() == "Code").trigger()
+    window._menu_actions[m.FORGET_POSITIONS].trigger()
 
     assert m.POSITION_LIST not in visible_keys(window)
     assert m.FORGET_POSITIONS not in visible_keys(window)
@@ -2113,6 +2125,321 @@ def test_the_artwork_task_never_raises_into_the_pool(make_window):
     assert reported == [("t1", None)]
 
 
+# -- leaving for the menu bar, and coming back ----------------------------
+
+
+def half_way(window):
+    """Stop a flight in the middle of itself, where everything it borrowed
+    is borrowed."""
+    window._flight_anim.setCurrentTime(window._flight_anim.duration() // 2)
+    APP.processEvents()
+
+
+def at_menu_bar(window, rect=...):
+    """Put the menu bar item somewhere, as macOS would report it.
+
+    The offscreen platform has no menu bar at all, so the real geometry is
+    empty everywhere the suite runs — which is the FALLBACK path, and
+    testing only that would leave the flight itself unexercised. The
+    default sits at the top right of whatever screen this platform claims,
+    where a menu bar item actually is.
+    """
+    if rect is ...:
+        screen = APP.primaryScreen().geometry()
+        rect = (screen.right() - 200, screen.top(), 38, 34)
+    window._menubar_item_rect = lambda: rect
+
+
+def test_hiding_flies_the_window_to_the_menu_bar(make_window):
+    """It used to blink out, which said nothing about where it had gone —
+    the way back was something to remember rather than something seen."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window.move(400, 500)
+    at_menu_bar(window)
+
+    window._set_lyrics_visible(False)
+
+    assert window._flight_anim is not None
+    assert window.isVisible() is True  # still on its way
+    half_way(window)
+    assert window.pos() != QPoint(400, 500)  # heading for the menu bar
+    assert window.windowOpacity() < 1.0
+    land(window)
+    assert window.isVisible() is False
+
+
+def test_the_window_is_put_back_exactly_where_it_was(make_window):
+    """The flight borrows the window's position for the length of the
+    journey. A window that came back an inch from where the user left it
+    would be the feature undoing the one it sits next to."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window.move(400, 500)
+    at_menu_bar(window)
+
+    window._set_lyrics_visible(False)
+    land(window)
+    assert window.pos() == QPoint(400, 500)
+    assert window.windowOpacity() == window._opacity
+
+    window._set_lyrics_visible(True)
+    land(window)
+    assert window.pos() == QPoint(400, 500)
+    assert window.windowOpacity() == window._opacity
+
+
+def test_showing_grows_the_window_out_of_the_menu_bar(make_window):
+    window = make_window()
+    window.apply_saved_visibility()
+    window.move(400, 500)
+    at_menu_bar(window)
+    window._set_lyrics_visible(False)
+    land(window)
+
+    window._set_lyrics_visible(True)
+
+    assert window.isVisible() is True  # visible for the whole arrival
+    half_way(window)
+    assert window.pos() != QPoint(400, 500)
+    assert 0.0 < window.windowOpacity() < 1.0
+    land(window)
+    assert window.pos() == QPoint(400, 500)
+
+
+def test_an_interrupted_flight_leaves_no_ghost(make_window):
+    """The hotkey pressed twice quickly. Whatever happens, the window ends
+    up at its own position, at its own opacity, at full size."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window.move(400, 500)
+    at_menu_bar(window)
+
+    window._set_lyrics_visible(False)
+    half_way(window)
+    window._set_lyrics_visible(True)  # changed their mind
+    land(window)
+
+    assert window.isVisible() is True
+    assert window.pos() == QPoint(400, 500)
+    assert window.windowOpacity() == window._opacity
+    assert window._flight_anim is None
+
+
+def test_a_reversal_picks_up_where_the_journey_had_got_to(make_window):
+    """Rather than starting again from the beginning, which would be the
+    window ignoring the first press."""
+    window = make_window()
+    window.apply_saved_visibility()
+    at_menu_bar(window)
+
+    window._set_lyrics_visible(False)
+    half_way(window)
+    midway = window.pos()
+
+    window._set_lyrics_visible(True)
+    assert window.pos() == midway  # continues from here
+    assert window._flight_anim.duration() < w.flight.FLIGHT_MS
+
+
+def test_shutdown_lands_the_window_before_saving_where_it_is(make_window):
+    """Quitting mid-flight must not persist the menu bar's corner as where
+    the user left the window."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window.move(400, 500)
+    at_menu_bar(window)
+
+    window._set_lyrics_visible(False)
+    half_way(window)
+    window._shutdown()
+
+    assert window._flight_anim is None
+    assert window._settings.value("window/pos") == QPoint(400, 500)
+    assert window._settings.value("window/visible", type=bool) is False
+
+
+def test_a_window_with_no_menu_bar_item_fades_where_it_stands(make_window):
+    """Behind the notch, in an overflow, or no menu bar item at all. It
+    says less than a flight and it cannot be wrong."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window.move(400, 500)
+    at_menu_bar(window, None)  # what a hidden item comes back as
+
+    window._set_lyrics_visible(False)
+    half_way(window)
+
+    assert window.pos() == QPoint(400, 500)  # no travel
+    assert window.windowOpacity() < 1.0  # but it does fade
+    land(window)
+    assert window.isVisible() is False
+    assert window.windowOpacity() == window._opacity
+
+
+def test_an_item_off_every_screen_is_not_flown_to(make_window):
+    """A stale rectangle after a display change would otherwise throw the
+    window off the edge of the world."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window.move(400, 500)
+    at_menu_bar(window, (-9000, -9000, 38, 34))
+
+    window._set_lyrics_visible(False)
+    half_way(window)
+
+    assert window.pos() == QPoint(400, 500)
+
+
+def test_the_window_is_not_dragged_while_it_is_flying(make_window):
+    """Qt hit-tests the full-size layout even while the content is drawn at
+    a fraction of it, so a press would grab something invisible at a
+    position about to be given back."""
+    window = make_window()
+    window.apply_saved_visibility()
+    at_menu_bar(window)
+    window._set_lyrics_visible(False)
+    half_way(window)
+
+    window.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(30, 30),
+            QPointF(30, 30),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+
+    assert window._drag_offset is None
+    assert not window._resize_edges
+
+
+def test_the_flight_never_activates_the_app(make_window):
+    """The window is unfocusable by design, and hiding it must not be the
+    one thing that brings LyriSync forward. Recorded rather than asserted
+    on isActiveWindow, which the offscreen platform answers however it
+    likes: what matters is that the flight never ASKS."""
+    window = make_window()
+    window.apply_saved_visibility()
+    at_menu_bar(window)
+    asked = []
+    window.activateWindow = lambda: asked.append("activate")
+    window.raise_ = lambda: asked.append("raise")
+
+    window._set_lyrics_visible(False)
+    land(window)
+    window._set_lyrics_visible(True)
+    land(window)
+
+    assert asked == []
+    assert bool(window.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+    assert window.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+
+def test_starting_up_does_not_fly(make_window):
+    """apply_saved_visibility is the app arriving, not the user asking for
+    the window back. A flight there would animate something nobody did."""
+    window = make_window()
+    window.apply_saved_visibility()
+    assert window._flight_anim is None
+    assert window.isVisible() is True
+
+
+# -- the menu bar glyph ---------------------------------------------------
+
+
+def test_the_glyph_is_idle_before_anything_plays(with_tray, make_window):
+    window = make_window()
+    assert window._tray_state == mb.IDLE
+
+
+def test_the_glyph_follows_the_song_and_the_window(with_tray, make_window):
+    window = make_window()
+    window.apply_saved_visibility()
+    window._last_state = PlaybackState.PLAYING
+    window._refresh_menu()
+    assert window._tray_state == mb.ACTIVE
+
+    window._set_lyrics_visible(False)
+    land(window)
+    assert window._tray_state == mb.IDLE
+
+    window._set_lyrics_visible(True)
+    land(window)
+    assert window._tray_state == mb.ACTIVE
+
+
+def test_the_glyph_is_accented_during_a_practice_mode(with_tray, make_window):
+    window = make_window()
+    window.apply_saved_visibility()
+    load(window, SYNCED)
+    window._on_position_update(snapshot(position=2.0))  # a line to loop
+    window._last_state = PlaybackState.PLAYING
+    window._toggle_loop(True)  # engage the loop
+    assert window._loop.engaged
+    window._refresh_menu()
+    assert window._tray_state == mb.PRACTICE
+
+    window._toggle_loop(False)  # and let it go
+    window._refresh_menu()
+    assert window._tray_state == mb.ACTIVE
+
+
+def test_a_sync_pass_accents_the_glyph_too(with_tray, make_window):
+    window = make_window()
+    window.apply_saved_visibility()
+    load(window, PLAIN, track_id="t7")
+    window._begin_sync()
+    window._refresh_menu()
+    assert window._tray_state == mb.PRACTICE
+
+
+def test_the_glyph_is_set_only_when_it_changes(with_tray, make_window):
+    """_refresh_menu runs on every render — three times a second — and
+    handing the same icon back to an NSStatusItem that often is the menu
+    bar item being rebuilt under the user."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window._last_state = PlaybackState.PLAYING
+    window._refresh_menu()
+
+    sets = []
+    window._tray.setIcon = lambda icon: sets.append(icon)
+    for _ in range(5):
+        window._refresh_menu()
+    assert sets == []
+
+    window._last_state = PlaybackState.PAUSED
+    window._refresh_menu()
+    assert len(sets) == 1
+
+
+def test_every_glyph_is_a_mask_so_macos_owns_the_colour(with_tray, make_window):
+    window = make_window()
+    assert set(window._tray_icons) == set(mb.STATES)
+    for state, icon in window._tray_icons.items():
+        assert not icon.isNull(), state
+        assert icon.isMask() is True, state
+
+
+def test_no_menu_bar_item_is_not_a_crash(monkeypatch, make_window):
+    """Everything about the glyph has to survive there being nowhere to
+    put it — the same rule the rest of the menu bar code follows."""
+
+    class NeverAvailable:
+        @staticmethod
+        def isSystemTrayAvailable():
+            return False
+
+    monkeypatch.setattr(w, "QSystemTrayIcon", NeverAvailable)
+    window = make_window()
+    window._last_state = PlaybackState.PLAYING
+    window._refresh_menu()  # must not raise
+    assert window._tray is None
+
+
 # -- the global hotkey ----------------------------------------------------
 
 
@@ -2122,11 +2449,11 @@ def test_the_hotkey_toggles_the_window(make_window):
     assert window.isVisible() is True
 
     window._toggle_lyrics_visible()
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is False
 
     window._toggle_lyrics_visible()
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is True
 
 
@@ -2146,7 +2473,7 @@ def test_the_tick_matches_whichever_of_the_two_was_used(make_window):
         show.trigger,                          # menu hides
     ):
         act()
-        APP.processEvents()
+        land(window)
         assert show.isChecked() is window.isVisible()
         assert show.isChecked() is window._lyrics_visible
 
@@ -2171,7 +2498,7 @@ def test_hiding_by_hotkey_leaves_everything_else_running(make_window):
     stamped = window._view_model.sync_session.index
 
     window._toggle_lyrics_visible()
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is False
     assert window._monitor_thread.isRunning() is True
     assert window._view_model.sync_session.index == stamped
@@ -2193,7 +2520,7 @@ def test_showing_by_hotkey_catches_up_with_the_song(make_window):
         )
     )
     window._toggle_lyrics_visible()  # back
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is True
     assert window._current.text() == "two"
 
@@ -2213,7 +2540,7 @@ def test_a_refused_hotkey_leaves_the_app_fully_working(make_window, caplog):
     assert "continuing without the global hotkey" in caplog.text
 
     window._menu_actions[m.SHOW_LYRICS].trigger()
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is False
 
 
@@ -2281,7 +2608,7 @@ def test_a_real_press_toggles_the_window(carbon, make_window):
     assert window.isVisible() is True
 
     carbon.press()
-    APP.processEvents()
+    land(window)
     assert window.isVisible() is False
     assert window._menu_actions[m.SHOW_LYRICS].isChecked() is False
 

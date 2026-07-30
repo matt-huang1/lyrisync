@@ -241,9 +241,17 @@ diagnostic that moves itself depending on which app you switched to would
 vanish exactly when read.
 
 **Remembered apps** lists what has been learned, most recently used
-first, each with its icon and name; clicking one forgets that app. It is
-the only menu in this app whose *contents* are rebuilt rather than only
-relabelled — everything else is a fixed set of entries whose visibility
+first, each with its icon and name. It is a **readout**: the rows are
+disabled and there is nothing to click. Clicking one used to forget it,
+and that control was removed rather than kept — re-dragging the window in
+an app overwrites its position, so per-app forget can only ever express
+*stop moving the window for this one app*, which is not a thing anybody
+wants for one app while wanting it for the others. **Forget remembered
+positions** stays, because "stop doing this" is a real wish and that is
+where it belongs.
+
+The list is the only menu in this app whose *contents* are rebuilt rather
+than only relabelled — everything else is a fixed set of entries whose visibility
 changes, because rebuilding the menu bar item's structure makes it
 flicker. A list of what has been learned cannot be a fixed set, and this
 one is assembled on its own `aboutToShow`: only while the user is looking
@@ -305,14 +313,22 @@ borrow a surface that persistent decoration owns, then return it.**
 Owning a surface and borrowing one are different things, provided the
 return is structural rather than remembered.
 
-So when a position is recorded, the hairline warms for 520 ms and goes
+So when a position is recorded, the hairline warms for 780 ms and goes
 back:
 
 - **A half sine, one property.** `progress` runs 0 to 1 and the intensity
-  is `sin(π · progress)` — nothing at either end, peaking at 0.85 of the
-  way to the warm colour. One property with the whole rise and fall in it,
+  is `sin(π · progress)` — nothing at either end, all the way to the warm
+  colour in the middle. One property with the whole rise and fall in it,
   the same reasoning as the line change's signed `progress`, and it is why
   there is no easing curve to choose and no step at either boundary.
+- **And the edge thickens with it**, from one device pixel to three. This
+  is the half that does the work. The first version peaked at 0.85 of the
+  way to the amber and lasted 520 ms, and it was too subtle to catch
+  without staring: a single device pixel changing colour is a few hundred
+  pixels on a 460-point window, which is nothing at the edge of attention.
+  Three device pixels of warm edge is a *shape* change, and the eye is far
+  better at those. The width rides the same intensity as the colour, so
+  the edge cannot be left thick and cool, and it returns with it.
 - **A mix at paint time, never in the tint state.** `_current_border()`
   stays the album's own answer and is what a cross-fade starts and ends
   on; `_painted_border()` applies the glow over it, once, in the frame
@@ -332,15 +348,27 @@ back:
   the album: an acknowledgement that changed colour with the cover would
   read as part of the artwork rather than as an answer.
 
-Measured, in both appearances, from the pixels `paintEvent` produced.
-Dark: the edge goes `(255,255,255,30)` to `(255,220,140,145)` at the peak
-and back. With a red cover in hand: `(237,130,130,110)` to
-`(252,201,122,157)` and back to `(237,130,130,110)` exactly. The
-animation itself is traced rather than photographed — macOS returns a
-stale frame on the first capture after a change, so frozen frames of a
-running animation are not evidence: 33 frames over 531 ms, peaking at
-0.85, ending at 0.0. **15.9 ms of CPU per drag**, about 0.5 ms a frame,
-against 92.7 ms for one line change.
+Measured, in both appearances, from the pixels `paintEvent` produced —
+one device pixel of hairline at rest, three at the peak:
+
+| | at rest | at the peak |
+|---|---|---|
+| dark | `(255,255,255,30)` | `(255,214,120,165)` |
+| dark, red cover | `(237,130,130,110)` | `(255,214,120,165)` |
+| light | `(0,0,0,38)` | `(150,96,0,170)` |
+| light, red cover | `(132,21,21,105)` | `(150,96,0,170)` |
+
+Over a real backdrop, with the material rendering, the edge goes from
+`(58,60,65)` to `(197,165,96)` in dark and from `(185,186,186)` to
+`(170,127,52)` in light. At the peak the album's own hue is gone from the
+edge for a moment — the acknowledgement is the same answer every time, so
+it arrives at the same colour whatever is playing — and it comes back
+exactly.
+
+The animation itself is traced rather than photographed, because macOS
+returns a stale frame on the first capture after a change: 49 frames over
+787 ms, peaking at 1.0, ending at 0.0, with the edge back to
+`(132,21,21,105)` to the channel.
 
 The menu is still refreshed at the moment of learning as well as on every
 opening, so the fuller answer is one click away and always current.

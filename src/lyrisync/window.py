@@ -70,6 +70,7 @@ from lyrisync.app_positions import (
     SETTLE_SECONDS,
     display_label,
     glow_intensity,
+    glow_width,
     learn_refusal,
     may_acknowledge,
     move_refusal,
@@ -89,6 +90,7 @@ from lyrisync.geometry import (
     text_gutter,
 )
 from lyrisync.gestures import opacity_step, scroll_step, wheel_action
+from lyrisync import flight
 from lyrisync import frontmost
 from lyrisync import hotkey
 from lyrisync.loop import LineLoop, LoopPhase
@@ -99,6 +101,7 @@ from lyrisync.macspaces import (
     all_desktops_behavior,
 )
 from lyrisync import login_item
+from lyrisync import menubar
 from lyrisync.menu import (
     ALBUM_COLOUR,
     ALL_DESKTOPS,
@@ -245,6 +248,13 @@ _TINT_FADE_MS = 600
 _MOVE_MS = _FADE_MS
 _MOVE_CURVE = QEasingCurve.Type.InOutSine
 
+# The window leaving for the menu bar item and coming back. It accelerates
+# away and decelerates onto its mark — In leaving, Out arriving, the same
+# pairing the line change uses and for the same reason: the departure
+# should read as a departure and the arrival as settling.
+_FLIGHT_LEAVING = QEasingCurve.Type.InSine
+_FLIGHT_ARRIVING = QEasingCurve.Type.OutSine
+
 # How big an application icon is drawn for the menu. macOS puts 16-point
 # icons beside menu items; this is asked for in points and comes back at
 # the screen's own scale, so a Retina menu gets a 32-pixel icon rather than
@@ -265,7 +275,7 @@ _EXIT_CONFIRM_TEXT = "discard this sync? tap ✕ again"
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
 
-MENUBAR_ICON = Path(__file__).parent / "assets" / "menubar.svg"
+MENUBAR_ICONS = Path(__file__).parent / "assets"
 
 
 def _style_for(
@@ -698,6 +708,17 @@ class LyricsWindow(QWidget):
         self._own_bundle_id = frontmost.own_bundle_id()
         self._watcher = frontmost.FrontmostWatcher(self._on_app_activated)
         self._move_anim: Optional[QPropertyAnimation] = None
+        # The journey to and from the menu bar item. `_flight_home` is the
+        # window's real position, held for the length of the flight and
+        # given back at the end of it however the flight ends.
+        self._flight_anim: Optional[QVariantAnimation] = None
+        self._flight_progress = 0.0
+        self._flight_home: Optional[tuple] = None
+        self._flight_to: Optional[tuple] = None
+        # Which glyph the menu bar item is showing, so it is only ever set
+        # when it changes: _refresh_menu runs on every render.
+        self._tray_state: Optional[str] = None
+        self._tray_icons: dict = {}
         # Which palette the window is painting with. Resolved from the
         # system now and re-resolved on every change for as long as the
         # app runs — reading it once at startup would be wrong by the
@@ -1695,7 +1716,13 @@ class LyricsWindow(QWidget):
         painter.setBrush(_qcolor(self._current_background()))
         painter.drawRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
 
-        width = 1.0 / max(1.0, self.devicePixelRatioF())
+        # One device pixel at rest, and up to three while a learned
+        # position is being acknowledged: the colour alone was a change of
+        # a few hundred pixels on a 460-point window, which the eye does
+        # not catch unless it is already there. Both the width and the
+        # colour ride the one glow value, so the edge cannot be left thick
+        # and cool, and both return to exactly what they were.
+        width = glow_width(1.0 / max(1.0, self.devicePixelRatioF()), self._glow)
         inset = width / 2
         pen = QPen(_qcolor(self._painted_border()))
         pen.setWidthF(width)
@@ -1854,6 +1881,13 @@ class LyricsWindow(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        if self._flight_anim is not None:
+            # Mid-journey the window is somewhere else and its content is
+            # drawn at a fraction of its size, but Qt still hit-tests
+            # against the full-size layout: a press here would grab
+            # something the user cannot see, at a position about to be
+            # given back.
+            return
         self._press_global = event.globalPosition().toPoint()
         self._press_geometry = self.geometry()
         self._resize_edges = self._hit_edges(event.position().toPoint())
@@ -1999,44 +2033,29 @@ class LyricsWindow(QWidget):
         logger.info("forgot every remembered window position")
         self._refresh_menu()
 
-    def _forget_one_position(self, bundle_id: str) -> None:
-        """Forget a single app, from the list of them. No confirmation for
-        the same reason forget-all needs none — and less: this one costs a
-        single drag in a single app to undo."""
-        if self._positions.forget(bundle_id):
-            self._settings.setValue("window/app_positions", self._positions.to_json())
-            logger.info("forgot the remembered position for %s", bundle_id)
-        self._refresh_menu()
-
     def _rebuild_positions_menu(self) -> None:
         """Fill the submenu with what is remembered, most recent first.
 
         Rebuilt on opening rather than kept in step, because the entries
         ARE the map and the map changes without the menu being involved.
-        Each row is the app's own icon and name, and clicking it forgets
-        that app: a list of things you cannot act on would be a worse
-        answer than the count already gives.
+
+        Every row is a READOUT — icon, name, and nothing to click. Clicking
+        one used to forget it, and that control was removed rather than
+        kept: re-dragging the window in an app overwrites its position, so
+        forgetting a single app can only ever mean "stop moving the window
+        for this one", which is not a thing anybody wants for one app while
+        wanting it for the others. Forget-all stays, because "stop doing
+        this" is a real wish and that is where it belongs.
         """
         self._positions_menu.clear()
         listed = self._positions.listed()
-        # A disabled entry rather than addSection: a section's TEXT is not
-        # drawn on macOS — measured, by opening this menu and finding four
-        # apps and no heading — so it would have been an instruction that
-        # existed only in the source. First, because it explains the list
-        # before the click rather than after it.
-        hint = self._positions_menu.addAction("Click an app to forget it")
-        hint.setEnabled(False)
-        hint.setMenuRole(QAction.MenuRole.NoRole)
         for bundle_id, name in listed:
             entry = self._positions_menu.addAction(display_label(bundle_id, name))
             icon = self._app_icon(bundle_id)
             if icon is not None:
                 entry.setIcon(icon)
+            entry.setEnabled(False)  # a list of what is known, not a control
             entry.setMenuRole(QAction.MenuRole.NoRole)  # the text is not ours
-            entry.setToolTip(bundle_id)  # the identifier, for anyone who wants it
-            entry.triggered.connect(
-                lambda checked=False, key=bundle_id: self._forget_one_position(key)
-            )
         logger.debug("remembered-apps menu rebuilt with %d entries", len(listed))
 
     def _app_icon(self, bundle_id: Optional[str]):
@@ -2111,6 +2130,7 @@ class LyricsWindow(QWidget):
             visible=self._lyrics_visible,
             dragging=self._drag_offset is not None or bool(self._resize_edges),
             syncing=self._syncing,
+            flying=self._flight_anim is not None,
         )
         if refusal is not None:
             logger.debug("settled: %s — not moving, %s", bundle_id, refusal)
@@ -2488,20 +2508,49 @@ class LyricsWindow(QWidget):
         login_action.setText(login_item.label_for(self._login_status))
         for wpm, action in self._rate_actions.items():
             action.setChecked(wpm == self._speech_rate)
+        self._refresh_tray_icon()
 
     def _build_tray(self) -> None:
-        """The menu bar item. Its icon is a template image, so macOS tints
-        it for light and dark menu bars instead of us shipping two."""
+        """The menu bar item. Its icons are template images, so macOS tints
+        them for light and dark menu bars instead of us shipping two of
+        each."""
         if not QSystemTrayIcon.isSystemTrayAvailable():
             logger.info("no system tray — menu bar item unavailable")
             self._tray = None
             return
-        icon = QIcon(str(MENUBAR_ICON))
-        icon.setIsMask(True)
-        self._tray = QSystemTrayIcon(icon, self)
+        self._tray_icons = {}
+        for state, filename in menubar.ICON_FILES.items():
+            icon = QIcon(str(MENUBAR_ICONS / filename))
+            icon.setIsMask(True)  # a template image: macOS owns the colour
+            self._tray_icons[state] = icon
+        self._tray = QSystemTrayIcon(self._tray_icons[menubar.ACTIVE], self)
+        self._tray_state = menubar.ACTIVE
         self._tray.setToolTip("LyriSync")
         self._tray.setContextMenu(self._menu)
         self._tray.show()
+        self._refresh_tray_icon()
+
+    def _refresh_tray_icon(self) -> None:
+        """Bring the menu bar glyph in line with what the app is doing.
+
+        Set only when the state CHANGES. This runs on every render — three
+        times a second — and handing the same icon back to an
+        NSStatusItem that many times is the menu bar item being rebuilt
+        under the user, which is the flicker the shared menu is built once
+        to avoid.
+        """
+        if self._tray is None:
+            return
+        state = menubar.icon_state(
+            playing=self._last_state is PlaybackState.PLAYING,
+            lyrics_visible=self._lyrics_visible,
+            practising=self._loop.engaged or self._syncing,
+        )
+        if state == self._tray_state:
+            return
+        self._tray_state = state
+        self._tray.setIcon(self._tray_icons[state])
+        logger.debug("menu bar glyph: %s", state)
 
     def _build_hotkey(self) -> None:
         """Claim the global show/hide combination.
@@ -2535,13 +2584,172 @@ class LyricsWindow(QWidget):
         """Show or hide the lyrics window. Nothing else stops: the monitor
         thread keeps polling, an engaged loop stays engaged, and a sync pass
         in progress carries on — so showing it again picks the song up
-        wherever it now is."""
+        wherever it now is.
+
+        The window travels to and from the menu bar item rather than
+        blinking out: see ``_begin_flight``. The setting is written from
+        the logical state, not from whether the window happens to be on
+        screen mid-flight.
+        """
         self._lyrics_visible = visible
-        self.setVisible(visible)
+        self._settings.setValue("window/visible", visible)
         if visible:
             self._render()  # catch up with whatever happened while hidden
-        self._settings.setValue("window/visible", visible)
         self._refresh_menu()
+        self._begin_flight(visible)
+
+    # -- leaving for the menu bar, and coming back -------------------------
+
+    def _menubar_item_rect(self) -> Optional[tuple]:
+        """Where the menu bar item is, or None.
+
+        Qt's answer, and it is the status item's own window: measured
+        against ``NSStatusBarWindow.frame()`` in the same process, the two
+        agree exactly once Cocoa's bottom-left origin is taken out
+        (1159,1073 38x38 in Cocoa is 1159,0 38x38 here). So this is the
+        button window's frame, asked for through the one object that
+        already owns the item — a pyobjc route beside it would be a second
+        source of truth for one rectangle.
+        """
+        if self._tray is None or not self._tray.isVisible():
+            return None
+        geometry = self._tray.geometry()
+        if geometry.isNull() or geometry.isEmpty():
+            return None
+        return (geometry.x(), geometry.y(), geometry.width(), geometry.height())
+
+    def _flight_destination(self) -> Optional[tuple]:
+        """The rectangle to fly to, or None for a plain fade in place.
+
+        None is not a failure: the item can be behind the notch, in an
+        overflow, or on a display that has just been unplugged, and a
+        flight towards a rectangle that is not on any screen would throw
+        the window off the edge of the world.
+        """
+        item = self._menubar_item_rect()
+        screens = tuple(
+            (
+                screen.geometry().x(),
+                screen.geometry().y(),
+                screen.geometry().width(),
+                screen.geometry().height(),
+            )
+            for screen in QApplication.screens()
+        )
+        if not flight.item_usable(item, screens):
+            logger.debug("no usable menu bar item (%s) — fading in place", item)
+            return None
+        return item
+
+    def _begin_flight(self, showing: bool) -> None:
+        """Send the window to the menu bar item, or bring it back.
+
+        Hiding used to be instantaneous, which said nothing about where the
+        window had gone; the way back was something to remember rather than
+        something you saw. Now it shrinks and fades towards the item, and
+        grows back out of it.
+
+        A flight already in progress is not restarted from the beginning:
+        the new one picks up the progress the old one had reached and takes
+        proportionally less time, so a hotkey pressed twice quickly reverses
+        the movement instead of queueing a second one.
+        """
+        running = self._flight_anim is not None
+        start = self._flight_progress if running else (1.0 if showing else 0.0)
+        end = 0.0 if showing else 1.0
+        if running:
+            self._flight_anim.stop()
+            self._flight_anim = None
+        if start == end and not running:
+            # Already where it should be: setting the same state twice is
+            # not a journey. Still make sure the window agrees.
+            self.setVisible(showing)
+            return
+
+        if not running:
+            # Home is where the window logically lives, captured before
+            # anything moves it. Everything the flight touches is restored
+            # to this, whether it lands or is interrupted.
+            self._flight_home = (
+                self.pos().x(),
+                self.pos().y(),
+                self.width(),
+                self.height(),
+            )
+            self._flight_to = self._flight_destination()
+            self._begin_native_flight()
+        self._apply_flight(start)
+        if showing:
+            self.setVisible(True)
+
+        animation = QVariantAnimation(self)
+        animation.setDuration(flight.duration_ms(start, end))
+        animation.setEasingCurve(_FLIGHT_LEAVING if not showing else _FLIGHT_ARRIVING)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.valueChanged.connect(lambda value: self._apply_flight(float(value)))
+        animation.finished.connect(lambda: self._land(showing))
+        animation.start()
+        self._flight_anim = animation
+        logger.debug(
+            "flight: %s %.2f → %.2f in %dms, to %s",
+            "showing" if showing else "hiding",
+            start,
+            end,
+            animation.duration(),
+            self._flight_to,
+        )
+
+    def _apply_flight(self, progress: float) -> None:
+        """Put the window where the journey says it is, this frame."""
+        self._flight_progress = progress
+        frame = flight.frame_at(progress, self._flight_home, self._flight_to)
+        self.move(frame.x, frame.y)
+        self.setWindowOpacity(self._opacity * frame.opacity)
+        self._set_content_scale(frame.scale)
+
+    def _land(self, showing: bool) -> None:
+        """Arrive: put the window back where it lives, and hide it if that
+        is where it was going.
+
+        The position goes back BEFORE the hide, and that order was found
+        rather than chosen: moving a window that has just been hidden is
+        undone by the platform's own move event for the last position it
+        actually had, so the window came back at the menu bar's corner —
+        with `_flight_home` already given up, which is how a window ends up
+        somewhere nobody put it. Restoring while it is still on screen has
+        no such race, and nothing is seen: at this point in a hide it is at
+        zero opacity and a sixteenth of its size.
+        """
+        self._flight_anim = None
+        if self._flight_home is not None:
+            self.move(self._flight_home[0], self._flight_home[1])
+        if not showing:
+            self.setVisible(False)
+        self._end_flight()
+
+    def _end_flight(self) -> None:
+        """Give back position, opacity and scale, exactly.
+
+        The one place that undoes a flight, so an interruption, a landing
+        and a shutdown all leave the window in the same state — there is no
+        path that can leave it small, faint, or parked under the menu bar.
+        """
+        self._flight_progress = 0.0
+        if self._flight_home is not None:
+            self.move(self._flight_home[0], self._flight_home[1])
+            self._flight_home = None
+        self._flight_to = None
+        self.setWindowOpacity(self._opacity)
+        self._set_content_scale(1.0)
+        self._end_native_flight()
+
+    def _stop_flight(self) -> None:
+        """Abandon a flight in progress and restore what it borrowed."""
+        if self._flight_anim is not None:
+            self._flight_anim.stop()
+            self._flight_anim = None
+        self._end_flight()
 
     def _toggle_lyrics_visible(self) -> None:
         """What the global hotkey does, and all it does.
@@ -2746,6 +2954,74 @@ class LyricsWindow(QWidget):
         """The native NSWindow, or None off-cocoa / without pyobjc."""
         view = self._nsview()
         return view.window() if view is not None else None
+
+    def _set_content_scale(self, scale: float) -> None:
+        """Scale what is already drawn, without Qt re-laying it out.
+
+        A CALayer affine transform on the view Qt renders into, so the
+        compositor does the scaling: the window keeps its size, the type
+        scale is not recomputed, and no text reflows during the journey.
+        Animating the window's size instead would run ``_apply_scale`` on
+        every frame and the window would read as rewriting itself rather
+        than leaving.
+
+        Qt leaves the layer's anchor point at its origin, so scaling about
+        the centre is a translation of half the shrinkage in each
+        direction — measured, not assumed: a bare scale pinned the content
+        to the bottom-left corner.
+
+        A no-op off cocoa and without pyobjc, which is exactly the plain
+        move-and-fade the fallback describes.
+        """
+        view = self._nsview()
+        if view is None:
+            return
+        try:
+            layer = view.layer()
+            if layer is None:
+                return
+            bounds = layer.bounds()
+            width, height = bounds.size.width, bounds.size.height
+            shift_x = width / 2 * (1.0 - scale)
+            shift_y = height / 2 * (1.0 - scale)
+            layer.setAffineTransform_((scale, 0.0, 0.0, scale, shift_x, shift_y))
+        except Exception:
+            logger.debug("could not scale the window's content", exc_info=True)
+
+    def _begin_native_flight(self) -> None:
+        """Put away the two things that cannot travel with the content.
+
+        The material is a SIBLING view, not a child, so it would sit there
+        at full size while the panel shrank away from it. Hiding it costs
+        nothing that was not already lost: an alpha below 1 switches the
+        behind-window blur off anyway, and the flight is never at alpha 1
+        except at its very ends.
+
+        The shadow is drawn by the window server from the window's alpha
+        channel and cached, so it would keep the silhouette of a full-size
+        panel around a small one. Off for the journey, on at the end.
+        """
+        if self._material is not None:
+            try:
+                self._material.setHidden_(True)
+            except Exception:
+                logger.debug("could not hide the material for the flight", exc_info=True)
+        nswindow = self._nswindow()
+        if nswindow is None:
+            return
+        try:
+            nswindow.setHasShadow_(False)
+        except Exception:
+            logger.debug("could not drop the shadow for the flight", exc_info=True)
+
+    def _end_native_flight(self) -> None:
+        """Give the material and the shadow back."""
+        if self._material is not None:
+            try:
+                self._material.setHidden_(False)
+            except Exception:
+                logger.debug("could not restore the material", exc_info=True)
+        self._apply_shadow()
 
     def _apply_vibrancy(self) -> bool:
         """Slide a real NSVisualEffectView underneath the Qt content.
@@ -2985,6 +3261,10 @@ class LyricsWindow(QWidget):
         self._watcher.stop()
         self._settle_timer.stop()
         self._stop_move()
+        # Before the save: a flight holds the window's real position while
+        # it is away, and saving mid-journey would persist the menu bar's
+        # corner as where the user left it.
+        self._stop_flight()
         self._save_settings()
         self._monitor_thread.stop()
         # Poll may be mid-osascript (up to its 2s timeout).

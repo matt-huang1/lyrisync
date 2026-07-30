@@ -40,6 +40,114 @@ wherever it now is. The setting is remembered across launches.
 That is the whole distinction: hiding is a display choice, not a stop
 button.
 
+### The window goes somewhere, visibly
+
+It used to blink out. That is right for a window you closed and wrong for
+one that is still running: nothing said where it had gone, so the way back
+was something to remember rather than something you saw.
+
+Now it **shrinks and fades towards the menu bar item**, and grows back out
+of it — 260 ms, the same as one phase of a line change and the same as the
+travel to a remembered position, because the window should have one sense
+of how fast it moves. It accelerates away and decelerates onto its mark
+(`InSine` leaving, `OutSine` arriving), the pairing
+[milestone 13](motion-and-typography.md) chose for the same reason.
+
+**The content scales; the window does not.** A `CALayer` affine transform
+on the view Qt draws into, so the compositor does the scaling. Animating
+the window's *size* would re-lay the text out on every frame — the type
+scale follows the window's width — and the window would read as rewriting
+itself rather than leaving. Qt leaves that layer's anchor point at its
+origin, so scaling about the centre is a translation of half the shrinkage
+in each direction; measured, not assumed, after a bare scale pinned the
+content to the bottom-left corner.
+
+Two things cannot travel with it and are put away for the journey:
+
+- **the material**, because it is a sibling view rather than a child and
+  would sit there at full size while the panel shrank away from it. This
+  costs nothing that was not already lost — an alpha below 1 switches the
+  behind-window blur off anyway.
+- **the shadow**, which the window server derives from the window's alpha
+  channel and caches, so it would keep the silhouette of a full-size panel
+  around a small one.
+
+**Where the item is** comes from `QSystemTrayIcon.geometry()`, and that is
+the status item's own button window: measured against
+`NSStatusBarWindow.frame()` in the same process, the two agree exactly
+once Cocoa's bottom-left origin is taken out — `(1159, 1073, 38×34)` in
+Cocoa is `(1159, 0, 38×34)` here. A pyobjc route beside it would be a
+second source of truth for one rectangle.
+
+**When there is no item to fly to** — behind the notch, in an overflow, on
+a display that has just been unplugged, or no menu bar at all — the window
+fades in place. That is the same function with no target rather than a
+second code path, because a fallback nobody exercises is a fallback that
+does not work.
+
+**Nothing is left behind.** The flight borrows the window's position, its
+opacity and its content scale, and one method gives all three back — so an
+interruption, a landing and a shutdown all leave the window in the same
+state. Pressing the hotkey twice quickly reverses the journey from
+wherever it had got to, in proportionally less time, rather than queueing
+a second one. Quitting mid-flight lands the window *before* the settings
+are saved, or the menu bar's corner would be persisted as where the user
+left it.
+
+One ordering was found rather than chosen: the position goes back
+**before** the window is hidden. Moving a window that has just been hidden
+is undone by the platform's own move event for the last position it
+actually had, and with `_flight_home` already given up that is how a
+window ends up somewhere nobody put it. Restoring while it is still on
+screen has no such race and nothing is seen — at that point it is at zero
+opacity and a sixteenth of its size.
+
+The window never activates the app on the way: it is unfocusable by
+design, and the flight only ever moves, fades and scales it. Startup does
+not fly — `apply_saved_visibility` is the app arriving, not the user
+asking for the window back.
+
+## The menu bar glyph says what is happening
+
+The item is the only part of this app that is always on screen, so it is
+the natural place to say — quietly, without being read — whether anything
+is going on. **Three states, and the number is the point.** A menu bar
+icon is 16 points tall and shares a strip with a dozen others; the eye
+takes it in without focusing, or not at all, so every state past the third
+is a distinction nobody can make at that size.
+
+| | |
+|---|---|
+| **idle** | the glyph at 40% ink. Nothing playing, or the lyrics hidden. |
+| **active** | the glyph at full strength: lyrics up, following a song. |
+| **practice** | the glyph with a dot: a loop, an echo pass or a sync pass. |
+
+They differ in the two ways that survive being small: **how much ink there
+is**, and **whether there is a mark that is not usually there**. Idle is
+the active glyph with less of it rather than a different drawing — one
+shape at two strengths is one icon doing more or less; two shapes would be
+two icons.
+
+Practice outranks everything, including the window being hidden: a sync
+pass or an engaged loop keeps running with the lyrics hidden, and there
+the menu bar item is the only evidence it is still going. Hiding the
+window otherwise dims the glyph, which quietly makes the menu bar the
+confirmation that ⇧⌘J landed — useful for a keypress whose whole effect is
+that something disappears.
+
+All three are **template images**: solid black with the shape in the alpha
+channel, so macOS tints them for a light or dark menu bar and the idle
+one's lower alpha comes through as a dimmer glyph rather than a grey one.
+That is also why the practice state is a *dot* and not a colour — a
+coloured menu bar icon stops following the menu bar. **Nothing animates**:
+a moving menu bar icon is a thing to look at, and this is a thing to
+notice.
+
+The icon is set only when the state *changes*. The refresh runs on every
+render, three times a second, and handing the same icon back to an
+`NSStatusItem` that often is the menu bar item being rebuilt under the
+user — the flicker the shared menu is built once to avoid.
+
 ## Open at Login
 
 Uses `SMAppService.mainApp`, not a `LaunchAgent` plist, because the menu

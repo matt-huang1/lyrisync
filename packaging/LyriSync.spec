@@ -65,9 +65,10 @@ analysis = Analysis(
     [str(PACKAGING / "lyrisync_launcher.py")],
     pathex=[str(PROJECT / "src")],
     binaries=[],
-    # menubar.svg is loaded as Path(__file__).parent/"assets"/… , which in a
-    # frozen build resolves inside the bundle — so it has to land at the
-    # same place relative to the package.
+    # The menu bar glyphs are loaded as Path(__file__).parent/"assets"/… ,
+    # which in a frozen build resolves inside the bundle — so they have to
+    # land at the same place relative to the package. The whole directory
+    # goes, so a new state's image needs no change here.
     #
     # copy_metadata is load-bearing, not housekeeping: lyrisync/__init__.py
     # asks importlib.metadata for its own version, and PyInstaller freezes

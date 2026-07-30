@@ -3,6 +3,28 @@
 Milestones in the order they happened. Dates are commit dates; the deeper
 reasoning behind each is in [docs/](docs/).
 
+## Milestone 15 — menu bar presence
+
+The window no longer blinks out when you hide it: it **shrinks and fades
+towards the menu bar item**, and grows back out of it. The content is
+scaled by the compositor rather than by Qt, so nothing reflows on the way,
+and everything the journey borrows — position, opacity, scale, the
+material, the shadow — is given back by one method, so an interruption
+leaves no ghost. With no item to fly to (behind the notch, in an
+overflow), it fades in place.
+
+The item itself now says what is happening, in **three states**: idle when
+nothing is playing or the lyrics are hidden, active while they are up, and
+a dot beside the glyph while a loop, an echo pass or a tap-to-sync is
+running. Template images throughout, so macOS still tints them for the
+menu bar, and nothing animates up there.
+
+The learn glow was too quiet to notice — the fix was not more colour but a
+**thicker edge**: one device pixel to three, peaking at the full amber over
+780 ms. And the Remembered apps list lost its per-app forget: re-dragging
+overwrites a position, so forgetting one app could only mean "stop moving
+the window for this one", which nobody wants.
+
 ## Milestone 14.2 — names, faces, and a word back
 
 The menu now says **Safari**, with Safari's icon, where it used to say

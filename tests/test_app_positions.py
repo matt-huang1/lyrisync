@@ -503,24 +503,37 @@ def test_may_learn_is_the_refusal_without_its_reason():
                 assert allowed == (refusal is None)
 
 
+ALLOWED = dict(enabled=True, visible=True, dragging=False, syncing=False, flying=False)
+
+
 def test_every_refusal_to_move_names_itself():
-    assert move_refusal(enabled=False, visible=True, dragging=False, syncing=False)
-    assert move_refusal(enabled=True, visible=True, dragging=True, syncing=False)
-    assert move_refusal(enabled=True, visible=True, dragging=False, syncing=True)
-    assert move_refusal(enabled=True, visible=False, dragging=False, syncing=False)
-    assert (
-        move_refusal(enabled=True, visible=True, dragging=False, syncing=False) is None
-    )
+    assert move_refusal(**{**ALLOWED, "enabled": False})
+    assert move_refusal(**{**ALLOWED, "dragging": True})
+    assert move_refusal(**{**ALLOWED, "syncing": True})
+    assert move_refusal(**{**ALLOWED, "flying": True})
+    assert move_refusal(**{**ALLOWED, "visible": False})
+    assert move_refusal(**ALLOWED) is None
 
 
 def test_the_reasons_to_refuse_moving_are_told_apart():
     reasons = {
-        move_refusal(enabled=False, visible=True, dragging=False, syncing=False),
-        move_refusal(enabled=True, visible=True, dragging=True, syncing=False),
-        move_refusal(enabled=True, visible=True, dragging=False, syncing=True),
-        move_refusal(enabled=True, visible=False, dragging=False, syncing=False),
+        move_refusal(**{**ALLOWED, key: value})
+        for key, value in (
+            ("enabled", False),
+            ("dragging", True),
+            ("syncing", True),
+            ("flying", True),
+            ("visible", False),
+        )
     }
-    assert len(reasons) == 4
+    assert len(reasons) == 5
+
+
+def test_the_window_is_not_moved_while_it_is_flying():
+    """The journey to or from the menu bar item owns the window's position
+    until it lands. Two animations of one window's position could only
+    fight, and the loser would be whichever finished last."""
+    assert not may_move(**{**ALLOWED, "flying": True})
 
 
 def test_the_reason_reported_is_what_the_user_is_in_the_middle_of():
@@ -528,10 +541,13 @@ def test_the_reason_reported_is_what_the_user_is_in_the_middle_of():
     The one named is the most specific, because "the layer is off" would be
     a misleading answer to give someone who has just switched it on."""
     assert "drag" in move_refusal(
-        enabled=True, visible=False, dragging=True, syncing=True
+        **{**ALLOWED, "visible": False, "dragging": True, "syncing": True}
     )
     assert "sync" in move_refusal(
-        enabled=True, visible=False, dragging=False, syncing=True
+        **{**ALLOWED, "visible": False, "syncing": True}
+    )
+    assert "menu bar" in move_refusal(
+        **{**ALLOWED, "visible": False, "flying": True}
     )
 
 
@@ -540,13 +556,15 @@ def test_may_move_is_the_refusal_without_its_reason():
         for visible in (True, False):
             for dragging in (True, False):
                 for syncing in (True, False):
-                    state = dict(
-                        enabled=enabled,
-                        visible=visible,
-                        dragging=dragging,
-                        syncing=syncing,
-                    )
-                    assert may_move(**state) == (move_refusal(**state) is None)
+                    for flying in (True, False):
+                        state = dict(
+                            enabled=enabled,
+                            visible=visible,
+                            dragging=dragging,
+                            syncing=syncing,
+                            flying=flying,
+                        )
+                        assert may_move(**state) == (move_refusal(**state) is None)
 
 
 # -- saying what is known --------------------------------------------------
@@ -674,11 +692,15 @@ def test_the_glow_rises_and_falls_within_one_property():
     assert glow_intensity(0.5) == pytest.approx(GLOW_PEAK)
 
 
-def test_the_glow_never_replaces_the_edge_entirely():
-    """An acknowledgement, not an alert: the hairline should look briefly
-    warmer, not briefly gone."""
+def test_the_glow_reaches_the_warm_colour_completely():
+    """It did not, and that was the whole of why it went unnoticed: at 0.85
+    the amber was still being averaged with a hairline that is nearly
+    transparent at rest, and what arrived was a slightly warmer grey. The
+    restraint is in the colour's own alpha and in how briefly it is there,
+    not in stopping short of it."""
     peak = max(glow_intensity(phase / 100) for phase in range(101))
-    assert 0.0 < peak < 1.0
+    assert peak == pytest.approx(GLOW_PEAK)
+    assert GLOW_PEAK == 1.0
 
 
 def test_the_first_acknowledgement_is_always_allowed():
