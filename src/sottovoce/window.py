@@ -84,6 +84,9 @@ from sottovoce.app_positions import (
 )
 from sottovoce.artwork import ArtworkProvider
 from sottovoce.geometry import (
+    BASE_WIDTH as _BASE_WIDTH,
+    MIN_SCALE as _MIN_SCALE,
+    MIN_WIDTH as _MIN_WIDTH,
     RESIZE_MARGIN,
     beside_centred_text,
     button_margin,
@@ -92,7 +95,11 @@ from sottovoce.geometry import (
     compact_text_gutter,
     control_gap,
     docked_position,
+    fitted_window_width,
     min_window_height,
+    resized_position,
+    scale_for as _scale_for,
+    width_cap,
     sync_bar_bottom,
     sync_bar_gap,
     sync_bar_height,
@@ -120,6 +127,7 @@ from sottovoce.menu import (
     COMPACT,
     DOCK_TOP,
     ECHO,
+    FIT_TO_SONG,
     FORGET_POSITIONS,
     OPEN_AT_LOGIN,
     POSITION_LIST,
@@ -195,14 +203,6 @@ from sottovoce.view_model import LyricsViewModel, Mode, card_yields
 
 logger = logging.getLogger(__name__)
 
-_BASE_WIDTH = 460
-_MIN_WIDTH = 260
-# The type scale never goes below this, however narrow the window gets:
-# past a point shrinking the text stops being proportional and starts
-# being unreadable. Named because two places need it and the second one —
-# the resize floor — has to know the scale a drag is about to land on
-# before the window is that width.
-_MIN_SCALE = 0.65
 _CORNER_RADIUS = 14
 _RESIZE_MARGIN = RESIZE_MARGIN
 # What a first run opens at, comfortably above the full layout's floor at
@@ -452,16 +452,6 @@ def _system_appearance() -> appearance.Appearance:
     """
     hints = QApplication.instance().styleHints()
     return appearance.from_color_scheme(int(hints.colorScheme().value))
-
-
-def _scale_for(width: int) -> float:
-    """The window's type scale at this width.
-
-    One definition, because two places ask: the window itself once it has
-    been resized, and the resize floor, which has to know the scale a drag
-    is ABOUT to land on to work out how short the window may become.
-    """
-    return max(_MIN_SCALE, width / _BASE_WIDTH)
 
 
 def _clamped_point(frame: QRect, available: QRect) -> QPoint:
@@ -799,6 +789,14 @@ class LyricsWindow(QWidget):
         self._compact_applied = False
         self._compact_height = 0  # 0 means "never been in this layout"
         self._full_height = 0
+        # Sizing the strip to the song. `_compact_width` is the width the
+        # USER chose for it, kept even while the song is choosing the
+        # window's actual width, because it is what the type scale stays
+        # pinned to. `_full_width` keeps the other layout out of it.
+        self._fit_to_song = True  # restored from settings below
+        self._compact_width = 0
+        self._full_width = 0
+        self._fit_anim: Optional[QPropertyAnimation] = None
         # How much of the overlay controls is showing, and where it is
         # heading. Full in the full layout and never touched there;
         # in compact it runs 0 (a strip with nothing on it but the line)
@@ -1227,6 +1225,10 @@ class LyricsWindow(QWidget):
         ):
             self._release_loop()  # lyrics changed under the loop
             self._render()
+            # The one moment the strip resizes: a song's lines are known,
+            # so how wide it has to be is known. Every other path here is
+            # a line change, which deliberately does not.
+            self._fit_width()
 
     def _on_position_update(self, snapshot: PlayerSnapshot) -> None:
         self._last_state = snapshot.state
@@ -2140,20 +2142,55 @@ class LyricsWindow(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._relayout()
+        # macOS caches the shadow's silhouette; without this a resized
+        # window keeps the shadow of the shape it used to be.
+        self._invalidate_shadow()
+
+    def _relayout(self) -> None:
+        """Everything that follows the window's width.
+
+        Called by the resize event, and again by anything that changes the
+        window's shape itself: a HIDDEN widget defers its resize event
+        until it is shown, so a strip resized while it was away would come
+        back laid out for the width it used to have.
+        """
         self._apply_scale()
         # After the scale, which is what decides both the type size the
         # elision measures with and the gutters it measures against.
         self._reelide()
         self._place_buttons()
-        # macOS caches the shadow's silhouette; without this a resized
-        # window keeps the shadow of the shape it used to be.
-        self._invalidate_shadow()
+
+    def _type_scale(self) -> float:
+        """The scale the type is set at.
+
+        Normally the window's own width, which is what makes dragging an
+        edge a size control: everything on the window is proportional to
+        it. While the strip is sizing itself to a song that has to stop,
+        and the reason is not taste.
+
+        MEASURED. With the type following the width, the room for a line
+        and the line itself grow at exactly the same rate, so the ratio
+        between them is a constant: (460 - 144) / T. A line wider than
+        316pt at scale 1.0 therefore fits at NO width, and 13 of 14 real
+        songs are past that. "Make the window wide enough" has no answer
+        unless something is held still, and what is held still is the type.
+
+        So the width the user chose for the strip stops being a width and
+        becomes a type size: it still sets the scale, the song sets the
+        width, and dragging an edge hands both back at once. It is also
+        what keeps the STRIP'S HEIGHT still while its width moves, since
+        the height floor comes off the same scale.
+        """
+        if self._fitting and self._compact_width:
+            return _scale_for(self._compact_width)
+        return _scale_for(self.width())
 
     def _apply_scale(self) -> None:
         """Fonts, margins, spacing, and button boxes track window width
         near-linearly, so everything stays visually proportional from min
         size to max."""
-        scale = _scale_for(self.width())
+        scale = self._type_scale()
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
             self.setStyleSheet(
@@ -2388,7 +2425,7 @@ class LyricsWindow(QWidget):
         wanted = self._compact_active
         changed = wanted is not self._compact_applied
         if changed:
-            self._remember_height(self._compact_applied)
+            self._remember_size(self._compact_applied)
             self._compact_applied = wanted
             self._hovered = wanted and self._pointer_inside()
         for row in (self._previous, self._upcoming):
@@ -2402,16 +2439,38 @@ class LyricsWindow(QWidget):
         # up to the five-row floor if it were still in force.
         self._apply_layout_margins()
         if changed:
-            self.resize(self.width(), self._height_for(wanted))
+            self._stop_fit()
+            self.resize(self._width_for(wanted), self._height_for(wanted))
+            if wanted and not self._compact_width:
+                # The first strip. The width it opened at is the user's
+                # own, and is what the type scale stays pinned to while the
+                # song chooses the rest, so it has to be written down
+                # BEFORE anything fits.
+                self._compact_width = self.width()
+            self._apply_scale()
+            # Instant: the layout has just changed shape anyway, and a
+            # strip that arrived and then grew would read as two events.
+            self._fit_width(animate=False)
         self._reelide()
         self._apply_reveal_effects()
         self._update_hover_watch()
         self._place_buttons()
 
-    def _remember_height(self, compact: bool) -> None:
+    def _remember_size(self, compact: bool) -> None:
+        """Write down the shape this layout is being left at.
+
+        The WIDTH is not recorded while the song is choosing it. That slot
+        holds the width the user picked for the strip, it is what the type
+        scale is pinned to, and overwriting it with a fitted width would
+        let the scale drift a song at a time towards whatever the longest
+        line happened to be.
+        """
         if compact:
             self._compact_height = self.height()
+            if not self._fitting:
+                self._compact_width = self.width()
         else:
+            self._full_width = self.width()
             self._full_height = self.height()
 
     def _height_for(self, compact: bool) -> int:
@@ -2423,6 +2482,227 @@ class LyricsWindow(QWidget):
         if not remembered:
             return floor if compact else max(_DEFAULT_HEIGHT, floor)
         return max(floor, remembered)
+
+    def _width_for(self, compact: bool) -> int:
+        """The width to give this layout back.
+
+        The user's own, in both layouts: the fitted width is not stored
+        here and never becomes the other layout's problem, which is the
+        whole of "the full layout is unaffected". A layout that has never
+        been worn keeps whatever the window is at.
+        """
+        remembered = self._compact_width if compact else self._full_width
+        return max(_MIN_WIDTH, remembered or self.width())
+
+    # -- sizing the strip to the song --------------------------------------
+
+    @property
+    def _fitting(self) -> bool:
+        """Whether the window's width is the song's to decide right now.
+
+        Only in the compact layout, ever. The full layout's width is the
+        user's and stays theirs, which is why this can default ON without
+        breaking the layers rule: it is reachable only from inside a layout
+        that is itself opt-in and default off, so the plain synced-lyrics
+        window is exactly what it always was.
+        """
+        return self._fit_to_song and self._compact_applied
+
+    def _widest_line(self) -> float:
+        """How wide this song's widest line is, at the current type scale.
+
+        The whole song, once, rather than the line on screen: a window that
+        re-sized itself line by line would be a window twitching its way
+        through a verse, and the point is a strip that is as small as it
+        can be WITHOUT MOVING while the song plays.
+
+        The romanisation is measured too when that layer is on, because it
+        is a row the strip shows and a long romanised line can be the
+        widest thing in the song. Measured in its own type, which is
+        smaller than the sung line's, so it usually is not.
+
+        Not measured: the title card, which is the song's name in the sung
+        row for two seconds. Sizing a whole song to two seconds of it is
+        the outlier problem the cap exists for, one level up. Nor the loop
+        marker, which prefixes one line at a time while a loop is engaged
+        and can push that one line into eliding two characters early.
+        """
+        timeline = self._view_model.timeline()
+        if timeline is None:
+            return 0.0
+        lines, _ = timeline
+        self._current.ensurePolished()
+        sung = QFontMetricsF(self._current.font())
+        widest = max(
+            (sung.horizontalAdvance(text) for _, text in lines), default=0.0
+        )
+        if self._view_model.romanisation_enabled:
+            self._pron.ensurePolished()
+            pron = QFontMetricsF(self._pron.font())
+            widest = max(
+                widest,
+                max(
+                    (
+                        pron.horizontalAdvance(
+                            self._view_model.pronunciation_for(text)
+                        )
+                        for _, text in lines
+                    ),
+                    default=0.0,
+                ),
+            )
+        return widest
+
+    def _fit_width(self, animate: bool = True) -> None:
+        """Size the strip to the song, if that is this window's business.
+
+        Called when a song's lyrics arrive and at the few other moments
+        that change what would be measured — never on a line change.
+        """
+        if not self._fitting:
+            return
+        if not self._lyrics_visible or self._flight_home is not None:
+            # Away at the menu bar, or on the way there. Nobody can see the
+            # width, and mid-flight the journey is holding the window's real
+            # geometry and would hand the old one back on landing. An album
+            # played hidden costs nothing, and the show puts the width
+            # right before it takes off.
+            return
+        widest = self._widest_line()
+        if widest <= 0:
+            return  # nothing to fit to: the width stays where it was
+        screen, _ = self._screen_rects()
+        target = fitted_window_width(
+            widest, self._scale, _MIN_WIDTH, width_cap(screen[2])
+        )
+        logger.debug(
+            "fit: widest line %.0fpt at scale %.2f, %d -> %d wide",
+            widest,
+            self._scale,
+            self.width(),
+            target,
+        )
+        self._resize_width_to(target, animate)
+
+    def _resize_width_to(self, target: int, animate: bool = True) -> None:
+        """Take the window to this width, keeping it where it looks like it
+        already is. The one path there, so the menu switching the feature
+        off travels the same way a new song does."""
+        if target == self.width():
+            return
+        screen, available = self._screen_rects()
+        x, y = resized_position(
+            (self.x(), self.y(), self.width(), self.height()),
+            target,
+            screen,
+            available,
+            self._top_inset(),
+        )
+        self._travel_to(QRect(x, y, target, self.height()), animate)
+
+    def _travel_to(self, rect: QRect, animate: bool = True) -> None:
+        """Take the window to a new shape, gently.
+
+        One animation over the whole geometry rather than a move and a
+        resize handed to each other: the position is a function of the
+        width here, and two animations would have to agree about it frame
+        by frame. The same duration and curve as the travel to a remembered
+        position, and the same argument for InOutSine: one continuous
+        movement, eased at both ends.
+        """
+        self._stop_fit()
+        # Both write the window's position, so the last one asked wins,
+        # which is the rule _stop_move already states for two of these.
+        self._stop_move()
+        if not animate or self._display_options.reduce_motion:
+            # Reduce Motion asks for the size without the travel. There is
+            # nothing here but travel, so it arrives instantly and the
+            # window is the same shape either way.
+            self.setGeometry(rect)
+            self._relayout()
+            return
+        animation = QPropertyAnimation(self, b"geometry", self)
+        animation.setDuration(_MOVE_MS)
+        animation.setEasingCurve(_MOVE_CURVE)
+        animation.setStartValue(self.geometry())
+        animation.setEndValue(rect)
+        animation.finished.connect(self._end_fit)
+        animation.start()
+        self._fit_anim = animation
+
+    def _end_fit(self) -> None:
+        self._fit_anim = None
+        self._relayout()
+
+    def _stop_fit(self) -> None:
+        """Abandon a resize in flight, leaving the window wherever it got
+        to. A second song arriving mid-travel retargets from there rather
+        than from where the last one was heading."""
+        if self._fit_anim is not None:
+            self._fit_anim.stop()
+            self._fit_anim = None
+
+    def _finish_fit(self) -> None:
+        """Land a resize in flight at once, instead of abandoning it half
+        way.
+
+        For everything that is about to take the window's position over
+        for its own reasons: the travel to a remembered position, the
+        flight to the menu bar, the save at shutdown. The width it was
+        heading for is still the right width, and a window left at a
+        waypoint would stay there, because nothing would ask again.
+        """
+        if self._fit_anim is None:
+            return
+        end = self._fit_anim.endValue()
+        self._stop_fit()
+        self.setGeometry(end)
+        self._relayout()
+
+    def _set_fit_to_song(self, enabled: bool) -> None:
+        """Turn the sizing on or off from the menu."""
+        if enabled == self._fit_to_song:
+            return
+        self._fit_to_song = enabled
+        self._settings.setValue("window/fit_to_song", enabled)
+        # Before the resize, not after: with it on the type scale has to be
+        # pinned before anything measures against it, and with it off the
+        # travel's own landing puts the scale back on the width.
+        self._apply_scale()
+        if enabled:
+            self._fit_width()
+        else:
+            # The user's own width back, travelling the same way it left.
+            self._resize_width_to(self._width_for(True))
+        self._refresh_menu()
+        logger.info("fit to song %s", "on" if enabled else "off")
+
+    def _release_fit(self) -> None:
+        """A drag on an edge is the user taking the width back.
+
+        Turned off at the START of the resize rather than at the end, so
+        the drag behaves exactly as it does with the feature off: the type
+        scale follows the edge live instead of being pinned for the length
+        of the gesture and jumping when it is let go.
+        """
+        if not self._fitting:
+            return
+        self._stop_fit()
+        self._fit_to_song = False
+        self._settings.setValue("window/fit_to_song", False)
+        self._refresh_menu()
+        logger.info("fit to song off: the window is being resized by hand")
+
+    def _screen_rects(self) -> tuple:
+        """This window's screen and its available area, as plain rects for
+        the pure geometry."""
+        screen = self.screen() or QApplication.primaryScreen()
+        available = self._available_geometry()
+        geometry = screen.geometry() if screen else available
+        return (
+            (geometry.x(), geometry.y(), geometry.width(), geometry.height()),
+            (available.x(), available.y(), available.width(), available.height()),
+        )
 
     # -- the overlay controls, and coming out from under the pointer --------
 
@@ -2637,7 +2917,11 @@ class LyricsWindow(QWidget):
         self._press_global = event.globalPosition().toPoint()
         self._press_geometry = self.geometry()
         self._resize_edges = self._hit_edges(event.position().toPoint())
-        if not self._resize_edges:
+        if self._resize_edges:
+            # The user is taking the width back. Answered before the drag
+            # rather than after it, so nothing has to be fought.
+            self._release_fit()
+        else:
             self._drag_offset = self._press_global - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:
@@ -2962,6 +3246,9 @@ class LyricsWindow(QWidget):
         if clamped == self.pos():
             logger.debug("move: already at %d, %d", clamped.x(), clamped.y())
             return
+        # A resize in flight is writing this window's position too. Landed
+        # rather than abandoned: the width it was heading for is right.
+        self._finish_fit()
         logger.debug(
             "move: %d, %d → %d, %d",
             self.pos().x(),
@@ -3251,6 +3538,13 @@ class LyricsWindow(QWidget):
         compact.triggered.connect(self._set_compact)
         actions[COMPACT] = compact
 
+        # Shown only inside the compact layout, which is the only place it
+        # means anything, and the one entry here whose own default is on.
+        fit_to_song = self._menu.addAction("Fit the width to the song")
+        fit_to_song.setCheckable(True)
+        fit_to_song.triggered.connect(self._set_fit_to_song)
+        actions[FIT_TO_SONG] = fit_to_song
+
         album_colour = self._menu.addAction("Album colour")
         album_colour.setCheckable(True)
         album_colour.triggered.connect(self._set_album_colour)
@@ -3388,6 +3682,7 @@ class LyricsWindow(QWidget):
                 ),
                 positions_remembered=len(self._positions) > 0,
                 remembering_positions=self._remember_position,
+                compact=self._compact_applied,
             )
         )
         for key, action in self._menu_actions.items():
@@ -3404,6 +3699,7 @@ class LyricsWindow(QWidget):
         # What the user asked for, not what a sync pass is borrowing: the
         # tick describes the setting, and the pass gives the layout back.
         self._menu_actions[COMPACT].setChecked(self._compact)
+        self._menu_actions[FIT_TO_SONG].setChecked(self._fit_to_song)
         self._menu_actions[ALBUM_COLOUR].setChecked(self._album_colour)
         self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
         self._menu_actions[MENUBAR_ANIMATION].setChecked(self._menubar_animation)
@@ -3568,6 +3864,11 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/visible", visible)
         if visible:
             self._render()  # catch up with whatever happened while hidden
+            # Before the flight, which captures the window's real geometry
+            # and hands it back on landing: a song may have changed while
+            # the strip was away, and the width has to be right before the
+            # journey rather than after it.
+            self._fit_width(animate=False)
         self._refresh_menu()
         # Hiding gives the opacity back before the flight borrows it: a
         # window that goes away faded would come back faded, because the
@@ -3664,6 +3965,9 @@ class LyricsWindow(QWidget):
             return
 
         if not running:
+            # A resize in flight would make home a waypoint, and the
+            # flight hands home back on landing.
+            self._finish_fit()
             # Home is where the window logically lives, captured before
             # anything moves it. Everything the flight touches is restored
             # to this, whether it lands or is interrupted.
@@ -3959,6 +4263,10 @@ class LyricsWindow(QWidget):
     def _set_romanisation(self, enabled: bool) -> None:
         self._view_model.romanisation_enabled = enabled
         self._settings.setValue("lyrics/romanisation", enabled)
+        # A row joining or leaving the strip changes what the widest thing
+        # in the song is, which is one of the few things besides a new song
+        # that does.
+        self._fit_width()
         self._render()
 
     def _set_spoken_reference(self, enabled: bool) -> None:
@@ -4440,6 +4748,15 @@ class LyricsWindow(QWidget):
             "window/compact_height", 0, type=int
         )
         self._full_height = self._settings.value("window/full_height", 0, type=int)
+        self._compact_width = self._settings.value("window/compact_width", 0, type=int)
+        self._full_width = self._settings.value("window/full_width", 0, type=int)
+        # The one setting in this app that defaults ON, and it can, because
+        # it acts only inside a layout that is itself opt-in and default
+        # off. With compact off there is nothing here to have an opinion
+        # about; see the _fitting property.
+        self._fit_to_song = self._settings.value(
+            "window/fit_to_song", True, type=bool
+        )
         available = self._available_geometry()
         size = self._settings.value("window/size")
         if isinstance(size, QSize):
@@ -4540,13 +4857,17 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/size", self.size())
         self._settings.setValue("window/opacity", self._opacity)
         self._settings.setValue("window/compact", self._compact)
-        # The height the OTHER layout was last left at. The live one is in
+        self._settings.setValue("window/fit_to_song", self._fit_to_song)
+        # The shape the OTHER layout was last left at. The live one is in
         # window/size already; recording it twice is how the two would come
-        # to disagree. Written from whichever slot is not currently being
-        # worn, refreshed here so a quit mid-layout keeps both.
-        self._remember_height(self._compact_applied)
+        # to disagree. Refreshed here so a quit mid-layout keeps both, and
+        # _remember_size is what declines to overwrite a width the song is
+        # currently choosing.
+        self._remember_size(self._compact_applied)
         self._settings.setValue("window/compact_height", self._compact_height)
         self._settings.setValue("window/full_height", self._full_height)
+        self._settings.setValue("window/compact_width", self._compact_width)
+        self._settings.setValue("window/full_width", self._full_width)
         self._settings.setValue("window/all_desktops", self._all_desktops)
         self._settings.setValue("window/album_colour", self._album_colour)
         self._settings.setValue("window/visible", self._lyrics_visible)
@@ -4590,6 +4911,10 @@ class LyricsWindow(QWidget):
         self._settle_timer.stop()
         self._hover_timer.stop()
         self._stop_reveal()
+        # Landed rather than stopped, before the save below: a resize
+        # abandoned mid-travel would persist a waypoint as the window's
+        # size. The same argument the flight makes three lines down.
+        self._finish_fit()
         self._stop_move()
         # Stopped before the save, like the flight below and for a milder
         # version of the same reason: a poll landing mid-teardown would ask

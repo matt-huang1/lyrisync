@@ -28,7 +28,7 @@ Everything that can be logic rather than widget is:
 | `transition.py` | which line change is in flight (the dedupe) |
 | `loop.py` | line looping and echo-practice phases |
 | `menu.py` | which entries are visible, and their labels |
-| `geometry.py` | minimum height (full and compact), button boxes, drag clamping, rect intersection, the dock position |
+| `geometry.py` | the type scale, minimum height (full and compact), button boxes, drag clamping, rect intersection, the dock position, the fitted width |
 | `flight.py` | the journey to and from the menu bar item |
 | `app_positions.py` | the per-app position map, the settling rule, the gates |
 | `notifications.py` | the overlap and opacity rules for yielding — plus one native door |

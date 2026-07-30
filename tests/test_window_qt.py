@@ -45,7 +45,12 @@ from PySide6.QtCore import (  # noqa: E402
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QAction, QCursor, QMouseEvent  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QAction,
+    QCursor,
+    QFontMetricsF,
+    QMouseEvent,
+)
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QLabel,
@@ -4728,3 +4733,378 @@ def test_the_safe_area_is_zero_where_it_cannot_be_asked(make_window):
     window = make_window()
     assert window._nswindow() is None
     assert window._top_inset() == 0
+
+
+# -- sizing the strip to the song -----------------------------------------
+#
+# The arithmetic is pure and lives in tests/test_geometry.py, including the
+# cap and the docked case. What is checked here is the wiring: what gets
+# measured, when it is allowed to move the window, and what stops it.
+
+# Lines chosen to land between the narrowest window and the offscreen
+# platform's cap (800pt screen, so 400), which is what makes a fitted width
+# something other than one of the two clamps.
+FITTED = TrackLyrics(
+    synced=[
+        (1.0, "a middling line"),
+        (5.0, "a rather longer line than that"),
+        (9.0, "short"),
+    ]
+)
+# Far past any cap: one outlier that must not widen the whole song.
+OUTLIER = TrackLyrics(
+    synced=[(1.0, "short"), (5.0, "an extravagantly long line " * 8)]
+)
+# Hangul that romanises to something much longer than it is. Syllables
+# picked for the ratio rather than the meaning: 쌍 is five Latin letters,
+# and five letters of the pronunciation type are wider than one hangul
+# glyph of the sung type by enough that no font substitution can reverse
+# it. The obvious fixture ("안녕하세요 반갑습니다") does not: 174 against 170.
+ROMANISED = TrackLyrics(synced=[(1.0, "쌍쌍쌍쌍쌍쌍"), (5.0, "잘 가")])
+
+
+def press(window, point):
+    """A left-button press at a point in the window, as Qt delivers it."""
+    window.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(point),
+            QPointF(window.mapToGlobal(point)),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+
+
+def widest_sung(window, lyrics):
+    """The widest line, measured here rather than asked of the window."""
+    window._current.ensurePolished()
+    metrics = QFontMetricsF(window._current.font())
+    return max(metrics.horizontalAdvance(text) for _, text in lyrics.synced)
+
+
+def expected_width(window, text_width):
+    screen = window.screen() or APP.primaryScreen()
+    return w.fitted_window_width(
+        text_width,
+        window._scale,
+        w._MIN_WIDTH,
+        w.width_cap(screen.geometry().width()),
+    )
+
+
+def finish_fit(window):
+    """Run the width animation to its end without waiting it out."""
+    if window._fit_anim is not None:
+        window._fit_anim.setCurrentTime(window._fit_anim.duration())
+    APP.processEvents()
+
+
+def test_fitting_is_on_by_default_and_only_acts_in_compact(make_window):
+    """The one default-on setting in the app, and it can be: it is reached
+    only from inside a layout that is itself opt-in and default off, so the
+    plain synced-lyrics window is untouched either way."""
+    window = make_window()
+    assert window._fit_to_song is True
+    assert window._compact_applied is False
+    assert window._fitting is False
+
+    go_compact(window)
+    assert window._fitting is True
+
+
+def test_the_strip_sizes_itself_when_a_song_arrives(make_window):
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+    assert window.width() == expected_width(window, widest_sung(window, FITTED))
+    assert w._MIN_WIDTH < window.width() < 460
+
+
+def test_the_strip_does_not_resize_on_a_line_change(make_window):
+    """The point of measuring the whole song: as small as it can be
+    WITHOUT MOVING while the song plays. A window that re-sized itself line
+    by line would twitch its way through a verse."""
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+    fitted = window.width()
+
+    for position in (2.0, 6.0, 10.0):
+        window._on_position_update(snapshot(position=position))
+        APP.processEvents()
+        assert window._fit_anim is None
+        assert window.width() == fitted
+
+
+def test_a_new_song_resizes_again(make_window):
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+    fitted = window.width()
+
+    load(window, SYNCED, track_id="t2")  # much shorter lines
+    finish_fit(window)
+    assert window.width() < fitted
+    assert window.width() == expected_width(window, widest_sung(window, SYNCED))
+
+
+def test_the_romanisation_line_is_measured_too(make_window):
+    """It is a row the strip shows, and a long romanised line can be the
+    widest thing in a song even in its smaller type."""
+    window = make_window()
+    go_compact(window)
+    window._view_model.romanisation_enabled = False
+    load(window, ROMANISED)
+    finish_fit(window)
+    without = window.width()
+
+    window._set_romanisation(True)
+    finish_fit(window)
+    with_romanisation = window.width()
+
+    window._pron.ensurePolished()
+    pron = QFontMetricsF(window._pron.font())
+    romanised = max(
+        pron.horizontalAdvance(window._view_model.pronunciation_for(text))
+        for _, text in ROMANISED.synced
+    )
+    sung = widest_sung(window, ROMANISED)
+    assert romanised > sung, "the fixture no longer exercises this"
+    assert with_romanisation > without
+    assert with_romanisation == expected_width(window, romanised)
+
+
+def test_one_outlier_line_cannot_widen_the_whole_song(make_window):
+    window = make_window()
+    go_compact(window)
+    load(window, OUTLIER)
+    finish_fit(window)
+    screen = window.screen() or APP.primaryScreen()
+    assert window.width() == w.width_cap(screen.geometry().width())
+
+
+def test_the_type_scale_is_held_while_the_song_chooses_the_width(make_window):
+    """Otherwise there is no width to find: the type grows exactly as fast
+    as the window, so a line that does not fit at one width does not fit at
+    any. The width the user picked stops being a width and becomes a type
+    size."""
+    window = make_window()
+    go_compact(window)
+    assert window._compact_width == 460
+    scale = window._scale
+
+    load(window, FITTED)
+    finish_fit(window)
+    assert window.width() != 460
+    assert window._scale == scale
+    assert window._compact_width == 460  # the user's own width, untouched
+
+
+def test_the_strips_height_does_not_move_when_its_width_does(make_window):
+    """A consequence of holding the scale, and the reason height adaptation
+    needs no code: the floor comes off the same scale."""
+    window = make_window()
+    go_compact(window)
+    height = window.height()
+    floor = window.minimumHeight()
+
+    load(window, FITTED)
+    finish_fit(window)
+    assert window.height() == height
+    assert window.minimumHeight() == floor
+
+
+def test_the_full_layout_is_unaffected(make_window):
+    window = make_window()
+    window.resize(460, 220)
+    APP.processEvents()
+    load(window, FITTED)
+    APP.processEvents()
+    assert window._fit_anim is None
+    assert window.width() == 460
+
+
+def test_the_fitted_width_never_becomes_the_full_layouts(make_window):
+    """Each layout keeps the width the USER gave it. A fitted width is the
+    song's and does not follow the window out of the strip."""
+    window = make_window()
+    window.resize(500, 220)
+    APP.processEvents()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+    assert window.width() != 500
+
+    window._set_compact(False)
+    APP.processEvents()
+    assert window.width() == 500
+
+
+def test_a_manual_resize_turns_the_fitting_off(make_window):
+    """Rather than fighting the user. Answered at the START of the drag, so
+    the type scale follows the edge live instead of being pinned for the
+    length of the gesture and jumping when it is let go."""
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+    assert window._fit_to_song is True
+
+    press(window, QPoint(2, 40))  # the left edge: inside the resize margin
+    assert window._fit_to_song is False
+    assert window._settings.value("window/fit_to_song", type=bool) is False
+    assert window._menu_actions[m.FIT_TO_SONG].isChecked() is False
+
+
+def test_dragging_the_window_does_not_turn_the_fitting_off(make_window):
+    """Moving is not resizing. Only an edge is the user taking the width
+    back."""
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+
+    press(window, QPoint(200, 40))  # the middle: a drag
+    assert window._fit_to_song is True
+
+
+def test_turning_it_off_gives_the_users_width_back(make_window):
+    window = make_window()
+    window.resize(500, 220)
+    APP.processEvents()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+    assert window.width() != 500
+
+    window._set_fit_to_song(False)
+    finish_fit(window)
+    assert window.width() == 500
+    # And the type scale follows the width again.
+    assert window._scale == w._scale_for(500)
+
+
+def test_the_setting_survives_a_restart(make_window):
+    window = make_window()
+    go_compact(window)
+    window._set_fit_to_song(False)
+    window._save_settings()
+    window._settings.sync()
+
+    reopened = make_window()
+    assert reopened._fit_to_song is False
+    assert reopened._menu_actions[m.FIT_TO_SONG].isChecked() is False
+
+
+def test_reduce_motion_changes_the_size_without_travelling(make_window):
+    """There is nothing here but travel, so it arrives instantly and the
+    window is the same shape either way."""
+    window = make_window()
+    go_compact(window)
+    tell(window, reduce_motion=True)
+    load(window, FITTED)
+    assert window._fit_anim is None
+    assert window.width() == expected_width(window, widest_sung(window, FITTED))
+
+
+def test_the_resize_travels_by_default(make_window):
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    assert window._fit_anim is not None
+    assert window._fit_anim.duration() == w._MOVE_MS
+    assert window._fit_anim.easingCurve().type() == w._MOVE_CURVE
+    finish_fit(window)
+    assert window._fit_anim is None
+
+
+def test_the_entry_is_offered_only_where_it_can_act(make_window):
+    window = make_window()
+    window._refresh_menu()
+    assert m.FIT_TO_SONG not in visible_keys(window)
+
+    go_compact(window)
+    assert m.FIT_TO_SONG in visible_keys(window)
+
+    window._set_compact(False)
+    assert m.FIT_TO_SONG not in visible_keys(window)
+
+
+def test_nothing_to_fit_to_leaves_the_width_alone(make_window):
+    """A song with no lyrics yet, or none at all: the width stays where it
+    was rather than snapping to the floor."""
+    window = make_window()
+    window.resize(500, 220)
+    APP.processEvents()
+    go_compact(window)
+    window._on_track_change(snapshot())
+    APP.processEvents()
+    assert window.width() == 500
+
+
+def test_a_hidden_strip_is_fitted_before_it_flies_home(make_window):
+    """The flight holds the window's real geometry and hands it back on
+    landing, so a song that changed while the strip was away has to be
+    answered before the journey rather than after it."""
+    window = make_window()
+    window.apply_saved_visibility()
+    go_compact(window)
+    window._set_lyrics_visible(False)
+    land(window)
+
+    load(window, FITTED)  # a new song, with the window away
+    assert window._fit_anim is None  # refused: the flight owns the geometry
+
+    window._set_lyrics_visible(True)
+    land(window)
+    assert window.width() == expected_width(window, widest_sung(window, FITTED))
+
+
+def test_a_move_lands_a_resize_rather_than_abandoning_it(make_window):
+    """The travel to a remembered position writes this window's position
+    too. A window left at a waypoint would stay there, because nothing
+    would ask again."""
+    window = make_window()
+    window.apply_saved_visibility()
+    go_compact(window)
+    load(window, FITTED)
+    target = window._fit_anim.endValue()
+    assert window._fit_anim is not None
+
+    window._move_to(QPoint(80, 90))
+    finish_move(window)
+    assert window._fit_anim is None
+    assert window.width() == target.width()
+
+
+def test_the_flight_does_not_take_a_waypoint_home(make_window):
+    """It captures the window's real geometry and hands it back on
+    landing, so a resize in flight has to be landed first."""
+    window = make_window()
+    window.apply_saved_visibility()
+    go_compact(window)
+    load(window, FITTED)
+    target = window._fit_anim.endValue()
+
+    window._set_lyrics_visible(False)
+    land(window)
+    window._set_lyrics_visible(True)
+    land(window)
+    assert window.width() == target.width()
+
+
+def test_shutdown_saves_the_width_it_was_heading_for(make_window):
+    """Not the one it happened to be passing through."""
+    window = make_window()
+    window.apply_saved_visibility()
+    go_compact(window)
+    load(window, FITTED)
+    target = window._fit_anim.endValue()
+
+    window._shutdown()
+    assert window._settings.value("window/size").width() == target.width()

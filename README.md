@@ -14,6 +14,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 - **Follows your accessibility settings**, live, the way it follows light and dark. Reduce Motion takes out the flight to the menu bar, the travel to a remembered position and the rise of each lyric, and leaves the fades. Reduce Transparency swaps the vibrancy for a solid panel. Increase Contrast lifts every text role to the 4.5:1 the sung line already promised, and draws the window's edge as an edge.
 - **⇧⌘J from anywhere** shows and hides the lyrics without switching away from what you were doing. No Accessibility permission.
 - **Compact** — an optional layout that reduces the window to the line being sung, with the romanisation under it if that layer is on. A wide thin strip, 79 points tall at the default width against the full layout's 183. The loop and speak controls go away with the other rows and come back when the pointer is over the window. A sync pass takes the full layout back for as long as it runs, and gives the strip back afterwards at the height you left it.
+- **The strip fits the song** — in the compact layout the window sizes itself to the track when its lyrics arrive, and then holds still: as narrow as it can be without moving again for the rest of the song. Capped at half the screen, anchored on its own centre, and off the moment you drag an edge. On by default in compact, which is the only place it acts.
 - **Dock to top** — puts the window centred just under the menu bar on whichever screen it is on, clear of the notch. A command, not a snap: nothing holds it there, and it is as draggable afterwards as before.
 - **Album colour** — an optional layer that colours the window from the current cover's hue.
 - **Show on all desktops** — an optional mode that keeps the window visible across Spaces and over full-screen apps.
@@ -106,7 +107,7 @@ Play something in Spotify and the window follows along.
 
 - **⇧⌘J** hides and shows the lyrics from any app, full-screen ones included. Nothing takes focus and SottoVoce never comes to the front.
 - **The menu bar item** is the app's home — every setting is there, including Open at Login in the built app, and entries appear only where they apply. Right-clicking the window gives the same menu.
-- **Drag** anywhere to move, **drag the edges** to resize (text scales with width), **scroll** to dim. In the plain-lyrics view, scroll moves the lyrics and Option+scroll dims.
+- **Drag** anywhere to move, **drag the edges** to resize (text scales with width, and resizing hands the compact layout's width back from the song), **scroll** to dim. In the plain-lyrics view, scroll moves the lyrics and Option+scroll dims.
 - **↻** repeats the current line; the **speech bubble** speaks it aloud. In the compact layout both appear when the pointer is over the window and fade away when it leaves.
 - **Sync this song** (right-click) times a song by hand: the track restarts, and you tap the wide bar as each line begins. ↩ undoes a tap, ✕ abandons the pass. Finish the last line and it saves itself. Once a song has your sync, the entry becomes **Re-sync this song**.
 

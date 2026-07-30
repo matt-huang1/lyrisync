@@ -9,6 +9,7 @@ ALL_LAYERS = dict(
     login_item_offered=True,
     positions_remembered=True,
     remembering_positions=True,
+    compact=True,
 )
 NO_LAYERS = dict(
     has_korean_lyrics=False,
@@ -18,6 +19,7 @@ NO_LAYERS = dict(
     login_item_offered=False,
     positions_remembered=False,
     remembering_positions=False,
+    compact=False,
 )
 
 

@@ -110,6 +110,111 @@ agreed with itself. The darkest pixel of the loop button, over the light
 panel: **132, 157, 182, 207, 232** at 1.0, 0.75, 0.5, 0.25 and 0.0 — a
 clean ramp to the panel's own colour, and gone at the end.
 
+## Fitting the strip to the song
+
+On by default in the strip, and only in the strip. When a song's lyrics
+arrive the window measures every line, takes the widest, and sizes itself
+to it: as small as it can be **without moving** while the song plays. Never
+on a line change, which is the whole point of measuring the song rather
+than the line.
+
+The romanisation is measured too when that layer is on. Not measured: the
+title card, which is the song's name for two seconds, and the ↻ marker,
+which prefixes one line at a time while a loop is engaged.
+
+### Why the type scale has to be held
+
+The obvious implementation does not work, and the reason is a property of
+this app rather than a bug in it.
+
+The type scale follows the window's width. So the room for a line and the
+line itself grow at exactly the same rate, and the ratio between them is a
+constant:
+
+```
+available / text  =  (w - 2·gutter(w/460)) / (T·w/460)  =  (460 - 144) / T
+```
+
+The window's width cancels. **A line wider than 316pt at scale 1.0 fits at
+no width at all**, and one narrower than that fits at every width.
+Measured over 14 real songs at every width from 260 to 3000: 13 of them
+never fit. "Make the window wide enough" has no answer.
+
+So while the strip is sizing itself, the type scale is **held** instead of
+following the width. The width the user chose for the strip stops being a
+width and becomes a type size: it still sets the scale, the song sets the
+width, and dragging an edge hands both back at once.
+
+That is also what keeps the strip's **height** still while its width moves,
+since the height floor comes off the same scale. Height adaptation needs no
+code because there is none to do.
+
+### What the fit produces
+
+Measured against the same 14 songs, with the scale held at 1.0:
+
+| | widest line | fitted window |
+|---|---|---|
+| narrowest song | 267pt | 411 |
+| median | 466pt | 610 |
+| widest song | 695pt | 839 |
+
+Three shot on the real window, at each song's widest line: **412, 561 and
+839 points**, each showing that line whole with the gutters either side.
+
+### The cap
+
+Half the screen, because past that a floating strip stops reading as an
+overlay on somebody's work and starts reading as a window over it.
+
+Checked against 776 lines from those 14 songs. The widest needs 839pt; on
+the 1710pt screen this was measured on the cap is 855, so nothing in the
+corpus is clipped by it. On a 1440pt screen the cap is 720 and 4 of the 14
+are, which is the cap working: a smaller screen gets a proportionally
+smaller strip rather than the same strip taking more of it. Past the cap a
+line elides as it always did.
+
+### Where the window ends up
+
+Anchored on its own centre, so growing and shrinking are the same gesture
+in opposite directions and the window reads as staying put while the room
+either side of the line changes. Measured over the travel: the centre
+drifts by at most one pixel, which is integer geometry rounding.
+
+A **docked** window is re-docked rather than centre-anchored, and it is
+recognised by being exactly where docking put it rather than by a flag
+somebody has to remember to clear. The two rules almost agree already, but
+"almost" is a pixel of drift per song. Measured live: docked at 839 wide
+the window sits at x=435, and after a shorter song at 412 wide it sits at
+x=649 — both exactly the screen-centred value, both at y=34, clear of the
+33pt notch.
+
+Clamping still applies. A width change is a placement, and the rule that
+keeps a window reachable does not care what moved it.
+
+### The motion, and taking the width back
+
+One animation over the whole geometry rather than a move and a resize
+handed to each other: the position is a function of the width here, and
+two animations would have to agree about it frame by frame. The same
+260ms and InOutSine as the travel to a remembered position. Reduce Motion
+gets the size without the travel, which is all of it.
+
+Anything that takes the window's position over for its own reasons — the
+travel to a remembered position, the flight to the menu bar, the save at
+shutdown — **lands** a resize in flight rather than abandoning it. A window
+left at a waypoint would stay there, because nothing would ask again.
+
+**Dragging an edge turns the fitting off**, at the start of the drag rather
+than at the end, so the drag behaves exactly as it does with the feature
+off: the type scale follows the edge live instead of being pinned for the
+length of the gesture and jumping when it is let go. Dragging the window
+itself is not resizing and changes nothing.
+
+The user's own width is kept while the song is choosing the window's, which
+is what the scale is pinned to and what turning the feature off gives back.
+It is never overwritten by a fitted one.
+
 ## A sync pass takes the full layout back
 
 Compact steps aside for a sync pass, for as long as the pass runs.
@@ -179,12 +284,17 @@ Splitting the layout around the notch, Dynamic Island style flanking
 icons, and automatic snapping to any edge. Docking is a command, and it is
 the only thing here that places the window without being dragged.
 
+Per line sizing and height adaptation, both for the same reason the fit
+measures the whole song: a window that re-sized itself line by line would
+twitch its way through a verse, and the strip's height already stays still
+because the scale it comes from does.
+
 ## Where the code is
 
 | | |
 |---|---|
-| `geometry.py` | `min_window_height(compact=)`, `compact_text_gutter`, `control_gap`, `docked_position` |
-| `menu.py` | `COMPACT`, `DOCK_TOP` |
-| `window.py` | `_apply_compact`, `_set_line_text`, `_reveal_target`, `_check_pointer`, `_dock_to_top`, `_top_inset` |
+| `geometry.py` | `scale_for`, `min_window_height(compact=)`, `compact_text_gutter`, `control_gap`, `docked_position`, `fitted_window_width`, `width_cap`, `resized_position` |
+| `menu.py` | `COMPACT`, `FIT_TO_SONG`, `DOCK_TOP` |
+| `window.py` | `_apply_compact`, `_set_line_text`, `_reveal_target`, `_check_pointer`, `_dock_to_top`, `_top_inset`, `_type_scale`, `_widest_line`, `_fit_width` |
 | `tests/test_geometry.py` | the floors, the gutters and the dock position, notched screen included |
 | `tests/test_window_qt.py` | the rows, the height swap, the reveal, the sync fallback, the dock |

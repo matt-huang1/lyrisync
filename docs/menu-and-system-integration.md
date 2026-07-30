@@ -44,6 +44,13 @@ there is a song to gate it on. Dock to top is the one entry here that is
 **not checkable** — it puts the window somewhere once, and nothing holds
 it there, so there is no state for a tick to describe.
 
+**Fit the width to the song** follows the compact layout, because that is
+the only place it means anything: the full layout's width is the user's
+and stays theirs. It is the one entry in the app whose own default is ON,
+and it can be, because it is reachable only from inside a layout that is
+itself opt-in and default off. A default-on setting has to be unreachable
+from the plain window, not merely quiet in it.
+
 **Quit is visible in every state.** The menu bar item is the way back from
 a hidden window, so it must never be a dead end.
 

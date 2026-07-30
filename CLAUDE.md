@@ -168,6 +168,28 @@ Rules that come with them:
 - Compact's gutter reserves **two controls a side, symmetrically**. Only
   the right side carries two, but the sung line is centred and an
   asymmetric gutter would centre it in what is left of the window.
+- **The type scale follows the width, so "widen the window until the line
+  fits" has no answer**: the room and the line grow at the same rate and
+  the width cancels, leaving `(460 - 144) / T`. A line past 316pt at scale
+  1.0 fits at no width, and 13 of 14 real songs are past it. While the
+  strip sizes itself the scale is **held** at the width the user chose,
+  which is also why the strip's height does not move when its width does.
+- The fitted width is measured **once per song, never per line** — a
+  window that re-sized itself line by line would twitch through a verse —
+  and it is **capped at half the screen**. The user's own width is kept
+  separately, is what the scale is pinned to, and is never overwritten by
+  a fitted one. A drag on an edge turns fitting off at the **start** of
+  the drag, so the scale follows the edge live.
+- A width change is **anchored on the window's centre**, and a window that
+  is exactly where docking put it is **re-docked** instead. Recognised by
+  position, not by a flag: the two rules differ by a pixel of parity, and
+  a pixel per song is an album.
+- Anything that takes the window's position over — a remembered-position
+  move, the flight, the save at shutdown — **lands** a resize in flight
+  rather than abandoning it. Nothing asks again, so a waypoint is forever.
+- **A hidden widget defers its resize event until it is shown.** Anything
+  that changes the window's shape itself must re-lay it out (`_relayout`)
+  rather than waiting for `resizeEvent`.
 - **Echo practice does not fall back to the full layout** and a sync pass
   does. One line repeated is compact at its best, and the loop engages
   many times a song; the pass needs four things a strip has room for one
@@ -323,6 +345,11 @@ layer off must equal the plain synced-lyrics window. "Off" removes the
 work, not just the output — the position layer unsubscribes from
 activations rather than ignoring them.
 
+Fitting the width to the song is the **one setting that defaults on**, and
+it may only because it is reachable solely from inside the compact layout,
+which is itself opt-in and default off. A default-on setting has to be
+unreachable from the plain window, not merely quiet in it.
+
 ## Where the rest is
 
 | | |
@@ -336,7 +363,8 @@ activations rather than ignoring them.
 ## Parked
 
 Splitting the compact layout around the notch; Dynamic Island style
-flanking icons; automatic snapping to any edge;
+flanking icons; automatic snapping to any edge; per line sizing; height
+adaptation;
 album-art background; multiple colours or gradients from one cover;
 per-song colour overrides; karaoke word-by-word; side panels; Japanese
 romanisation; configurable hotkeys or any hotkey beyond show/hide; focus

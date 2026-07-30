@@ -1,6 +1,7 @@
 import pytest
 
 from sottovoce.geometry import (
+    MIN_WIDTH,
     RESIZE_MARGIN,
     button_margin,
     button_side,
@@ -8,7 +9,11 @@ from sottovoce.geometry import (
     compact_text_gutter,
     control_gap,
     docked_position,
+    fitted_window_width,
     min_window_height,
+    resized_position,
+    scale_for,
+    width_cap,
     sync_bar_bottom,
     sync_bar_gap,
     sync_bar_height,
@@ -369,3 +374,187 @@ def test_dock_is_flush_with_nothing_of_its_own_added():
     ):
         _, y = docked_position(460, screen, available, inset)
         assert y == max(available[1], screen[1] + inset)
+
+
+# -- sizing the strip to the song -----------------------------------------
+
+
+def test_the_type_scale_follows_the_width_and_floors():
+    assert scale_for(460) == 1.0
+    assert scale_for(920) == 2.0
+    assert scale_for(260) == 0.65   # the floor, not 260/460
+    assert scale_for(100) == 0.65
+
+
+def test_growing_the_window_cannot_make_a_long_line_fit():
+    """THE MEASUREMENT THE WHOLE FEATURE TURNS ON, kept as a test so it
+    cannot quietly stop being true.
+
+    With the type scale following the width, the room for a line and the
+    line itself grow at exactly the same rate, so whether a line fits is
+    independent of the window's width. "Make the window wide enough" has no
+    answer, which is why the scale is held while the strip sizes itself.
+    """
+
+    def fits(width_at_one, window):
+        scale = scale_for(window)
+        return width_at_one * scale <= window - 2 * compact_text_gutter(scale)
+
+    windows = (460, 600, 900, 1400, 2000, 3000)
+    for line in (400, 500, 700, 1200):
+        assert not any(fits(line, window) for window in windows), line
+    for line in (100, 200, 300):
+        assert all(fits(line, window) for window in windows), line
+
+
+def test_holding_the_scale_is_what_gives_the_fit_an_answer():
+    """The same lines, measured at a held scale: now every one of them has
+    a width that shows it whole."""
+    for line in (100, 300, 500, 700, 1200):
+        width = fitted_window_width(line, 1.0, MIN_WIDTH, 4000)
+        assert width - 2 * compact_text_gutter(1.0) >= line
+
+
+def test_fitted_width_is_the_line_plus_both_gutters():
+    for scale in SCALES:
+        assert fitted_window_width(500, scale, MIN_WIDTH, 4000) == (
+            500 + 2 * compact_text_gutter(scale)
+        )
+
+
+def test_fitted_width_rounds_the_line_up():
+    """Half a pixel short is a line that elides."""
+    gutters = 2 * compact_text_gutter(1.0)
+    assert fitted_window_width(300.2, 1.0, MIN_WIDTH, 4000) == 301 + gutters
+    assert fitted_window_width(300.0, 1.0, MIN_WIDTH, 4000) == 300 + gutters
+
+
+def test_fitted_width_never_goes_below_the_narrowest_window():
+    assert fitted_window_width(0, 1.0, MIN_WIDTH, 4000) == MIN_WIDTH
+    assert fitted_window_width(10, 0.65, MIN_WIDTH, 4000) == MIN_WIDTH
+
+
+def test_a_long_line_is_capped_and_elides_instead():
+    """One outlier line may not widen the whole song past the cap."""
+    assert fitted_window_width(5000, 1.0, MIN_WIDTH, 855) == 855
+
+
+def test_the_floor_wins_over_the_cap():
+    """A screen too narrow for the minimum still gets a usable window,
+    rather than one clamped below the width the app can lay out."""
+    assert fitted_window_width(1000, 1.0, MIN_WIDTH, 100) == MIN_WIDTH
+
+
+def test_the_cap_is_half_the_screen():
+    assert width_cap(1710) == 855
+    assert width_cap(1440) == 720
+    assert width_cap(2560) == 1280
+
+
+def test_the_cap_grows_with_the_screen():
+    caps = [width_cap(screen) for screen in (1280, 1440, 1512, 1710, 1920, 2560)]
+    assert caps == sorted(caps)
+
+
+def test_the_cap_clears_the_measured_corpus_on_the_screen_it_was_set_on():
+    """776 lines of real lyrics from 14 songs, measured in the app's own
+    type at scale 1.0. The widest needs an 839pt window; the cap on the
+    1710pt screen this was measured on is 855. A smaller screen caps more,
+    which is the cap doing its job rather than failing."""
+    widest_song_needs = 839
+    assert width_cap(1710) >= widest_song_needs
+    assert width_cap(1440) < widest_song_needs
+
+
+# -- where the window goes when its width changes under it ----------------
+
+FRAME = (500, 300, 460, 79)
+
+
+def test_a_width_change_is_anchored_on_the_centre():
+    for new_width in (300, 460, 700, 900):
+        x, _ = resized_position(FRAME, new_width, PLAIN_SCREEN, PLAIN_AVAILABLE)
+        assert x + new_width / 2 == pytest.approx(500 + 460 / 2, abs=1)
+
+
+def test_growing_and_shrinking_are_the_same_gesture():
+    grown = resized_position(FRAME, 660, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    shrunk = resized_position(FRAME, 260, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    assert 500 - grown[0] == shrunk[0] - 500
+
+
+def test_a_width_change_leaves_the_top_edge_alone():
+    """Height adaptation is out of scope, and so is drifting up the
+    screen."""
+    for new_width in (260, 700, 1200):
+        assert resized_position(FRAME, new_width, PLAIN_SCREEN, PLAIN_AVAILABLE)[1] == 300
+
+
+def test_a_docked_window_is_still_docked_afterwards():
+    """Recognised by being exactly where docking put it, not by a flag.
+    Centre-anchoring almost agrees already, and "almost" is a pixel of
+    drift per song."""
+    for width, new_width in ((460, 611), (461, 610), (611, 460), (700, 701)):
+        docked = docked_position(width, PLAIN_SCREEN, PLAIN_AVAILABLE)
+        moved = resized_position(
+            (docked[0], docked[1], width, 79),
+            new_width,
+            PLAIN_SCREEN,
+            PLAIN_AVAILABLE,
+        )
+        assert moved == docked_position(new_width, PLAIN_SCREEN, PLAIN_AVAILABLE)
+
+
+def test_a_docked_window_stays_clear_of_the_notch_afterwards():
+    for new_width in (300, 611, 900):
+        docked = docked_position(460, NOTCHED, NOTCHED_AVAILABLE, NOTCH_INSET)
+        moved = resized_position(
+            (docked[0], docked[1], 460, 79),
+            new_width,
+            NOTCHED,
+            NOTCHED_AVAILABLE,
+            NOTCH_INSET,
+        )
+        assert moved == docked_position(
+            new_width, NOTCHED, NOTCHED_AVAILABLE, NOTCH_INSET
+        )
+        assert moved[1] >= NOTCHED[1] + NOTCH_INSET
+
+
+def test_a_docked_window_stays_docked_with_the_menu_bar_hidden():
+    """The safe area is still the floor after a resize, not only at the
+    moment of docking."""
+    hidden_menu_bar = (0, 0, 1512, 982)
+    docked = docked_position(460, NOTCHED, hidden_menu_bar, NOTCH_INSET)
+    moved = resized_position(
+        (docked[0], docked[1], 460, 79), 900, NOTCHED, hidden_menu_bar, NOTCH_INSET
+    )
+    assert moved[1] == NOTCH_INSET
+
+
+def test_a_window_that_merely_looks_central_is_not_docked():
+    """Same x as a docked window, different y: it was dragged there, and
+    centre-anchoring is what it gets."""
+    docked_x = docked_position(460, PLAIN_SCREEN, PLAIN_AVAILABLE)[0]
+    moved = resized_position(
+        (docked_x, 600, 460, 79), 660, PLAIN_SCREEN, PLAIN_AVAILABLE
+    )
+    assert moved[1] == 600
+    assert moved[0] == docked_x + (460 - 660) // 2
+
+
+def test_a_width_change_is_still_clamped_on_screen():
+    """A width change is a placement, and the rule that keeps a window
+    reachable does not care what moved it."""
+    x, y = resized_position(
+        (-400, 300, 460, 79), 260, PLAIN_SCREEN, PLAIN_AVAILABLE
+    )
+    ox, _ = visible_overlap((x, y), (260, 79), PLAIN_AVAILABLE)
+    assert ox >= 40
+
+
+def test_a_width_change_on_a_second_display_stays_there():
+    frame = (2000, 200, 460, 79)
+    x, y = resized_position(frame, 700, SECOND_SCREEN, SECOND_AVAILABLE)
+    assert x + 700 / 2 == pytest.approx(2000 + 460 / 2, abs=1)
+    assert y == 200

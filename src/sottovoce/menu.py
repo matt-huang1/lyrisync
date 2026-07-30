@@ -16,6 +16,7 @@ SPOKEN = "spoken"
 SPEECH_RATE = "speech_rate"
 ECHO = "echo"
 COMPACT = "compact"
+FIT_TO_SONG = "fit_to_song"
 ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
 MENUBAR_ANIMATION = "menubar_animation"
@@ -41,6 +42,7 @@ MENU_ORDER = (
     SPEECH_RATE,
     ECHO,
     COMPACT,
+    FIT_TO_SONG,
     ALBUM_COLOUR,
     ALL_DESKTOPS,
     MENUBAR_ANIMATION,
@@ -115,6 +117,7 @@ def visible_entries(
     login_item_offered: bool = False,
     positions_remembered: bool = False,
     remembering_positions: bool = False,
+    compact: bool = False,
 ) -> tuple[str, ...]:
     """The entries to show, in ``MENU_ORDER``, for this app state.
 
@@ -142,8 +145,16 @@ def visible_entries(
     watching which app is in front, so a line naming the frontmost app
     would either be stale or would mean going and looking — and going and
     looking with the layer off is exactly what "off" promises not to do.
+
+    Fitting the window to the song follows the compact layout, because it
+    is the only place it means anything: the full layout's width is the
+    user's and stays theirs. It is the one entry here whose own default is
+    ON, and it can be, because it is reachable only from inside a layout
+    that is itself default-off. The plain window is unchanged either way.
     """
     shown = set(ALWAYS_VISIBLE)
+    if compact:
+        shown.add(FIT_TO_SONG)
     if has_korean_lyrics:
         shown.add(ROMANISATION)
     if speech_available:

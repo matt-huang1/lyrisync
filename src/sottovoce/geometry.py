@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from sottovoce.typography import (
     BOTTOM_MARGIN,
     CONTEXT,
@@ -16,6 +18,27 @@ from sottovoce.typography import (
 )
 
 GRAB_MARGIN = 40  # px of window that must stay on-screen after a drag
+
+# The window's width, and what the type scale makes of it. Everything on
+# the window is proportional to this scale, which is what makes dragging an
+# edge a size control rather than a crop.
+BASE_WIDTH = 460  # the width at which the type scale is exactly 1.0
+MIN_WIDTH = 260
+# The scale never goes below this, however narrow the window gets: past a
+# point shrinking the text stops being proportional and starts being
+# unreadable.
+MIN_SCALE = 0.65
+
+
+def scale_for(width: int) -> float:
+    """The type scale at this window width.
+
+    One definition, because three places ask: the window once it has been
+    resized, the resize floor, which has to know the scale a drag is ABOUT
+    to land on, and the fit, which has to know what it would be measuring
+    against.
+    """
+    return max(MIN_SCALE, width / BASE_WIDTH)
 
 # Overlay button metrics. The window sizes its buttons AND reserves its
 # text gutters from these same numbers, so text and buttons can never
@@ -226,6 +249,86 @@ def docked_position(
     sx, sy, swidth, _ = screen
     _, ay, _, _ = available
     return (sx + (swidth - window_width) // 2, max(ay, sy + top_inset))
+
+
+# How much of a screen the compact layout may take up when it is sizing
+# itself to a song. Half, because past that a floating strip stops reading
+# as an overlay on somebody's work and starts reading as a window over it.
+#
+# Checked against 776 lines of real lyrics from 14 songs, measured in the
+# app's own type at scale 1.0. The widest line in the corpus is 695pt and
+# needs an 839pt window; on the 1710pt screen this was measured on, the cap
+# is 855pt, so nothing in the corpus is clipped by it. On a 1440pt screen
+# the cap is 720pt and 4 of the 14 are, which is the cap doing its job: a
+# smaller screen gets a proportionally smaller strip rather than the same
+# strip taking more of it.
+_WIDTH_CAP_FRACTION = 0.5
+
+
+def width_cap(screen_width: int) -> int:
+    """The widest a strip sizing itself to a song may become on this
+    screen. A bound on the feature, not on the window: a drag can still
+    make it any width the screen allows."""
+    return round(screen_width * _WIDTH_CAP_FRACTION)
+
+
+def fitted_window_width(
+    text_width: float, scale: float, minimum: int, maximum: int
+) -> int:
+    """The narrowest window that shows a line this wide whole.
+
+    ``text_width`` is measured at ``scale`` and the gutters are asked for
+    at the same one, which is the whole of the arithmetic. What makes it
+    correct is a decision made outside this function: while the window is
+    sizing itself to a song the type scale is HELD, rather than following
+    the width as it does the rest of the time. Otherwise there is no
+    answer to find — the type grows exactly as fast as the window, so the
+    ratio of the room to the line is a constant and a line that does not
+    fit at one width does not fit at any width. Measured: 13 of 14 real
+    songs, at every width from 260 to 3000.
+
+    Rounded UP, because half a pixel short is a line that elides.
+
+    The cap wins over the fit and the floor wins over the cap: a screen too
+    narrow for the minimum still gets a window it can use.
+    """
+    fitted = math.ceil(text_width) + 2 * compact_text_gutter(scale)
+    return max(minimum, min(maximum, fitted))
+
+
+def resized_position(
+    frame: tuple[int, int, int, int],
+    new_width: int,
+    screen: tuple[int, int, int, int],
+    available: tuple[int, int, int, int],
+    top_inset: int = 0,
+    margin: int = GRAB_MARGIN,
+) -> tuple[int, int]:
+    """Where a window goes when its width changes under it.
+
+    Anchored on its own centre, so growing and shrinking are the same
+    gesture in opposite directions and the window reads as staying put
+    while the room either side of the line changes.
+
+    A DOCKED window is re-docked instead, and it is recognised by being
+    exactly where docking put it rather than by a flag somebody has to
+    remember to clear. The two rules almost agree already — docking centres
+    on the screen and centre-anchoring keeps the centre — but "almost" is
+    a pixel of drift per resize when the two widths differ in parity, and a
+    window that wandered a pixel off centre per song would be off centre by
+    the end of an album.
+
+    Clamped either way: a width change is still a placement, and the rule
+    that keeps a window reachable does not care what moved it.
+    """
+    x, y, width, height = frame
+    if (x, y) == docked_position(width, screen, available, top_inset):
+        target = docked_position(new_width, screen, available, top_inset)
+    else:
+        target = (x + (width - new_width) // 2, y)
+    return clamped_position(
+        (target[0], target[1], new_width, height), available, margin
+    )
 
 
 def beside_centred_text(

@@ -6,6 +6,44 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Milestone 18 — the strip fits the song
+
+In the compact layout the window now sizes itself to the track. When a
+song's lyrics arrive it measures every line, takes the widest, and becomes
+as narrow as it can be **without moving again for the rest of the song**.
+Never on a line change: that would be a window twitching its way through a
+verse. The romanisation line is measured too when that layer is on.
+
+**The obvious way to do this is impossible**, and the reason turned out to
+be a property of the app rather than a bug in it. The type scale follows
+the window's width, so the room for a line and the line itself grow at
+exactly the same rate and the width cancels out: a line wider than 316
+points at scale 1.0 fits at *no* width, and 13 of 14 real songs are past
+that. So while the strip is sizing itself the type scale is held at the
+width the user chose, which turns their width into a type size and lets
+the song have the rest. It is also why the strip's height never moves when
+its width does.
+
+Measured over 14 songs from a real cache: the narrowest needs a 411pt
+window, the median 610, the widest 839. The width is capped at half the
+screen, checked against 776 lines — on the 1710pt screen this was measured
+on, nothing in the corpus is clipped; on a 1440pt screen four songs are,
+which is a screen-relative cap doing its job.
+
+The change is anchored on the window's centre, so growing and shrinking
+are the same gesture in opposite directions. A **docked** window is
+re-docked instead, recognised by being exactly where docking put it rather
+than by a flag: measured live, it stays centred to the pixel and clear of
+the notch across a resize. The travel is the same 260ms and easing as
+every other movement the window makes, and Reduce Motion gets the size
+without it.
+
+It is on by default, and it is the first setting in this app that is. It
+may be, because it is reachable only from inside a layout that is itself
+opt-in and default off. Dragging an edge turns it off rather than fighting
+you, at the start of the drag so the drag behaves exactly as it always
+did. The full layout is untouched.
+
 ## Milestone 17 — a strip, and a place to put it
 
 **Compact** reduces the window to the line being sung, with the
