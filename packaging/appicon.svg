@@ -2,10 +2,13 @@
      current, next, with the current line longest and heaviest — sitting on
      the window's own background.
 
-     Same shapes as assets/menubar.svg at 1024, so the icon in the Dock's
-     recent items, in Finder, and the glyph in the menu bar are recognisably
-     one thing. Unlike the menu bar image this one is NOT a template: it
-     keeps its colours, because macOS renders app icons in full colour.
+     Same shapes as the menu bar glyph's playing arrangement at 1024 — see
+     ARRANGEMENTS in lyrisync/menubar.py, which is where those numbers live
+     now that the glyph is drawn rather than shipped as an SVG — so the icon
+     in the Dock's recent items, in Finder, and the glyph in the menu bar are
+     recognisably one thing. Unlike the menu bar image this one is NOT a
+     template: it keeps its colours, because macOS renders app icons in full
+     colour.
 
      Drawn at 1024 with an 80px margin: macOS rounds the corners of nothing
      for you, so the squircle is part of the artwork. Radius 224 is Big

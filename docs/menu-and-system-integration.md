@@ -116,44 +116,142 @@ asking for the window back.
 
 ## The menu bar glyph says what is happening
 
-The item is the only part of this app that is always on screen, so it is
-the natural place to say — quietly, without being read — whether anything
-is going on. **Three states, and the number is the point.** A menu bar
-icon is 16 points tall and shares a strip with a dozen others; the eye
-takes it in without focusing, or not at all, so every state past the third
-is a distinction nobody can make at that size.
+The item is the only part of this app that is always on screen, so it is the
+natural place to say — quietly, without being read — whether anything is
+going on. A menu bar icon is 16 points tall and shares a strip with a dozen
+others; the eye takes it in without focusing, or not at all.
 
-| | |
+### Brightness and shape are independent
+
+*Milestone 15.1.* Milestone 15 had three whole-glyph states — idle, active,
+practice — and that conflated two different questions into one axis. A paused
+song dimmed the icon exactly as hiding the window did, so the one thing the
+dimming was **for** was indistinguishable from Spotify being paused.
+
+Three properties now, each answering one question and nothing else:
+
+| property | asks | says |
+|---|---|---|
+| **brightness** | is the lyrics layer on? | full, or 40% ink when the window is hidden |
+| **shape** | is a song playing? | three bars of equal length for no, short / long / short for yes |
+| **the dot** | is a practice mode running? | a mark in the corner for a loop, an echo pass or a sync pass |
+
+**Nothing playing no longer dims anything.** Dimming means one thing — the
+window is away — which makes the menu bar a reliable confirmation for a
+keypress whose whole effect is that something disappears.
+
+The playing shape is the window's own previous / current / next rows, with
+the current one longest and thickest. The stopped shape is the same three
+bars saying nothing about which line is current, because there is no current
+line.
+
+Practice still outranks the window being hidden: a pass keeps running with
+the lyrics away, and there the item is the only evidence it is going, so
+practice keeps the glyph at full brightness.
+
+They **compose**, so eight combinations come from three booleans rather than
+from eight drawings. That is only affordable because the glyph is now
+**drawn** rather than loaded — at 15 there were three SVG files in
+`lyrisync/assets/`, and this would have needed twenty. The bar thicknesses,
+centres and the dot are the numbers those files carried; `menubar.py` owns
+them and `symbols.py` paints them.
+
+Still a **template image**: solid black with the shape in the alpha channel,
+so macOS tints it for a light or dark menu bar and the dim glyph's lower
+alpha comes through as a dimmer glyph rather than a grey one. That is also
+why practice is a *dot* and not a colour — a coloured menu bar icon stops
+following the menu bar.
+
+### It updates live, from the monitor tick
+
+Until 15.1 the only reliable caller was `aboutToShow`, so **the icon only
+changed when the menu was opened.** The cause is worth writing down: the
+refresh ran from `_render`, and a pause does not re-render, because
+`player_state_changed` returns `False` for `PAUSED` — the display text is
+unchanged, so there is nothing to draw. The item therefore claimed a song was
+playing until somebody clicked it.
+
+It is now refreshed from **every position update and every state change**.
+`_refresh_menu` still calls it too, and that is not redundant: position
+updates stop arriving the moment there is no track at all, so with Spotify
+closed the tick is gone and hiding the window would have nothing to dim the
+icon. The tick is the guarantee; the other callers are promptness.
+
+The icon is set only when the spec *changes*. That now runs three times a
+second, and handing the same image back to an `NSStatusItem` that often is
+the menu bar item being rebuilt under the user — the flicker the shared menu
+is built once to avoid. Each drawing is cached, so a change is a dictionary
+lookup.
+
+### An optional animation, tied to real line changes
+
+Off by default, under **Animate the menu bar icon**. With it on, each time
+the lyric line advances the three bar lengths step to the next of four
+arrangements. Not a timer and not a loop: a moving menu bar icon is a thing
+to look at, and this is a thing to notice — it moves when the song does, and
+otherwise sits still.
+
+The middle bar is the same length in every arrangement, so *the current line
+is the longest* stays true of every frame the icon can ever show; only the
+lines around it vary, which is what a lyric advancing actually looks like.
+The first arrangement is the plain playing shape, so switching the layer on
+changes whether the icon moves and not what it says.
+
+Stepped from the one place a synced line lands on the window, and only when
+the index actually differs — `_render` re-runs that for reasons which have
+nothing to do with the song. The step is counted whether or not the layer is
+on, so switching it on mid-song picks up where the song is.
+
+Measured on a real menu bar: **0.020 ms of CPU per line change**, against the
+92.7 ms one line change of the window already costs — 0.022% of it, and
+0.0005% of one core at a line every four seconds. Drawing one glyph is
+0.012 ms and happens once per combination; a refresh that changes nothing is
+0.0005 ms.
+
+### What was measured, and what is hard to tell apart
+
+Rendered at 16 points on a light and a dark bar, and photographed on the real
+menu bar beside the system's own icons. Six glyphs are reachable (practice
+forces full brightness, so hidden-vs-shown collapses there), and the pairwise
+fraction of the square that differs runs from 9.8% to 37%.
+
+The **closest pair is stopped-and-hidden against playing-and-hidden** — 9.8%,
+both at 40% ink with only the shape between them. It is the hardest call on
+the strip and the one to be honest about. Every other pair has either a
+brightness step or the dot to separate it, and stopped against playing at
+full brightness (10.2%) reads clearly: a stack of equal lines against a
+centred taper.
+
+One defect was found by looking at the rendered sheet after the numbers had
+all come back healthy: the dot **overlapped** the even shape's bottom bar by
+half a unit, which at 16 points is not a mark beside a bar but a bar with a
+blob on the end. The pairwise differences could not see it. The dot moved in
+and shrank slightly, the even bars came down from 14 units to 12, and
+`test_the_dot_never_touches_a_bar` does real rectangle-against-circle
+arithmetic over every shape so it cannot come back.
+
+### The glyph is drawn by an icon engine, and that was measured too
+
+Handing `QSystemTrayIcon` a 44-pixel pixmap at `devicePixelRatio` 2 —
+logically 22x22, exactly what the SVG it replaced was — put a **clipped**
+glyph on the menu bar: two of the three bars and no dot.
+`QIcon.availableSizes()` reports raw pixels and does not fold the ratio in,
+so the status item took a 44-point image for a 22-point slot and drew its top
+two thirds.
+
+Four constructions were put on a real status item and photographed:
+
+| construction | result |
 |---|---|
-| **idle** | the glyph at 40% ink. Nothing playing, or the lyrics hidden. |
-| **active** | the glyph at full strength: lyrics up, following a song. |
-| **practice** | the glyph with a dot: a loop, an echo pass or a sync pass. |
+| 44px at ratio 2 | clipped |
+| 36px at ratio 2 | clipped |
+| both 22px and 44px in one icon | clipped — Qt takes the larger |
+| 22px at ratio 1 | whole, but upscaled by the compositor and soft |
+| a `QIconEngine` drawing on demand | whole, and the crispest of the five |
 
-They differ in the two ways that survive being small: **how much ink there
-is**, and **whether there is a mark that is not usually there**. Idle is
-the active glyph with less of it rather than a different drawing — one
-shape at two strengths is one icon doing more or less; two shapes would be
-two icons.
-
-Practice outranks everything, including the window being hidden: a sync
-pass or an engaged loop keeps running with the lyrics hidden, and there
-the menu bar item is the only evidence it is still going. Hiding the
-window otherwise dims the glyph, which quietly makes the menu bar the
-confirmation that ⇧⌘J landed — useful for a keypress whose whole effect is
-that something disappears.
-
-All three are **template images**: solid black with the shape in the alpha
-channel, so macOS tints them for a light or dark menu bar and the idle
-one's lower alpha comes through as a dimmer glyph rather than a grey one.
-That is also why the practice state is a *dot* and not a colour — a
-coloured menu bar icon stops following the menu bar. **Nothing animates**:
-a moving menu bar icon is a thing to look at, and this is a thing to
-notice.
-
-The icon is set only when the state *changes*. The refresh runs on every
-render, three times a second, and handing the same icon back to an
-`NSStatusItem` that often is the menu bar item being rebuilt under the
-user — the flicker the shared menu is built once to avoid.
+Which is what the SVG engine had been doing all along: rendering at the size
+actually wanted. `test_the_glyph_reports_the_size_the_menu_bar_wants` pins the
+number the bug turned on.
 
 ## Open at Login
 

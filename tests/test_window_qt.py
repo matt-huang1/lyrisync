@@ -46,7 +46,12 @@ from PySide6.QtCore import (  # noqa: E402
     QTimer,
 )
 from PySide6.QtGui import QAction, QMouseEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QLabel,
+    QSystemTrayIcon,
+    QWidgetAction,
+)
 
 try:
     APP = QApplication.instance() or QApplication([])
@@ -335,6 +340,7 @@ def test_bare_menu_when_every_layer_is_dormant(make_window):
         m.SEPARATOR_AFTER_SHOW,
         m.ALBUM_COLOUR,
         m.ALL_DESKTOPS,
+        m.MENUBAR_ANIMATION,
         m.YIELD_NOTIFICATIONS,
         m.REMEMBER_POSITION,
         m.SEPARATOR_BEFORE_QUIT,
@@ -1631,13 +1637,34 @@ def test_the_learned_name_reaches_the_map(make_window):
 # -- the list of remembered apps ------------------------------------------
 
 
-def listed_apps(window):
+def readout_rows(window):
     """The app rows, which are all of them: the list is a readout."""
     return [
-        action.text()
+        action
         for action in window._positions_menu.actions()
         if not action.isSeparator()
     ]
+
+
+def row_text(action):
+    """The name a row shows.
+
+    The rows are QWidgetActions since 15.1 — a disabled QAction is drawn grey
+    by macOS, which made a list of remembered apps read as a list of
+    unavailable ones — so the text lives in a QLabel inside the row rather
+    than on the action.
+    """
+    widget = action.defaultWidget()
+    labels = [
+        child.text()
+        for child in widget.findChildren(QLabel)
+        if child.text()
+    ]
+    return labels[0] if labels else ""
+
+
+def listed_apps(window):
+    return [row_text(action) for action in readout_rows(window)]
 
 
 def test_the_remembered_apps_menu_lists_them_by_name(make_window):
@@ -1677,9 +1704,49 @@ def test_the_list_is_a_readout_with_nothing_to_click(make_window):
 
     window._rebuild_positions_menu()
 
-    rows = [a for a in window._positions_menu.actions() if not a.isSeparator()]
-    assert rows and not any(row.isEnabled() for row in rows)
+    rows = readout_rows(window)
+    assert rows
+    for row in rows:
+        assert isinstance(row, QWidgetAction)
+        assert row.defaultWidget() is not None
+    # Triggering every row must leave the map exactly as it was. That is the
+    # property, rather than the wiring: clicking a row cannot forget an app,
+    # which is what per-app forget being removed MEANS. Measured in a real
+    # menu besides — a click leaves the menu open, and hovering never selects
+    # the row because the widget takes the mouse itself.
+    before = window._positions.listed()
+    for row in rows:
+        row.trigger()
+    assert window._positions.listed() == before
     assert m.FORGET_POSITIONS in visible_keys(window)
+
+
+def test_the_rows_are_not_disabled_so_macos_draws_them_normally(make_window):
+    """THE 15.1 FIX. They were disabled QActions when per-app forget was
+    removed, and macOS greys a disabled item — so four remembered apps read
+    as four things that were unavailable rather than as four facts.
+
+    Enabled, but not a control: a QWidgetAction's own widget swallows the
+    mouse, so hovering never selects the row and it never lights up. Measured
+    in a real menu on both routes this menu takes; the brightness itself is a
+    question about pixels and is verified by hand.
+    """
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    window._rebuild_positions_menu()
+
+    rows = readout_rows(window)
+    assert rows
+    for row in rows:
+        assert row.isEnabled() is True, "a disabled row is a grey row"
+        widget = row.defaultWidget()
+        assert widget.isEnabled() is True
+        # Mouse-transparency is the instinct and it is WRONG: with the mouse
+        # passing through, the menu selects the row on hover and it starts
+        # behaving like a control. Measured.
+        assert not widget.testAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
 
 
 def test_forgetting_everything_takes_the_list_away_with_it(make_window):
@@ -1701,8 +1768,11 @@ def test_an_app_with_no_icon_is_still_listed(make_window):
 
     window._rebuild_positions_menu()
 
-    entry = next(a for a in window._positions_menu.actions() if a.text() == "Code")
-    assert entry.icon().isNull()  # the offscreen platform has no AppKit
+    entry = next(a for a in readout_rows(window) if row_text(a) == "Code")
+    labels = entry.defaultWidget().findChildren(QLabel)
+    # No icon label, only the name: the offscreen platform has no AppKit.
+    assert [label.text() for label in labels if label.text()] == ["Code"]
+    assert all(label.pixmap().isNull() for label in labels)
 
 
 def test_the_readout_asks_for_an_icon_only_when_the_app_changes(make_window):
@@ -2352,78 +2422,288 @@ def test_starting_up_does_not_fly(make_window):
 # -- the menu bar glyph ---------------------------------------------------
 
 
-def test_the_glyph_is_idle_before_anything_plays(with_tray, make_window):
+def test_nothing_playing_shows_three_even_bars_at_full_brightness(
+    with_tray, make_window
+):
+    """15.1: nothing playing no longer dims. The shape says there is no
+    current line; the brightness says the lyrics are on screen."""
     window = make_window()
-    assert window._tray_state == mb.IDLE
+    assert window._tray_state.lengths == mb.EVEN_LENGTHS
+    assert window._tray_state.dimmed is False
+    assert window._tray_state.dot is False
 
 
-def test_the_glyph_follows_the_song_and_the_window(with_tray, make_window):
+def test_playing_changes_the_shape_and_not_the_brightness(with_tray, make_window):
     window = make_window()
     window.apply_saved_visibility()
-    window._last_state = PlaybackState.PLAYING
-    window._refresh_menu()
-    assert window._tray_state == mb.ACTIVE
+    before = window._tray_state
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
+    assert window._tray_state.lengths == mb.PLAYING_LENGTHS
+    assert window._tray_state.dimmed == before.dimmed is False
+
+
+def test_hiding_the_lyrics_dims_it_and_leaves_the_shape_alone(
+    with_tray, make_window
+):
+    """The two axes, shown not to interfere: the shape still says a song is
+    playing while the brightness says the window is away."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
+    assert window._tray_state == mb.IconSpec(mb.PLAYING_LENGTHS, False, False)
 
     window._set_lyrics_visible(False)
     land(window)
-    assert window._tray_state == mb.IDLE
+    assert window._tray_state == mb.IconSpec(mb.PLAYING_LENGTHS, True, False)
 
     window._set_lyrics_visible(True)
     land(window)
-    assert window._tray_state == mb.ACTIVE
+    assert window._tray_state == mb.IconSpec(mb.PLAYING_LENGTHS, False, False)
 
 
-def test_the_glyph_is_accented_during_a_practice_mode(with_tray, make_window):
+def test_a_practice_mode_adds_the_dot(with_tray, make_window):
     window = make_window()
     window.apply_saved_visibility()
     load(window, SYNCED)
     window._on_position_update(snapshot(position=2.0))  # a line to loop
     window._last_state = PlaybackState.PLAYING
-    window._toggle_loop(True)  # engage the loop
+    window._toggle_loop(True)
     assert window._loop.engaged
-    window._refresh_menu()
-    assert window._tray_state == mb.PRACTICE
+    window._refresh_tray_icon()
+    assert window._tray_state.dot is True
 
-    window._toggle_loop(False)  # and let it go
-    window._refresh_menu()
-    assert window._tray_state == mb.ACTIVE
+    window._toggle_loop(False)
+    window._refresh_tray_icon()
+    assert window._tray_state.dot is False
 
 
-def test_a_sync_pass_accents_the_glyph_too(with_tray, make_window):
+def test_a_sync_pass_adds_the_dot_too(with_tray, make_window):
     window = make_window()
     window.apply_saved_visibility()
     load(window, PLAIN, track_id="t7")
     window._begin_sync()
-    window._refresh_menu()
-    assert window._tray_state == mb.PRACTICE
+    window._refresh_tray_icon()
+    assert window._tray_state.dot is True
+
+
+def test_practice_keeps_it_bright_behind_a_hidden_window(with_tray, make_window):
+    """A pass keeps running while the lyrics are away, and then the item is
+    the only evidence it is going."""
+    window = make_window()
+    window.apply_saved_visibility()
+    load(window, PLAIN, track_id="t7")
+    window._begin_sync()
+    window._set_lyrics_visible(False)
+    land(window)
+    assert window._tray_state.dot is True
+    assert window._tray_state.dimmed is False
+
+
+def test_the_glyph_follows_a_pause_without_the_menu_being_opened(
+    with_tray, make_window
+):
+    """THE 15.1 BUG. The icon was refreshed from _render, and a pause does not
+    re-render — player_state_changed returns False for PAUSED because the
+    display text is unchanged. So the item claimed a song was playing until
+    somebody opened the menu. The monitor tick is what fixes it."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
+    assert window._tray_state.lengths == mb.PLAYING_LENGTHS
+
+    window._on_position_update(snapshot(state=PlaybackState.PAUSED))
+
+    assert window._tray_state.lengths == mb.EVEN_LENGTHS
+
+
+def test_a_state_change_refreshes_it_before_anything_can_return_early(
+    with_tray, make_window
+):
+    """Spotify quitting is the transition after which no more position
+    updates arrive, so it is the tick's last chance to put the shape back."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
+    assert window._tray_state.lengths == mb.PLAYING_LENGTHS
+
+    window._on_state_change(snapshot(state=PlaybackState.NOT_RUNNING))
+
+    assert window._tray_state.lengths == mb.EVEN_LENGTHS
 
 
 def test_the_glyph_is_set_only_when_it_changes(with_tray, make_window):
-    """_refresh_menu runs on every render — three times a second — and
-    handing the same icon back to an NSStatusItem that often is the menu
+    """The refresh now runs on every monitor tick — three times a second —
+    and handing the same icon back to an NSStatusItem that often is the menu
     bar item being rebuilt under the user."""
     window = make_window()
     window.apply_saved_visibility()
-    window._last_state = PlaybackState.PLAYING
-    window._refresh_menu()
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
 
     sets = []
     window._tray.setIcon = lambda icon: sets.append(icon)
     for _ in range(5):
-        window._refresh_menu()
+        window._on_position_update(snapshot(state=PlaybackState.PLAYING))
     assert sets == []
 
-    window._last_state = PlaybackState.PAUSED
-    window._refresh_menu()
+    window._on_position_update(snapshot(state=PlaybackState.PAUSED))
     assert len(sets) == 1
 
 
-def test_every_glyph_is_a_mask_so_macos_owns_the_colour(with_tray, make_window):
+def test_each_glyph_is_drawn_once_and_kept(with_tray, make_window):
+    """Eight combinations, times four arrangements with the animation on. A
+    line change has to be a dictionary lookup, not a repaint."""
     window = make_window()
-    assert set(window._tray_icons) == set(mb.STATES)
-    for state, icon in window._tray_icons.items():
-        assert not icon.isNull(), state
-        assert icon.isMask() is True, state
+    window.apply_saved_visibility()
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
+    playing = window._tray_state
+    assert playing in window._tray_icons
+    first = window._tray_icons[playing]
+
+    window._on_position_update(snapshot(state=PlaybackState.PAUSED))
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
+    assert window._tray_icons[playing] is first
+
+
+def test_every_glyph_is_a_mask_so_macos_owns_the_colour(with_tray, make_window):
+    """A coloured menu bar icon stops following the menu bar, which is why
+    practice is a DOT and not a hue."""
+    window = make_window()
+    window.apply_saved_visibility()
+    for playing in (True, False):
+        for visible in (True, False):
+            for practising in (True, False):
+                spec = mb.icon_spec(
+                    playing=playing,
+                    lyrics_visible=visible,
+                    practising=practising,
+                )
+                icon = window._tray_icon_for(spec)
+                assert not icon.isNull(), spec
+                assert icon.isMask() is True, spec
+
+
+def test_the_drawn_glyphs_are_not_all_the_same_pixels(with_tray, make_window):
+    """Eight specs that happened to render identically would pass every test
+    above and say nothing on the menu bar."""
+    window = make_window()
+    seen = set()
+    for playing in (True, False):
+        for visible in (True, False):
+            for practising in (True, False):
+                spec = mb.icon_spec(
+                    playing=playing, lyrics_visible=visible, practising=practising
+                )
+                icon = window._tray_icon_for(spec)
+                image = icon.pixmap(mb.GLYPH_UNITS, mb.GLYPH_UNITS).toImage()
+                seen.add(bytes(image.constBits()))
+    # practice forces bright and a dot, so hidden-vs-shown collapses there
+    assert len(seen) == 6
+
+
+# -- the optional arrangement stepping ------------------------------------
+
+
+def test_the_animation_is_off_by_default(with_tray, make_window):
+    window = make_window()
+    assert window._menubar_animation is False
+    assert window._menu_actions[m.MENUBAR_ANIMATION].isChecked() is False
+
+
+def test_off_means_the_shape_never_moves(with_tray, make_window):
+    """The layers principle: off must equal the app before this existed."""
+    window = make_window()
+    window.apply_saved_visibility()
+    load(window, SYNCED, track_id="t5")
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING, track_id="t5"))
+    shapes = {window._tray_state.lengths}
+    for position in (1.0, 5.0, 1.0, 5.0):
+        window._on_position_update(
+            snapshot(state=PlaybackState.PLAYING, track_id="t5", position=position)
+        )
+        shapes.add(window._tray_state.lengths)
+    assert shapes == {mb.PLAYING_LENGTHS}
+
+
+def test_a_line_change_steps_the_arrangement(with_tray, make_window):
+    window = make_window()
+    window.apply_saved_visibility()
+    window._set_menubar_animation(True)
+    load(window, SYNCED, track_id="t5")
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING, track_id="t5"))
+
+    seen = [window._tray_state.lengths]
+    for position in (5.0, 1.0, 5.0):
+        window._on_position_update(
+            snapshot(state=PlaybackState.PLAYING, track_id="t5", position=position)
+        )
+        seen.append(window._tray_state.lengths)
+
+    assert len(set(seen)) > 1, "the shape has to actually move"
+    assert all(shape in mb.ARRANGEMENTS for shape in seen)
+
+
+def test_the_step_counts_only_real_line_changes(with_tray, make_window):
+    """_render re-runs _set_lines for reasons that have nothing to do with
+    the song — a menu refresh, a resize — and those are not line changes."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window._set_menubar_animation(True)
+    load(window, SYNCED, track_id="t5")
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING, track_id="t5"))
+    before = window._menubar_step
+
+    for _ in range(4):
+        window._render()
+        window._refresh_menu()
+    assert window._menubar_step == before
+
+
+def test_the_step_is_counted_even_with_the_layer_off(with_tray, make_window):
+    """So switching it on mid-song picks up where the song is rather than
+    restarting a cycle."""
+    window = make_window()
+    window.apply_saved_visibility()
+    load(window, SYNCED, track_id="t5")
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING, track_id="t5"))
+    before = window._menubar_step
+    window._on_position_update(
+        snapshot(state=PlaybackState.PLAYING, track_id="t5", position=5.0)
+    )
+    assert window._menubar_step > before
+
+
+def test_nothing_moves_the_shape_while_nothing_is_playing(with_tray, make_window):
+    """There are no line changes with nothing playing, and an arrangement
+    frozen mid-cycle would be a shape that means nothing."""
+    window = make_window()
+    window.apply_saved_visibility()
+    window._set_menubar_animation(True)
+    window._menubar_step = 2
+    window._on_position_update(snapshot(state=PlaybackState.PAUSED))
+    assert window._tray_state.lengths == mb.EVEN_LENGTHS
+
+
+def test_switching_the_animation_off_puts_the_shape_back(with_tray, make_window):
+    window = make_window()
+    window.apply_saved_visibility()
+    window._set_menubar_animation(True)
+    window._menubar_step = 2
+    window._on_position_update(snapshot(state=PlaybackState.PLAYING))
+    assert window._tray_state.lengths != mb.PLAYING_LENGTHS
+
+    window._set_menubar_animation(False)
+    assert window._tray_state.lengths == mb.PLAYING_LENGTHS
+
+
+def test_the_animation_setting_survives_a_restart(with_tray, make_window):
+    first = make_window()
+    first._set_menubar_animation(True)
+    first._save_settings()
+    first._settings.sync()
+
+    second = make_window()
+    assert second._menubar_animation is True
+    assert second._menu_actions[m.MENUBAR_ANIMATION].isChecked() is True
 
 
 def test_no_menu_bar_item_is_not_a_crash(monkeypatch, make_window):

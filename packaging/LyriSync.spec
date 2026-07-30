@@ -65,10 +65,11 @@ analysis = Analysis(
     [str(PACKAGING / "lyrisync_launcher.py")],
     pathex=[str(PROJECT / "src")],
     binaries=[],
-    # The menu bar glyphs are loaded as Path(__file__).parent/"assets"/… ,
-    # which in a frozen build resolves inside the bundle — so they have to
-    # land at the same place relative to the package. The whole directory
-    # goes, so a new state's image needs no change here.
+    # No data files. The menu bar glyphs used to be three SVGs in
+    # lyrisync/assets/ and are drawn by symbols.py from menubar.py's geometry
+    # since milestone 15.1 — brightness, shape and dot compose into eight
+    # combinations and twenty with the optional animation, which is more
+    # images than anybody should ship.
     #
     # copy_metadata is load-bearing, not housekeeping: lyrisync/__init__.py
     # asks importlib.metadata for its own version, and PyInstaller freezes
@@ -77,7 +78,6 @@ analysis = Analysis(
     # falls back to "unknown" and introduces itself to LRCLIB as a version
     # it is not.
     datas=[
-        (str(PROJECT / "src" / "lyrisync" / "assets"), "lyrisync/assets"),
         *copy_metadata("lyrisync"),
     ],
     # AppKit and objc are imported inside functions (every native feature is

@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsEffect,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QPushButton,
@@ -60,6 +61,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from lyrisync import appearance
@@ -118,6 +120,7 @@ from lyrisync.menu import (
     SHOW_LYRICS,
     SPEECH_RATE,
     SPOKEN,
+    MENUBAR_ANIMATION,
     SYNC,
     YIELD_NOTIFICATIONS,
     visible_entries,
@@ -270,6 +273,14 @@ _YIELD_CURVE = _MOVE_CURVE
 # a 16-pixel one stretched.
 _MENU_ICON_POINTS = 16
 
+# The remembered-apps rows are widgets rather than menu items (see
+# _readout_row), so their padding is ours to get right. Chosen to sit the
+# icon and text where a native menu item with an icon puts them, so the
+# readout lines up with the entries above it.
+_READOUT_INDENT = 20
+_READOUT_TRAIL = 14
+_READOUT_GAP = 6
+
 # How long shutdown waits for the monitor thread and then for the worker
 # pool. Long enough for a poll to finish its osascript (2s timeout) or a
 # fetch to notice it is done, short enough that quit still feels like quit.
@@ -284,7 +295,6 @@ _EXIT_CONFIRM_TEXT = "discard this sync? tap ✕ again"
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
 
-MENUBAR_ICONS = Path(__file__).parent / "assets"
 
 
 def _style_for(
@@ -739,9 +749,14 @@ class LyricsWindow(QWidget):
         self._yielding = False
         self._yield_anim: Optional[QVariantAnimation] = None
         # Which glyph the menu bar item is showing, so it is only ever set
-        # when it changes: _refresh_menu runs on every render.
-        self._tray_state: Optional[str] = None
-        self._tray_icons: dict = {}
+        # when it changes: the refresh runs on every monitor tick.
+        self._tray_state = None  # a menubar.IconSpec once the tray exists
+        self._tray_icons: dict = {}  # spec -> QIcon, drawn once each
+        # The optional arrangement stepping, and how many line changes have
+        # gone by. Counted whether or not the layer is on, so switching it on
+        # mid-song picks up where the song is.
+        self._menubar_animation = False  # restored from settings below
+        self._menubar_step = 0
         # Which palette the window is painting with. Resolved from the
         # system now and re-resolved on every change for as long as the
         # app runs — reading it once at startup would be wrong by the
@@ -1042,6 +1057,12 @@ class LyricsWindow(QWidget):
         self._last_state = snapshot.state
         self._last_position = snapshot.position_seconds
         self._last_polled_at = snapshot.polled_at
+        # The monitor tick IS what keeps the menu bar item honest. Before
+        # 15.1 the icon was refreshed from _render, and a pause does not
+        # re-render — so it claimed "playing" until the menu was opened.
+        # Here rather than lower down: every path below this line returns
+        # early for some reason, and none of those reasons is about the icon.
+        self._refresh_tray_icon()
         self._view_model.position_changed(snapshot.position_seconds)
         timeline = self._view_model.timeline()
         if timeline is None:
@@ -1078,6 +1099,11 @@ class LyricsWindow(QWidget):
 
     def _on_state_change(self, snapshot: PlayerSnapshot) -> None:
         self._last_state = snapshot.state
+        # Before the early exits below, and before the render that may or may
+        # not happen: a stop or a quit is exactly the transition after which
+        # no more position updates arrive, so this is the last chance the
+        # tick gets to put the shape back to three even bars.
+        self._refresh_tray_icon()
         if snapshot.state is not PlaybackState.PLAYING:
             self._cancel_line_schedule()
             self._loop_timer.stop()  # loop (if any) lies dormant, not cancelled
@@ -1464,6 +1490,12 @@ class LyricsWindow(QWidget):
         self._current_fx.progress = 0.0
 
     def _set_lines(self, lines: list, index: int) -> None:
+        # The one place a synced line lands on the window — both the
+        # predicted swap and the snap in _render come through here — which
+        # makes it the one place that can say "the lyric advanced". Compared
+        # against _displayed_index, which is still the PREVIOUS index at this
+        # point: both callers assign it afterwards.
+        self._advance_menubar_step(index)
         current = lines[index][1] if index >= 0 else ""
         # The ↻ marker is display-only: pronunciation is looked up on the
         # unprefixed line text.
@@ -2091,13 +2123,59 @@ class LyricsWindow(QWidget):
         self._positions_menu.clear()
         listed = self._positions.listed()
         for bundle_id, name in listed:
-            entry = self._positions_menu.addAction(display_label(bundle_id, name))
-            icon = self._app_icon(bundle_id)
-            if icon is not None:
-                entry.setIcon(icon)
-            entry.setEnabled(False)  # a list of what is known, not a control
-            entry.setMenuRole(QAction.MenuRole.NoRole)  # the text is not ours
+            self._positions_menu.addAction(
+                self._readout_row(display_label(bundle_id, name), bundle_id)
+            )
         logger.debug("remembered-apps menu rebuilt with %d entries", len(listed))
+
+    def _readout_row(self, text: str, bundle_id: Optional[str]) -> QWidgetAction:
+        """One remembered app, at full brightness and not a control.
+
+        A disabled QAction was the obvious way to say "not clickable" and it
+        said the wrong thing: macOS greys disabled items, so a list of four
+        apps read as four things that were unavailable rather than as four
+        facts. This is a QWidgetAction carrying a label, which macOS draws at
+        the ordinary text colour.
+
+        Measured rather than assumed, because "renders at full contrast" and
+        "does not pretend to be clickable" are two claims and a QWidgetAction
+        had to satisfy both. In a real menu, on both routes this menu takes
+        (the window's right-click popup and the menu bar item):
+
+        - a disabled QAction draws grey; this draws the same black an enabled
+          one does
+        - hovering it does NOT select it — ``activeAction()`` stays None,
+          because the widget takes the mouse itself — so it never lights up
+        - even forced active it draws no highlight, and clicking it leaves the
+          menu open
+
+        Marking the widget ``WA_TransparentForMouseEvents`` was tried and is
+        WRONG, which is worth recording because it is the instinct: with the
+        mouse passing through, the menu selects the row on hover and it starts
+        behaving like a control. Swallowing the mouse is what makes it inert.
+        """
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        # Matches the indent a native menu item with an icon sits at, so the
+        # rows line up with the entries above them rather than announcing
+        # that they are made of something else.
+        row.setContentsMargins(_READOUT_INDENT, 2, _READOUT_TRAIL, 2)
+        row.setSpacing(_READOUT_GAP)
+        icon = self._app_icon(bundle_id)
+        if icon is not None:
+            glyph = QLabel()
+            glyph.setPixmap(icon.pixmap(_MENU_ICON_POINTS, _MENU_ICON_POINTS))
+            row.addWidget(glyph)
+        else:
+            row.addSpacing(_MENU_ICON_POINTS)
+        row.addWidget(QLabel(text))
+        row.addStretch(1)
+        entry = QWidgetAction(self._positions_menu)
+        entry.setDefaultWidget(holder)
+        # Nothing is connected to it. A click emits triggered and lands
+        # nowhere, which is the same outcome as the disabled row had and
+        # without the grey.
+        return entry
 
     def _app_icon(self, bundle_id: Optional[str]):
         """The app's icon as a QIcon, or None where there is not one.
@@ -2415,6 +2493,11 @@ class LyricsWindow(QWidget):
         all_desktops.triggered.connect(self._set_all_desktops)
         actions[ALL_DESKTOPS] = all_desktops
 
+        menubar_animation = self._menu.addAction("Animate the menu bar icon")
+        menubar_animation.setCheckable(True)
+        menubar_animation.triggered.connect(self._set_menubar_animation)
+        actions[MENUBAR_ANIMATION] = menubar_animation
+
         yield_notifications = self._menu.addAction("Yield to notifications")
         yield_notifications.setCheckable(True)
         yield_notifications.triggered.connect(self._set_yield_to_notifications)
@@ -2545,6 +2628,7 @@ class LyricsWindow(QWidget):
         self._menu_actions[ECHO].setChecked(self._echo_enabled)
         self._menu_actions[ALBUM_COLOUR].setChecked(self._album_colour)
         self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
+        self._menu_actions[MENUBAR_ANIMATION].setChecked(self._menubar_animation)
         self._menu_actions[YIELD_NOTIFICATIONS].setChecked(
             self._yield_to_notifications
         )
@@ -2560,46 +2644,108 @@ class LyricsWindow(QWidget):
         self._refresh_tray_icon()
 
     def _build_tray(self) -> None:
-        """The menu bar item. Its icons are template images, so macOS tints
-        them for light and dark menu bars instead of us shipping two of
-        each."""
+        """The menu bar item. Its glyph is drawn rather than loaded, and it
+        is a template image, so macOS tints it for light and dark menu bars
+        instead of us shipping two of each."""
         if not QSystemTrayIcon.isSystemTrayAvailable():
             logger.info("no system tray — menu bar item unavailable")
             self._tray = None
             return
         self._tray_icons = {}
-        for state, filename in menubar.ICON_FILES.items():
-            icon = QIcon(str(MENUBAR_ICONS / filename))
-            icon.setIsMask(True)  # a template image: macOS owns the colour
-            self._tray_icons[state] = icon
-        self._tray = QSystemTrayIcon(self._tray_icons[menubar.ACTIVE], self)
-        self._tray_state = menubar.ACTIVE
+        spec = self._tray_spec_now()
+        self._tray = QSystemTrayIcon(self._tray_icon_for(spec), self)
+        self._tray_state = spec
         self._tray.setToolTip("LyriSync")
         self._tray.setContextMenu(self._menu)
         self._tray.show()
-        self._refresh_tray_icon()
+
+    def _tray_icon_for(self, spec) -> QIcon:
+        """One drawing per combination, kept.
+
+        Brightness, shape and dot compose into eight states, and the optional
+        animation multiplies the shape by four — so drawing on demand and
+        caching by spec is what keeps a line change to a dictionary lookup
+        after the first time it is seen. Each icon is painted once for the
+        life of the process.
+        """
+        icon = self._tray_icons.get(spec)
+        if icon is None:
+            icon = symbols.menubar_icon(spec)
+            self._tray_icons[spec] = icon
+            logger.debug("menu bar glyph drawn: %r", spec)
+        return icon
+
+    def _tray_spec_now(self):
+        """What the item should be showing, from the app's current state."""
+        return menubar.icon_spec(
+            playing=self._last_state is PlaybackState.PLAYING,
+            lyrics_visible=self._lyrics_visible,
+            practising=self._loop.engaged or self._syncing,
+            animated=self._menubar_animation,
+            line_changes=self._menubar_step,
+        )
 
     def _refresh_tray_icon(self) -> None:
         """Bring the menu bar glyph in line with what the app is doing.
 
-        Set only when the state CHANGES. This runs on every render — three
-        times a second — and handing the same icon back to an
-        NSStatusItem that many times is the menu bar item being rebuilt
-        under the user, which is the flicker the shared menu is built once
-        to avoid.
+        Driven by the MONITOR TICK, not by the menu opening. Until 15.1 the
+        only reliable caller was ``aboutToShow``: the icon was refreshed from
+        ``_render``, and a pause does not re-render, because
+        ``player_state_changed`` returns False for PAUSED — the display text
+        is unchanged, so there is nothing to draw. The icon therefore sat on
+        "playing" until somebody opened the menu. It is now refreshed from
+        every position update and every state change as well.
+
+        ``_refresh_menu`` still calls it, and that is not redundant: position
+        updates stop arriving the moment there is no track at all, so with
+        Spotify closed the tick is gone and hiding the window would have
+        nothing to dim the icon. The tick is the guarantee; the other callers
+        are promptness.
+
+        Set only when the spec CHANGES. This now runs three times a second,
+        and handing the same image back to an NSStatusItem that often is the
+        menu bar item being rebuilt under the user — the flicker the shared
+        menu is built once to avoid.
         """
         if self._tray is None:
             return
-        state = menubar.icon_state(
-            playing=self._last_state is PlaybackState.PLAYING,
-            lyrics_visible=self._lyrics_visible,
-            practising=self._loop.engaged or self._syncing,
-        )
-        if state == self._tray_state:
+        spec = self._tray_spec_now()
+        if spec == self._tray_state:
             return
-        self._tray_state = state
-        self._tray.setIcon(self._tray_icons[state])
-        logger.debug("menu bar glyph: %s", state)
+        self._tray_state = spec
+        self._tray.setIcon(self._tray_icon_for(spec))
+        logger.debug("menu bar glyph: %r", spec)
+
+    def _advance_menubar_step(self, index: int) -> None:
+        """A different synced line is on screen: step the arrangement.
+
+        Called from the one place a synced line lands on the window, and only
+        when the index actually differs — ``_render`` re-runs ``_set_lines``
+        for reasons that have nothing to do with the song (a menu refresh, a
+        resize), and those are not line changes.
+
+        The step is counted whether or not the animation is on, so switching
+        the layer on mid-song picks up from wherever the song is rather than
+        restarting a cycle. Refreshing the icon here is what makes the
+        arrangement change ON the line change rather than up to a poll later.
+        """
+        if index == self._displayed_index:
+            return
+        self._menubar_step += 1
+        if self._menubar_animation:
+            self._refresh_tray_icon()
+
+    def _set_menubar_animation(self, enabled: bool) -> None:
+        """Turn the arrangement stepping on or off.
+
+        Off is not merely "stop moving": the shape goes back to the plain
+        short / long / short, so off equals the app before this existed.
+        """
+        self._menubar_animation = enabled
+        self._settings.setValue("window/menubar_animation", enabled)
+        logger.info("menu bar animation %s", "on" if enabled else "off")
+        self._refresh_tray_icon()
+        self._refresh_menu()
 
     def _build_hotkey(self) -> None:
         """Claim the global show/hide combination.
@@ -3471,6 +3617,13 @@ class LyricsWindow(QWidget):
         # the setter refreshes the menu. Watching depends on both this and
         # the saved visibility, so it is started after the pair of them
         # rather than beside either one.
+        # Assigned rather than routed through the setter, like every layer
+        # here: restore runs before the menu is built and the setter
+        # refreshes it. Nothing else to do — the tray is built afterwards
+        # and asks for the spec itself.
+        self._menubar_animation = self._settings.value(
+            "window/menubar_animation", False, type=bool
+        )
         self._yield_to_notifications = self._settings.value(
             "window/yield_notifications", False, type=bool
         )
@@ -3497,6 +3650,7 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/album_colour", self._album_colour)
         self._settings.setValue("window/visible", self._lyrics_visible)
         self._settings.setValue("window/remember_position", self._remember_position)
+        self._settings.setValue("window/menubar_animation", self._menubar_animation)
         self._settings.setValue(
             "window/yield_notifications", self._yield_to_notifications
         )

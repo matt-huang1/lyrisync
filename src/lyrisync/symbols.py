@@ -23,9 +23,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QIcon, QIconEngine, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
+
+from lyrisync import menubar
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +166,116 @@ def icon_from_tiff(data: bytes, points: int) -> Optional[QIcon]:
     ratio = max(1.0, pixmap.width() / points)
     pixmap.setDevicePixelRatio(ratio)
     return QIcon(pixmap)
+
+
+def draw_menubar_glyph(painter: QPainter, side: float, spec: menubar.IconSpec) -> None:
+    """Paint the glyph into a ``side``x``side`` square, from menubar's geometry.
+
+    Solid black with the form in the alpha channel — a template image, as the
+    three SVGs this replaced were, so macOS tints it for a light or dark menu
+    bar. Dimming is the brush's alpha rather than a grey, which is what makes
+    the dim glyph read as the same icon with less ink.
+    """
+    scale = side / menubar.GLYPH_UNITS
+    ink = QColor(0, 0, 0)
+    ink.setAlphaF(menubar.DIM_ALPHA if spec.dimmed else menubar.FULL_ALPHA)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(ink)
+    centre_x = menubar.bar_centre_x(spec.dot)
+    for length, thickness, centre_y in zip(
+        spec.lengths, menubar.BAR_THICKNESSES, menubar.BAR_CENTRES_Y
+    ):
+        bar = QRectF(
+            (centre_x - length / 2) * scale,
+            (centre_y - thickness / 2) * scale,
+            length * scale,
+            thickness * scale,
+        )
+        radius = thickness / 2 * scale
+        painter.drawRoundedRect(bar, radius, radius)
+    if spec.dot:
+        dot_x, dot_y = menubar.DOT_CENTRE
+        radius = menubar.DOT_RADIUS * scale
+        painter.drawEllipse(QPointF(dot_x * scale, dot_y * scale), radius, radius)
+
+
+def menubar_pixmap(spec: menubar.IconSpec, side: int) -> QPixmap:
+    """The glyph as a ``side``x``side`` pixmap of actual pixels."""
+    side = max(1, int(side))
+    pixmap = QPixmap(side, side)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    draw_menubar_glyph(painter, side, spec)
+    painter.end()
+    return pixmap
+
+
+class _MenubarIconEngine(QIconEngine):
+    """Renders the glyph at whatever size it is asked for.
+
+    An engine rather than a pixmap, and that was MEASURED rather than
+    preferred. Handing QSystemTrayIcon a 44-pixel pixmap at
+    devicePixelRatio 2 — logically 22x22, exactly what the SVG it replaced
+    was — put a CLIPPED glyph on the menu bar: two of the three bars and no
+    practice dot. ``QIcon.availableSizes()`` reports raw pixels and does not
+    fold the ratio in, so the status item took a 44-point image for a
+    22-point slot and showed its top two thirds.
+
+    Four constructions were put on a real status item and photographed:
+
+    - 44px at ratio 2 — clipped
+    - 36px at ratio 2 — clipped
+    - both 22px and 44px in one icon — clipped, Qt takes the larger
+    - 22px at ratio 1 — whole, but upscaled by the compositor and soft
+    - this engine — whole, and the crispest of the five
+
+    Which is what the SVG engine had been doing all along: rendering on
+    demand at the size actually wanted. Nothing else here needs an engine
+    because nothing else is handed to a status item.
+    """
+
+    def __init__(self, spec: menubar.IconSpec) -> None:
+        super().__init__()
+        self._spec = spec
+
+    def paint(self, painter, rect, mode, state) -> None:
+        side = max(1, min(rect.width(), rect.height()))
+        painter.drawPixmap(rect, menubar_pixmap(self._spec, side))
+
+    def pixmap(self, size, mode, state) -> QPixmap:
+        return menubar_pixmap(self._spec, min(size.width(), size.height()))
+
+    def clone(self) -> QIconEngine:
+        return _MenubarIconEngine(self._spec)
+
+    def availableSizes(self, mode=None, state=None) -> list:
+        # The size the menu bar actually wants. Reported honestly, because
+        # this is the number the clipping bug turned on.
+        return [QSize(menubar.GLYPH_UNITS, menubar.GLYPH_UNITS)]
+
+
+# QIcon takes ownership of an engine on the C++ side, but the Python object
+# has to outlive it or the icon is left painting through a collected wrapper.
+# Bounded by the number of specs that exist — eight, or eighteen with the
+# optional animation — because the window asks for each one once.
+_ENGINES: list = []
+
+
+def menubar_icon(spec: menubar.IconSpec) -> QIcon:
+    """The menu bar glyph for one spec, drawn rather than loaded.
+
+    Three SVG files became eight combinations of brightness, shape and dot in
+    milestone 15.1, and eighteen once the optional animation is counted — so
+    the glyph is painted from ``menubar``'s geometry instead of shipped as
+    images. Nothing about the shape changed in the move: the bar thicknesses,
+    centres and the dot are the numbers the SVGs carried.
+    """
+    engine = _MenubarIconEngine(spec)
+    _ENGINES.append(engine)
+    icon = QIcon(engine)
+    icon.setIsMask(True)  # a template image: macOS owns the colour
+    return icon
 
 
 def icon_size(button_side: int) -> QSize:

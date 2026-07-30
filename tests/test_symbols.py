@@ -107,3 +107,85 @@ def test_the_glyph_box_leaves_room_inside_the_button():
     for side in (22, 28, 40):
         assert symbols.icon_size(side).width() < side
     assert symbols.icon_size(4).width() >= 10  # never vanishes at min scale
+
+
+# -- the menu bar glyph ----------------------------------------------------
+
+
+def test_the_glyph_reports_the_size_the_menu_bar_wants():
+    """THE CLIPPING BUG, pinned.
+
+    Handing QSystemTrayIcon a 44-pixel pixmap at devicePixelRatio 2 —
+    logically 22x22, which is what the SVG it replaced was — put a CLIPPED
+    glyph on the menu bar: two of the three bars and no practice dot.
+    ``availableSizes()`` reports RAW PIXELS and does not fold the ratio in, so
+    the status item took a 44-point image for a 22-point slot and drew its top
+    two thirds.
+
+    Four constructions were photographed on a real status item before this one
+    was chosen; the number below is the one they turned on.
+    """
+    from PySide6.QtCore import QSize
+
+    from lyrisync import menubar
+
+    spec = menubar.icon_spec(playing=True, lyrics_visible=True, practising=True)
+    icon = symbols.menubar_icon(spec)
+    assert icon.availableSizes() == [QSize(menubar.GLYPH_UNITS, menubar.GLYPH_UNITS)]
+
+
+def test_the_glyph_is_drawn_at_whatever_size_is_asked_for():
+    """An engine rather than a pixmap, which is what the SVG engine had been
+    doing all along — and the only construction of the five tried that came
+    out both whole and crisp."""
+    from lyrisync import menubar
+
+    spec = menubar.icon_spec(playing=True, lyrics_visible=True, practising=False)
+    icon = symbols.menubar_icon(spec)
+    for side in (16, 18, 22, 44, 64):
+        pixmap = icon.pixmap(side, side)
+        assert not pixmap.isNull()
+        assert max(pixmap.width(), pixmap.height()) >= side * 0.9, side
+
+
+def test_the_glyph_is_a_template_image():
+    """macOS owns the colour, which is why the practice mark is a DOT and not
+    a hue: a coloured menu bar icon stops following the menu bar."""
+    from lyrisync import menubar
+
+    spec = menubar.icon_spec(playing=False, lyrics_visible=True, practising=False)
+    assert symbols.menubar_icon(spec).isMask() is True
+
+
+def test_a_dimmed_glyph_carries_less_ink_than_a_bright_one():
+    """Dimming has to be the same shape at lower alpha, not a grey — a grey
+    would stop following the menu bar. Measured from the drawn alpha."""
+    from lyrisync import menubar
+
+    def ink(spec):
+        pixmap = symbols.menubar_pixmap(spec, 44)
+        image = pixmap.toImage()
+        return sum(
+            image.pixelColor(x, y).alpha()
+            for y in range(image.height())
+            for x in range(image.width())
+        )
+
+    bright = menubar.icon_spec(playing=True, lyrics_visible=True, practising=False)
+    dim = menubar.icon_spec(playing=True, lyrics_visible=False, practising=False)
+    assert bright.lengths == dim.lengths, "the same shape, by construction"
+    assert 0 < ink(dim) < ink(bright)
+    assert ink(dim) == pytest.approx(ink(bright) * menubar.DIM_ALPHA, rel=0.02)
+
+
+def test_the_practice_dot_adds_ink_without_changing_the_bars():
+    from lyrisync import menubar
+
+    plain = menubar.icon_spec(playing=True, lyrics_visible=True, practising=False)
+    dotted = menubar.icon_spec(playing=True, lyrics_visible=True, practising=True)
+    assert plain.lengths == dotted.lengths
+    assert not symbols.menubar_pixmap(plain, 44).isNull()
+    assert (
+        symbols.menubar_pixmap(dotted, 44).toImage()
+        != symbols.menubar_pixmap(plain, 44).toImage()
+    )

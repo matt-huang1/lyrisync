@@ -17,6 +17,7 @@ SPEECH_RATE = "speech_rate"
 ECHO = "echo"
 ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
+MENUBAR_ANIMATION = "menubar_animation"
 YIELD_NOTIFICATIONS = "yield_notifications"
 REMEMBER_POSITION = "remember_position"
 POSITION_STATUS = "position_status"
@@ -39,6 +40,7 @@ MENU_ORDER = (
     ECHO,
     ALBUM_COLOUR,
     ALL_DESKTOPS,
+    MENUBAR_ANIMATION,
     YIELD_NOTIFICATIONS,
     REMEMBER_POSITION,
     POSITION_STATUS,
@@ -73,11 +75,17 @@ MENU_ORDER = (
 # what is playing and everything to do with the window. Gating it on a
 # notification being on screen right now would offer it for five seconds at
 # a time, which is not a way to find a setting.
+# The menu bar animation is here too, and it is the same argument once more:
+# a standing preference about how the item behaves, not about the song. It
+# only has anything to do while a song is playing, but a toggle that appeared
+# and vanished with playback would be one nobody could find when they wanted
+# it — which is, as ever, before the music starts.
 ALWAYS_VISIBLE = frozenset(
     {
         SHOW_LYRICS,
         ALBUM_COLOUR,
         ALL_DESKTOPS,
+        MENUBAR_ANIMATION,
         YIELD_NOTIFICATIONS,
         REMEMBER_POSITION,
         QUIT,

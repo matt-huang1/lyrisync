@@ -56,6 +56,61 @@ covered is not implementable without pixel capture — it needs the real
 rectangle, macOS reports the display, and the only public route to the real
 one is the thing the Screen Recording prompt guards.
 
+## Milestone 15.1 — the menu bar icon says the right things, live
+
+Three fixes to the menu bar item and one addition.
+
+**The remembered-apps list was grey.** The rows became disabled `QAction`s
+when per-app forget was removed, and macOS greys disabled items — so four
+remembered apps read as four things that were *unavailable* rather than as
+four facts. They are `QWidgetAction`s carrying a label now, measured in a real
+menu on both routes it opens: the widget row draws the same black an enabled
+one does, hovering never selects it (the widget takes the mouse itself), even
+forced active it draws no highlight, and clicking it leaves the menu open.
+Marking it mouse-transparent was tried and is *wrong* — with the mouse passing
+through, the menu selects the row on hover and it starts behaving like a
+control.
+
+**The icon only updated when the menu was opened.** The refresh ran from
+`_render`, and a pause does not re-render — `player_state_changed` returns
+`False` for `PAUSED` because the display text is unchanged — so the item
+claimed a song was playing until somebody clicked it. It is now driven from
+every position update and every state change.
+
+**Brightness and shape are independent.** Milestone 15's three whole-glyph
+states carried two questions on one axis: a paused song dimmed the icon
+exactly as hiding the window did, so the one thing dimming was *for* was
+indistinguishable from Spotify being paused. Now brightness asks only whether
+the lyrics layer is on, shape asks only whether a song is playing (three bars
+of equal length for no, short / long / short for yes), and the dot asks only
+whether a practice mode is running. Practice still outranks a hidden window.
+Nothing playing no longer dims anything.
+
+Eight combinations from three booleans rather than eight drawings, which is
+only affordable because the glyph is **drawn** now — three SVGs went, and this
+would have needed twenty.
+
+**New, off by default: Animate the menu bar icon.** With it on, the three bar
+lengths step to the next of four arrangements each time the lyric line
+advances. Not a timer and not a loop — it moves when the song does. The middle
+bar is the same length in every arrangement, so "the current line is the
+longest" is true of every frame it can show. Costs 0.020 ms of CPU per line
+change, against the 92.7 ms one line change of the window already costs.
+
+Two things were found by rendering the glyph and looking at it, after the
+numbers had all come back healthy. The dot **overlapped** the even shape's
+bottom bar by half a unit — at 16 points, a bar with a blob on the end rather
+than a mark beside it. And handing the status item a 44-pixel pixmap at
+`devicePixelRatio` 2 put a **clipped** glyph on the bar, two bars and no dot,
+because `QIcon.availableSizes()` reports raw pixels and macOS took a 44-point
+image for a 22-point slot. Five constructions were photographed on a real
+status item before an icon engine — what the SVG engine had been doing all
+along — came out both whole and crisp.
+
+The closest pair at 16 points, stated rather than glossed: stopped-and-hidden
+against playing-and-hidden, 9.8% of the square, both dim with only the shape
+between them.
+
 ## Milestone 16 — yield to notifications
 
 The window floats *above* notification banners — level 25 against their 21

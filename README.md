@@ -7,7 +7,7 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 ## Features
 
 - **Synced lyrics that float** — a frameless, always-on-top window shows the previous, current and next line, in time with playback.
-- **Lives in the menu bar**, not the Dock. The window shrinks into the menu bar item when you hide it and grows back out of it when you return, and the item's glyph says whether anything is playing and whether a practice mode is running. Right-clicking the window gives you the same menu.
+- **Lives in the menu bar**, not the Dock. The window shrinks into the menu bar item when you hide it and grows back out of it when you return. The item's glyph says three things at once, and each independently: its shape says whether a song is playing, its brightness says whether the lyrics are on screen, and a dot says a practice mode is running. Optionally the shape steps along as the lyric advances. Right-clicking the window gives you the same menu.
 - **Looks like macOS** — real vibrancy behind the lyrics, follows light and dark, and the sung line stays readable over a white document, a dark editor or video.
 - **⇧⌘J from anywhere** shows and hides the lyrics without switching away from what you were doing. No Accessibility permission.
 - **Album colour** — an optional layer that colours the window from the current cover's hue.
