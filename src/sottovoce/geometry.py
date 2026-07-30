@@ -32,6 +32,12 @@ _GUTTER_PAD = 6
 _ROW_FONTS_PX = tuple(
     base_size(role) for role in (HEADER, CONTEXT, CURRENT, PRONUNCIATION, CONTEXT)
 )
+# What is left of that in the compact layout: the sung line and the
+# pronunciation under it, and nothing else. The pronunciation is counted
+# whether or not the romanisation layer is on, for the reason the full
+# layout counts it too — which lines carry hangul changes song by song,
+# and a floor that moved with them would resize the window mid-track.
+_COMPACT_ROW_FONTS_PX = tuple(base_size(role) for role in (CURRENT, PRONUNCIATION))
 _LINE_HEIGHT_FACTOR = 1.45
 _ROW_SPACING = ROW_SPACING
 _PRONUNCIATION_SPACING = PRONUNCIATION_SPACING
@@ -45,7 +51,12 @@ _MIN_HEIGHT_FLOOR = 120
 # land on the tap bar instead.
 _SYNC_BAR_BASE_HEIGHT = 34
 _SYNC_BAR_MIN_HEIGHT = 28
-_SYNC_BAR_GAP = 6
+
+# Gap between two overlay controls sitting side by side, and between the
+# lyric text and the tap row above it. One number because it is one
+# question — how far apart two things this size have to be before they
+# read as two things.
+_CONTROL_GAP = 6
 
 # Width of the window's edge grab zone, in px. Lives here because the tap
 # row's placement has to stay clear of it.
@@ -88,10 +99,29 @@ def button_margin(scale: float) -> int:
     return max(_BUTTON_MIN_MARGIN, round(_BUTTON_BASE_MARGIN * scale))
 
 
+def control_gap(scale: float) -> int:
+    """Gap between two overlay controls sitting side by side."""
+    return max(4, round(_CONTROL_GAP * scale))
+
+
 def text_gutter(scale: float) -> int:
     """Horizontal layout margin reserving the full button zone plus
     padding: wrapped text can never run under a button."""
     return button_margin(scale) + button_side(scale) + max(4, round(_GUTTER_PAD * scale))
+
+
+def compact_text_gutter(scale: float) -> int:
+    """The same margin for the compact layout, which has to reserve TWO
+    controls a side rather than one.
+
+    A strip has no top-right corner to put anything in, so the loop and
+    the speak button sit side by side on the centre line where the full
+    layout stacks them one above the other. The margin is the same on both
+    sides even though only the right one carries two controls: the sung
+    line is centred, and an asymmetric gutter would centre it in what is
+    left of the window rather than in the window.
+    """
+    return text_gutter(scale) + button_side(scale) + control_gap(scale)
 
 
 def sync_bar_height(scale: float) -> int:
@@ -103,8 +133,10 @@ def sync_bar_height(scale: float) -> int:
 
 def sync_bar_gap(scale: float) -> int:
     """Breathing room between the lyric text and the tap row, and between
-    the row's own controls."""
-    return max(4, round(_SYNC_BAR_GAP * scale))
+    the row's own controls. The same gap as anywhere else two controls sit
+    beside each other, and it is that function rather than a second copy
+    of the number."""
+    return control_gap(scale)
 
 
 def sync_bar_bottom(scale: float) -> int:
@@ -120,23 +152,80 @@ def sync_bar_reserve(scale: float) -> int:
     return sync_bar_height(scale) + sync_bar_gap(scale) + sync_bar_bottom(scale)
 
 
-def min_window_height(scale: float, sync_bar: bool = False) -> int:
-    """Smallest window height where all five label rows fit single-line at
-    this scale — no window shape may hide the lyrics entirely. During a
-    sync pass the tap row needs its space on top of that."""
-    rows = sum(
-        round(font * scale * _LINE_HEIGHT_FACTOR) for font in _ROW_FONTS_PX
-    )
-    # 4 row gaps, the tighter pronunciation gap inside the current block,
-    # and the extra air reserved above and below that block.
-    spacing = (
-        round(_ROW_SPACING * scale) * 4
-        + round(_PRONUNCIATION_SPACING * scale)
-        + round(_CURRENT_SPACING * scale) * 2
-    )
+def min_window_height(
+    scale: float, sync_bar: bool = False, compact: bool = False
+) -> int:
+    """Smallest window height where every label row the layout has fits
+    single-line at this scale — no window shape may hide the lyrics
+    entirely. During a sync pass the tap row needs its space on top of
+    that.
+
+    The compact layout has two rows instead of five, and drops the air
+    reserved above and below the sung line with them: that spacing exists
+    to stop the three lyric rows reading as an evenly spaced list with one
+    of them in bold, and with no neighbours there is nothing to separate
+    from. Nor does it take the five-row floor, which is what "much
+    smaller" means: 79px against 183px at scale 1.0, 51px against 120px at
+    the smallest scale the window has.
+
+    A sync pass leaves the compact layout for as long as it runs, so the
+    two never combine in practice; the reserve is added either way rather
+    than made an exception, because a reserve that depends on which layout
+    asked for it is a second rule.
+    """
+    if compact:
+        rows = sum(
+            round(font * scale * _LINE_HEIGHT_FACTOR)
+            for font in _COMPACT_ROW_FONTS_PX
+        )
+        spacing = round(_PRONUNCIATION_SPACING * scale)
+        floor = 0
+    else:
+        rows = sum(
+            round(font * scale * _LINE_HEIGHT_FACTOR) for font in _ROW_FONTS_PX
+        )
+        # 4 row gaps, the tighter pronunciation gap inside the current
+        # block, and the extra air reserved above and below that block.
+        spacing = (
+            round(_ROW_SPACING * scale) * 4
+            + round(_PRONUNCIATION_SPACING * scale)
+            + round(_CURRENT_SPACING * scale) * 2
+        )
+        floor = _MIN_HEIGHT_FLOOR
     margins = round(_TOP_MARGIN * scale) + round(_BOTTOM_MARGIN * scale)
-    height = max(_MIN_HEIGHT_FLOOR, rows + spacing + margins)
+    height = max(floor, rows + spacing + margins)
     return height + sync_bar_reserve(scale) if sync_bar else height
+
+
+def docked_position(
+    window_width: int,
+    screen: tuple[int, int, int, int],
+    available: tuple[int, int, int, int],
+    top_inset: int = 0,
+) -> tuple[int, int]:
+    """Where a window this wide sits when docked to the top of a screen.
+
+    Centred on the SCREEN rather than on the available area, which are not
+    the same thing once the Dock is on the left or the right. The menu bar
+    it is docking under spans the screen and the notch is centred on the
+    screen, so centring on anything else would put the window off-centre
+    from the very thing it is lining up with.
+
+    The top edge goes under whichever of the two obstacles reaches further
+    down. ``available`` is the menu bar's answer and is usually the whole
+    of it: on a notched Mac macOS reserves the entire band the notch sits
+    in, so the available area already starts below it. ``top_inset`` is
+    the screen's own safe area and is what survives the case that answer
+    does not cover — a menu bar set to hide automatically gives the whole
+    screen back while leaving the notch exactly where it was.
+
+    Flush, with no gap of its own: "just below the menu bar" is a position
+    and not an aesthetic, and a gap would be a number set by eye. The
+    window is freely draggable afterwards, so nudging it down is a nudge.
+    """
+    sx, sy, swidth, _ = screen
+    _, ay, _, _ = available
+    return (sx + (swidth - window_width) // 2, max(ay, sy + top_inset))
 
 
 def beside_centred_text(

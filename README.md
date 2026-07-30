@@ -13,6 +13,8 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 - **Looks like macOS** — real vibrancy behind the lyrics, follows light and dark, and the sung line stays readable over a white document, a dark editor or video.
 - **Follows your accessibility settings**, live, the way it follows light and dark. Reduce Motion takes out the flight to the menu bar, the travel to a remembered position and the rise of each lyric, and leaves the fades. Reduce Transparency swaps the vibrancy for a solid panel. Increase Contrast lifts every text role to the 4.5:1 the sung line already promised, and draws the window's edge as an edge.
 - **⇧⌘J from anywhere** shows and hides the lyrics without switching away from what you were doing. No Accessibility permission.
+- **Compact** — an optional layout that reduces the window to the line being sung, with the romanisation under it if that layer is on. A wide thin strip, 79 points tall at the default width against the full layout's 183. The loop and speak controls go away with the other rows and come back when the pointer is over the window. A sync pass takes the full layout back for as long as it runs, and gives the strip back afterwards at the height you left it.
+- **Dock to top** — puts the window centred just under the menu bar on whichever screen it is on, clear of the notch. A command, not a snap: nothing holds it there, and it is as draggable afterwards as before.
 - **Album colour** — an optional layer that colours the window from the current cover's hue.
 - **Show on all desktops** — an optional mode that keeps the window visible across Spaces and over full-screen apps.
 - **Yield to notifications** — an optional layer that fades the window out of the way while a notification banner or the Notification Centre is over it, and brings it back when the way is clear. Only when the window is actually in the corner notifications use; parked anywhere else, it stays put. It needs no permission: the window list answers "is a notification on screen" without the Screen Recording prompt, and the app never asks for a window's title, which is the one field that would need it.
@@ -105,7 +107,7 @@ Play something in Spotify and the window follows along.
 - **⇧⌘J** hides and shows the lyrics from any app, full-screen ones included. Nothing takes focus and SottoVoce never comes to the front.
 - **The menu bar item** is the app's home — every setting is there, including Open at Login in the built app, and entries appear only where they apply. Right-clicking the window gives the same menu.
 - **Drag** anywhere to move, **drag the edges** to resize (text scales with width), **scroll** to dim. In the plain-lyrics view, scroll moves the lyrics and Option+scroll dims.
-- **↻** repeats the current line; the **speech bubble** speaks it aloud.
+- **↻** repeats the current line; the **speech bubble** speaks it aloud. In the compact layout both appear when the pointer is over the window and fade away when it leaves.
 - **Sync this song** (right-click) times a song by hand: the track restarts, and you tap the wide bar as each line begins. ↩ undoes a tap, ✕ abandons the pass. Finish the last line and it saves itself. Once a song has your sync, the entry becomes **Re-sync this song**.
 
 Two terminal tools exist for debugging: `sottovoce-monitor` and `sottovoce-lyrics`. `SOTTOVOCE_LOG=DEBUG` makes the running app explain itself line by line — which app came to the front, what was remembered for it, and why anything it declined to do was declined.
@@ -127,7 +129,7 @@ The reasoning, the trade-offs and the measurements live in **[docs/](docs/)** �
 | [Testing and CI](docs/testing-and-ci.md) | the guards that keep the suite off your Spotify |
 | [Changelog](CHANGELOG.md) | the milestones in order |
 
-Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [per-app window position](docs/per-app-position.md), [yielding to notifications](docs/notification-yield.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), [packaging](docs/packaging.md), [releasing](docs/releasing.md), and [Gatekeeper](docs/gatekeeper.md).
+Also in `docs/`: [Spotify integration](docs/spotify-integration.md), [lyrics and caching](docs/lyrics-and-caching.md), [tap-to-sync](docs/tap-to-sync.md), [appearance and materials](docs/appearance-and-materials.md), [motion and typography](docs/motion-and-typography.md), [the compact layout and docking](docs/compact-and-docking.md), [per-app window position](docs/per-app-position.md), [yielding to notifications](docs/notification-yield.md), [the hotkey and Carbon](docs/hotkey-and-carbon.md), [the menu and system integration](docs/menu-and-system-integration.md), [the learning layers](docs/learning-features.md), [packaging](docs/packaging.md), [releasing](docs/releasing.md), and [Gatekeeper](docs/gatekeeper.md).
 
 ## Credits
 

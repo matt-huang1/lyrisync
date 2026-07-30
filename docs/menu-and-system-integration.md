@@ -35,6 +35,15 @@ about the song. Gating the last of those on a notification being up right
 now would offer it for five seconds at a time, which is not a way to find a
 setting.
 
+[Compact and Dock to top](compact-and-docking.md) are the same argument a
+fifth and sixth time, and they sit together for it: one is a standing
+choice about the window's shape, the other a command about where it goes,
+and both are answerable with nothing playing. Docking in particular is
+what somebody reaches for while setting the window up, which is before
+there is a song to gate it on. Dock to top is the one entry here that is
+**not checkable** — it puts the window somewhere once, and nothing holds
+it there, so there is no state for a tick to describe.
+
 **Quit is visible in every state.** The menu bar item is the way back from
 a hidden window, so it must never be a dead end.
 

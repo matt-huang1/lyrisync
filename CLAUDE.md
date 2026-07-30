@@ -155,6 +155,24 @@ Rules that come with them:
   Docstrings and the history files are exempt; a test scans the syntax of
   every module, because a text scan could only be satisfied by deleting
   the explanations.
+- The compact layout is **one setting and one applied state**
+  (`_compact`, `_compact_applied`), because a sync pass borrows the full
+  layout back and that is not the user changing their mind. Each layout
+  **keeps the height it was last left at**: Qt does not shrink a window
+  when a minimum drops, so without that every pass would leave the strip
+  permanently taller.
+- **A strip is one row tall, so its rows do not wrap.** What will not fit
+  is elided, measured against the window and its gutters rather than a
+  label width that does not exist yet, and the unelided line is kept so a
+  resize does not eat it a word at a time.
+- Compact's gutter reserves **two controls a side, symmetrically**. Only
+  the right side carries two, but the sung line is centred and an
+  asymmetric gutter would centre it in what is left of the window.
+- **Echo practice does not fall back to the full layout** and a sync pass
+  does. One line repeated is compact at its best, and the loop engages
+  many times a song; the pass needs four things a strip has room for one
+  of. The reveal is **held open while the attempt waits**, because that
+  phase pauses the song and the done button is the only way out of it.
 - A failed lookup says **"lyrics unavailable, will retry" and no more**
   unless asked. The reason (kind, HTTP status, the attempt it came from)
   lives one click away, in the HUD's own register, and never carries the
@@ -233,10 +251,26 @@ Rules that come with them:
   module's syntax. It keys on the **bundle identifier**, never the
   localised owner name, and `com.apple.controlcenter` must stay out of the
   set (it owns eleven permanently on-screen windows).
+- **macOS delivers enter, leave and mouse-moved events only to the ACTIVE
+  app**, and this one never activates: Qt's tracking area is
+  `NSTrackingActiveInActiveApp`. Anything that needs to know where the
+  pointer is asks for its position, on a timer, and only while something
+  could act on the answer. The offscreen platform has no pointer, so no
+  test can catch this: it is verified by driving the real one with the
+  app backgrounded.
 - Per-app position memory: **our own activation is dropped** rather than
   becoming the frontmost app — dragging the window activates us. The
   debounce rule is authoritative and the timer is only a prompt, because
   `QTimer` may fire early.
+- **Docking is a command, not a snap**: nothing is magnetic and the window
+  stays freely draggable. It is centred on the SCREEN (the menu bar spans
+  it, the notch is centred on it), flush with no gap of its own, and the
+  screen's **safe area is a floor on the available area, never a
+  replacement** — the case it exists for is a menu bar set to hide
+  automatically, which gives the whole screen back and leaves the notch.
+  A dock is **learned like the end of a drag**, or the position layer
+  undoes it at the next app switch, and is written from the target
+  because the travel would otherwise record a waypoint.
 - The flight puts the window's **position back before it is hidden**, and
   one method gives back everything it borrowed. Startup does not fly.
 - Every native login-item, hotkey, workspace and window-list call goes
@@ -293,6 +327,7 @@ activations rather than ignoring them.
 
 | | |
 |---|---|
+| [docs/compact-and-docking.md](docs/compact-and-docking.md) | the strip, the pointer poll, and the notch |
 | [docs/decision-log.md](docs/decision-log.md) | every decision, in order, with its measurement |
 | [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) | the twelve principles the rest is downstream of |
 | [docs/](docs/) | one page per topic: architecture, contrast, album colour, motion, packaging, testing, … |
@@ -300,7 +335,9 @@ activations rather than ignoring them.
 
 ## Parked
 
-Album-art background; multiple colours or gradients from one cover;
+Splitting the compact layout around the notch; Dynamic Island style
+flanking icons; automatic snapping to any edge;
+album-art background; multiple colours or gradients from one cover;
 per-song colour overrides; karaoke word-by-word; side panels; Japanese
 romanisation; configurable hotkeys or any hotkey beyond show/hide; focus
 fade; yielding to anything beyond the notification system; a different

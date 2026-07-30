@@ -61,10 +61,12 @@ def test_bare_menu_with_every_layer_dormant():
     nothing to forget until something has been learned."""
     assert without_separators(entries()) == (
         m.SHOW_LYRICS,
+        m.COMPACT,
         m.ALBUM_COLOUR,
         m.ALL_DESKTOPS,
         m.MENUBAR_ANIMATION,
         m.YIELD_NOTIFICATIONS,
+        m.DOCK_TOP,
         m.REMEMBER_POSITION,
         m.QUIT,
     )
@@ -135,13 +137,14 @@ def test_open_at_login_defaults_to_hidden():
 def test_open_at_login_sits_with_the_window_behaviour_entries():
     """Grouped with the other entries about how the app behaves rather
     than about the song: Spaces, how the menu bar item behaves, how it treats
-    a notification, where the window lives per app, then login. None of them
-    belongs among the learning layers."""
+    a notification, where the window goes when docked and where it lives per
+    app, then login. None of them belongs among the learning layers."""
     shown = without_separators(m.visible_entries(**ALL_LAYERS))
     behaviour = (
         m.ALL_DESKTOPS,
         m.MENUBAR_ANIMATION,
         m.YIELD_NOTIFICATIONS,
+        m.DOCK_TOP,
         m.REMEMBER_POSITION,
         m.POSITION_STATUS,
         m.POSITION_LIST,

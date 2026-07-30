@@ -43,6 +43,7 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
+    QCursor,
     QFont,
     QFontDatabase,
     QFontMetricsF,
@@ -54,6 +55,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -87,6 +89,9 @@ from sottovoce.geometry import (
     button_margin,
     button_side,
     clamped_position,
+    compact_text_gutter,
+    control_gap,
+    docked_position,
     min_window_height,
     sync_bar_bottom,
     sync_bar_gap,
@@ -112,6 +117,8 @@ from sottovoce import settings as preferences
 from sottovoce.menu import (
     ALBUM_COLOUR,
     ALL_DESKTOPS,
+    COMPACT,
+    DOCK_TOP,
     ECHO,
     FORGET_POSITIONS,
     OPEN_AT_LOGIN,
@@ -189,9 +196,27 @@ from sottovoce.view_model import LyricsViewModel, Mode, card_yields
 logger = logging.getLogger(__name__)
 
 _BASE_WIDTH = 460
-_MIN_SIZE = QSize(260, 120)
+_MIN_WIDTH = 260
+# The type scale never goes below this, however narrow the window gets:
+# past a point shrinking the text stops being proportional and starts
+# being unreadable. Named because two places need it and the second one —
+# the resize floor — has to know the scale a drag is about to land on
+# before the window is that width.
+_MIN_SCALE = 0.65
 _CORNER_RADIUS = 14
 _RESIZE_MARGIN = RESIZE_MARGIN
+# What a first run opens at, comfortably above the full layout's floor at
+# scale 1.0 (183), so it opens at a shape it chose rather than at one it
+# was clamped to.
+_DEFAULT_HEIGHT = 200
+
+# The smallest the window can ever be: the narrowest width, and the
+# compact layout's floor at the scale that width produces. Derived rather
+# than stated, because the per-layout floor is applied a few lines into
+# the constructor and this one is only what holds until then — a literal
+# here that was larger than the compact floor would clamp a restored strip
+# up to a shape the user never chose.
+_MIN_SIZE = QSize(_MIN_WIDTH, min_window_height(_MIN_SCALE, compact=True))
 
 _MIN_OPACITY = 0.25
 _MAX_OPACITY = 1.0
@@ -273,6 +298,25 @@ _FLIGHT_ARRIVING = QEasingCurve.Type.OutSine
 # eased — and a fade that reverses mid-way then does so symmetrically,
 # which a paired In/Out would not.
 _YIELD_CURVE = _MOVE_CURVE
+
+# The compact layout's controls coming out from under the pointer, and
+# going away again. The same phase length as everything else the window
+# does, and the yield's curve for the yield's reason: it is one continuous
+# fade that can reverse halfway — a pointer that skims the window and
+# leaves — and a paired In/Out would not reverse symmetrically. Its
+# duration is proportional to how far it has to travel, like the flight's,
+# so a reversal comes back from where it got to rather than dawdling
+# through a journey it has already made.
+_REVEAL_MS = _FADE_MS
+_REVEAL_CURVE = _MOVE_CURVE
+
+# How often the compact layout asks where the pointer is. There is no
+# event to wait for (see _check_pointer), so this is the whole of the
+# window's answer and the interval is the whole of its latency: at 100ms
+# the controls are already moving before the hand has finished arriving,
+# and one poll costs 0.8us measured, which is 0.0008% of a core at this
+# rate. Slower would be felt; faster would buy nothing that can be seen.
+_HOVER_POLL_MS = 100
 
 # How big an application icon is drawn for the menu. macOS puts 16-point
 # icons beside menu items; this is asked for in points and comes back at
@@ -408,6 +452,16 @@ def _system_appearance() -> appearance.Appearance:
     """
     hints = QApplication.instance().styleHints()
     return appearance.from_color_scheme(int(hints.colorScheme().value))
+
+
+def _scale_for(width: int) -> float:
+    """The window's type scale at this width.
+
+    One definition, because two places ask: the window itself once it has
+    been resized, and the resize floor, which has to know the scale a drag
+    is ABOUT to land on to work out how short the window may become.
+    """
+    return max(_MIN_SCALE, width / _BASE_WIDTH)
 
 
 def _clamped_point(frame: QRect, available: QRect) -> QPoint:
@@ -735,6 +789,31 @@ class LyricsWindow(QWidget):
         self._dots_frame = 0
         self._scale = 0.0
         self._all_desktops = False
+        # The compact layout. `_compact` is what the user asked for and
+        # `_compact_applied` is what the window is currently wearing: a
+        # sync pass borrows the full layout for as long as it runs, so the
+        # two disagree for exactly that long. Both heights are kept, so
+        # switching layouts gives back the shape that layout was last left
+        # at rather than a shape derived from the other one.
+        self._compact = False  # restored from settings below
+        self._compact_applied = False
+        self._compact_height = 0  # 0 means "never been in this layout"
+        self._full_height = 0
+        # How much of the overlay controls is showing, and where it is
+        # heading. Full in the full layout and never touched there;
+        # in compact it runs 0 (a strip with nothing on it but the line)
+        # to 1. Kept apart from the target for the yield's reason: a
+        # render that agrees with the current state must cost nothing.
+        self._reveal = 1.0
+        self._reveal_to = 1.0
+        self._reveal_anim: Optional[QVariantAnimation] = None
+        self._reveal_effects: dict = {}
+        self._control_offered: dict = {}
+        self._hovered = False
+        # The lyric rows before the compact layout shortened them, so a
+        # resize can lay them out again from the line rather than from what
+        # was left of it.
+        self._full_text: dict = {}
         # Per-app position memory. All off until _restore_settings says
         # otherwise; the watcher is only started when the layer is on, so
         # with it off nothing observes anything.
@@ -967,6 +1046,19 @@ class LyricsWindow(QWidget):
         self._yield_timer.timeout.connect(self._check_notifications)
         self._apply_poll_interval()
 
+        # Where the pointer is, asked rather than waited for. Repeating,
+        # and running only while the compact layout is in force and the
+        # window is showing: the second thing in this app that genuinely
+        # has to ask, for a harder version of the notification yield's
+        # reason. macOS delivers enter, leave and mouse-moved events to an
+        # app's windows only while that app is ACTIVE, and this one is an
+        # accessory that never activates and a window that never takes
+        # focus, so there are no hover events to subscribe to at all. See
+        # _check_pointer, where the measurement is.
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setInterval(_HOVER_POLL_MS)
+        self._hover_timer.timeout.connect(self._check_pointer)
+
         self._loop = LineLoop()
         self._loop_timer = QTimer(self)
         self._loop_timer.setSingleShot(True)
@@ -1052,6 +1144,11 @@ class LyricsWindow(QWidget):
         self._build_tray()
         self._build_hotkey()
         self._apply_scale()
+        # The layout the settings asked for, applied to the rows, the
+        # controls and the fade they ride on. Nothing is resized here:
+        # _restore_settings has already put the window at the size that
+        # layout was last left at, so there is no shape to swap.
+        self._apply_compact()
         # Live, not read-once: on a Mac set to Auto the appearance changes
         # under a running app, and the app that only looked at startup is
         # the one that is wrong every evening.
@@ -1229,7 +1326,7 @@ class LyricsWindow(QWidget):
         self._loop.release()
         self._loop_timer.stop()
         self._loop_button.setChecked(False)
-        self._attempt_button.setVisible(False)
+        self._offer_control(self._attempt_button, False)
         if was_attempt and resume_if_attempt:
             # Released during the silent attempt: let the song continue
             # naturally from where the pause left it.
@@ -1271,7 +1368,9 @@ class LyricsWindow(QWidget):
         snapshot = self._current_snapshot
         self._sync_track_key = snapshot.track_key if snapshot is not None else None
         self._pool.start(PlayerCommandTask(seek_to=0.0, resume=True))
-        self._apply_layout_margins()
+        # A sync pass takes the full layout back for as long as it runs;
+        # with compact off this is only the tap row's bottom margin.
+        self._apply_compact()
         self._render()
 
     def _cancel_sync(self) -> bool:
@@ -1280,7 +1379,7 @@ class LyricsWindow(QWidget):
             return False
         self._sync_track_key = None
         self._disarm_sync_exit()
-        self._apply_layout_margins()
+        self._apply_compact()  # and the strip comes back, if that is where it was
         return True
 
     def _on_tap(self) -> None:
@@ -1403,13 +1502,14 @@ class LyricsWindow(QWidget):
     def _update_speak_button(self, line_text: Optional[str] = None) -> None:
         if line_text is None:
             line_text = self._current_line_text()
-        self._speak_button.setVisible(
+        self._offer_control(
+            self._speak_button,
             button_visible(
                 synced=self._view_model.display().mode is Mode.SYNCED,
                 line_text=line_text,
                 feature_enabled=self._spoken_enabled,
                 voice_ok=self._speech_available,
-            )
+            ),
         )
 
     def _start_fetch(self, snapshot: PlayerSnapshot) -> None:
@@ -1428,7 +1528,7 @@ class LyricsWindow(QWidget):
     def _tick_dots(self) -> None:
         if self._view_model.display().mode is Mode.FETCHING and not self._card_on_screen():
             self._dots_frame = (self._dots_frame + 1) % len(_DOTS_FRAMES)
-            self._current.setText(_DOTS_FRAMES[self._dots_frame])
+            self._set_line_text(self._current, _DOTS_FRAMES[self._dots_frame])
 
     # -- anticipatory line fade --------------------------------------------
 
@@ -1580,14 +1680,68 @@ class LyricsWindow(QWidget):
         # ↻ marks the engaged loop through both phases; the 🎤 done-button
         # (not a text marker) is the your-turn signal during ATTEMPT.
         shown = f"↻ {current}" if self._loop.engaged else current
-        self._previous.setText(lines[index - 1][1] if index >= 1 else "")
-        self._current.setText(shown)
+        self._set_context(
+            lines[index - 1][1] if index >= 1 else "",
+            lines[index + 1][1] if index + 1 < len(lines) else "",
+        )
+        self._set_line_text(self._current, shown)
         self._set_pronunciation(self._view_model.pronunciation_for(current))
-        self._upcoming.setText(lines[index + 1][1] if index + 1 < len(lines) else "")
         self._update_speak_button(current)
 
+    def _set_context(self, previous: str, upcoming: str) -> None:
+        """The lines either side of the sung one.
+
+        The compact layout has no rows for them and gives up filling them
+        as well as showing them: "off removes the work" is the rule every
+        layer here is held to, and a row nobody can see is exactly the
+        output that outlives the work when it is not.
+        """
+        if self._compact_applied:
+            return
+        self._previous.setText(previous)
+        self._upcoming.setText(upcoming)
+
+    def _set_line_text(self, label, text: str) -> None:
+        """Put a lyric on the sung row or the one under it.
+
+        FOUND BY SCREENSHOT, and it is why this exists at all. The full
+        layout wraps a long line onto a second row and its floor leaves
+        room for one; a strip is one row tall by construction, so the
+        second row had nowhere to go and landed halfway on top of the
+        romanisation, cut through the middle. Numbers said nothing was
+        wrong: the window was at its floor and the floor was correct.
+
+        So in the compact layout a line that does not fit ends in an
+        ellipsis instead. The width is computed from the window and the
+        gutters rather than read off the label, because the label's own
+        width is a layout result and this runs before the layout that
+        would produce it.
+
+        The unelided text is kept, because the elision has to be redone
+        whenever the window changes width or the type scale moves, and
+        re-eliding an already elided line would eat it a word at a time.
+        """
+        self._full_text[label] = text
+        if not self._compact_applied:
+            label.setText(text)
+            return
+        label.ensurePolished()
+        room = self.width() - 2 * compact_text_gutter(self._scale)
+        label.setText(
+            QFontMetricsF(label.font()).elidedText(
+                text, Qt.TextElideMode.ElideRight, max(1, room)
+            )
+        )
+
+    def _reelide(self) -> None:
+        """Lay the lyric rows out again for a width or a type scale that
+        has changed. A no-op with the compact layout off, where the rows
+        wrap and nothing was shortened."""
+        for label in (self._current, self._pron):
+            self._set_line_text(label, self._full_text.get(label, ""))
+
     def _set_pronunciation(self, text: str) -> None:
-        self._pron.setText(text)
+        self._set_line_text(self._pron, text)
         self._pron.setVisible(bool(text))
 
     # -- rendering ---------------------------------------------------------
@@ -1614,14 +1768,19 @@ class LyricsWindow(QWidget):
         self._refresh_menu()
 
         # Loop button only where looping is possible (synced timestamps).
-        self._loop_button.setVisible(display.mode is Mode.SYNCED)
-        self._attempt_button.setVisible(
+        # Offered rather than shown: in the compact layout having something
+        # to do and being on screen are two questions, and _offer_control
+        # answers the first while the reveal answers the second.
+        self._offer_control(self._loop_button, display.mode is Mode.SYNCED)
+        self._offer_control(
+            self._attempt_button,
             display.mode is Mode.SYNCED
             and self._loop.engaged
-            and self._loop.phase is LoopPhase.ATTEMPT
+            and self._loop.phase is LoopPhase.ATTEMPT,
         )
         if display.mode is not Mode.SYNCED:
-            self._speak_button.setVisible(False)  # synced path updates it per line
+            # Synced path updates it per line.
+            self._offer_control(self._speak_button, False)
         # Hidden for every mode by default and offered back at the very
         # bottom of this method, which is the only path that can reach
         # ERROR: every branch between here and there returns.
@@ -1634,27 +1793,27 @@ class LyricsWindow(QWidget):
             self._why_shown = False
         self._render_sync_controls(display)
 
-        # Persistent compact header whenever a track is known.
+        # Persistent header whenever a track is known, and never in the
+        # compact layout: what the song is called is the first thing a
+        # strip gives up.
         self._header.setText(display.header)
-        self._header.setVisible(bool(display.header))
+        self._header.setVisible(bool(display.header) and not self._compact_applied)
 
         if display.mode is Mode.SYNCING:
             self._displayed_index = None
             self._show_plain_view(False)
-            self._previous.setText(display.previous)
-            self._current.setText(display.current)
+            self._set_context(display.previous, display.upcoming)
+            self._set_line_text(self._current, display.current)
             self._set_pronunciation(display.pronunciation)
-            self._upcoming.setText(display.upcoming)
             return
 
         if display.header and display.mode is not Mode.IDLE and self._card_on_screen():
             # Title card: the song announces itself before lyrics start.
             self._displayed_index = None
             self._show_plain_view(False)
-            self._previous.setText("")
-            self._current.setText(display.header)
+            self._set_context("", "")
+            self._set_line_text(self._current, display.header)
             self._set_pronunciation("")
-            self._upcoming.setText("")
             return
 
         if display.mode is Mode.SYNCED:
@@ -1676,10 +1835,9 @@ class LyricsWindow(QWidget):
         current = display.current
         if display.mode is Mode.FETCHING:
             current = _DOTS_FRAMES[self._dots_frame]
-        self._previous.setText(display.previous)
-        self._current.setText(current)
+        self._set_context(display.previous, display.upcoming)
+        self._set_line_text(self._current, current)
         self._set_pronunciation(display.pronunciation)
-        self._upcoming.setText(display.upcoming)
         self._render_why(display)
 
     def _render_why(self, display) -> None:
@@ -1692,11 +1850,14 @@ class LyricsWindow(QWidget):
         day" and "nobody has written this song's lyrics down" stays a
         difference you can see without reading either message twice.
 
-        The reason lands in the upcoming row — already empty here, already
-        the dim context colour, already directly under the message it
-        explains. A second widget for it would be a second thing to place,
-        style and keep in the type scale, for a line that is on screen
-        about as often as a track fails.
+        The reason lands in the row directly under the message it explains
+        — already empty in this mode, already the dim context colour. A
+        second widget for it would be a second thing to place, style and
+        keep in the type scale, for a line that is on screen about as often
+        as a track fails. Which row that is depends on the layout, and
+        that is the whole of what compact changes here: the full layout's
+        upcoming row is gone, and the pronunciation row underneath the
+        message has taken its place.
         """
         offered = display.mode is Mode.ERROR and bool(display.detail)
         self._why_button.setVisible(offered)
@@ -1704,7 +1865,10 @@ class LyricsWindow(QWidget):
         if not offered:
             return
         if self._why_shown:
-            self._upcoming.setText(display.detail)
+            if self._compact_applied:
+                self._set_pronunciation(display.detail)
+            else:
+                self._upcoming.setText(display.detail)
         self._place_why_button()
 
     def _toggle_why(self, shown: bool) -> None:
@@ -1776,8 +1940,13 @@ class LyricsWindow(QWidget):
 
     def _show_plain_view(self, plain: bool) -> None:
         """Swap between the scrolling plain body and the synced rows; the
-        hidden side gives up ALL its layout space, stretches included."""
-        self._plain_note.setVisible(plain)
+        hidden side gives up ALL its layout space, stretches included.
+
+        The note above the body ("plain lyrics · not synced") goes with the
+        header in the compact layout, and for the same reason: it says
+        something about the song rather than showing a line of it.
+        """
+        self._plain_note.setVisible(plain and not self._compact_applied)
         self._plain_scroll.setVisible(plain)
         self._synced_box.setVisible(not plain)
 
@@ -1972,6 +2141,9 @@ class LyricsWindow(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_scale()
+        # After the scale, which is what decides both the type size the
+        # elision measures with and the gutters it measures against.
+        self._reelide()
         self._place_buttons()
         # macOS caches the shadow's silhouette; without this a resized
         # window keeps the shadow of the shape it used to be.
@@ -1981,7 +2153,7 @@ class LyricsWindow(QWidget):
         """Fonts, margins, spacing, and button boxes track window width
         near-linearly, so everything stays visually proportional from min
         size to max."""
-        scale = max(0.65, self.width() / _BASE_WIDTH)
+        scale = _scale_for(self.width())
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
             self.setStyleSheet(
@@ -1997,11 +2169,6 @@ class LyricsWindow(QWidget):
             self._current_layout.setSpacing(
                 max(1, round(PRONUNCIATION_SPACING * scale))
             )
-            # Extra air above and below the sung line, on top of the row
-            # gap. It is what stops the three lyric rows reading as an
-            # evenly spaced list with one of them in bold.
-            current_air = max(1, round(CURRENT_SPACING * scale))
-            self._current_layout.setContentsMargins(0, current_air, 0, current_air)
             self._apply_motion()
             self._apply_tracking()
             side = button_side(scale)
@@ -2103,9 +2270,17 @@ class LyricsWindow(QWidget):
         """Side margins reserve the button gutters (geometry.py owns the
         shared math) so wrapped text can never run under a button; during a
         sync pass the bottom margin also reserves the tap row, and the
-        height floor grows with it so no window shape can bury the row."""
+        height floor grows with it so no window shape can bury the row.
+
+        Compact reserves a wider gutter, because its two right-hand
+        controls sit side by side rather than stacked, and gives up the air
+        around the sung line, because there is nothing left either side of
+        it to be separated from. Both are the same arithmetic in
+        geometry.py either way; only which numbers it is asked for changes.
+        """
         scale = self._scale
-        gutter = text_gutter(scale)
+        compact = self._compact_applied
+        gutter = compact_text_gutter(scale) if compact else text_gutter(scale)
         syncing = self._syncing
         bottom = round(BOTTOM_MARGIN * scale) + (
             sync_bar_reserve(scale) if syncing else 0
@@ -2113,18 +2288,33 @@ class LyricsWindow(QWidget):
         self._layout.setContentsMargins(
             gutter, round(TOP_MARGIN * scale), gutter, bottom
         )
+        # Extra air above and below the sung line, on top of the row gap.
+        # It is what stops the three lyric rows reading as an evenly spaced
+        # list with one of them in bold, so compact has no use for it.
+        current_air = 0 if compact else max(1, round(CURRENT_SPACING * scale))
+        self._current_layout.setContentsMargins(0, current_air, 0, current_air)
         # No window shape may hide the lyrics: height floor follows scale.
-        self.setMinimumHeight(min_window_height(scale, sync_bar=syncing))
+        self.setMinimumHeight(
+            min_window_height(scale, sync_bar=syncing, compact=compact)
+        )
 
     def _place_buttons(self) -> None:
         margin = button_margin(self._scale)
         side = self._loop_button.width()
-        self._loop_button.move(self.width() - side - margin, margin)
-        self._speak_button.move(
-            self.width() - side - margin, (self.height() - side) // 2
-        )
+        middle = (self.height() - side) // 2
+        if self._compact_applied:
+            # A strip has no top-right corner to put anything in, so the
+            # two right-hand controls come down onto the centre line and
+            # sit side by side, in the order the full layout stacks them.
+            self._loop_button.move(self.width() - side - margin, middle)
+            self._speak_button.move(
+                self.width() - 2 * side - control_gap(self._scale) - margin, middle
+            )
+        else:
+            self._loop_button.move(self.width() - side - margin, margin)
+            self._speak_button.move(self.width() - side - margin, middle)
         # The done-button mirrors the speaker on the left, beside the line.
-        self._attempt_button.move(margin, (self.height() - side) // 2)
+        self._attempt_button.move(margin, middle)
         self._place_sync_controls()
         if self._why_button.isVisibleTo(self):
             # Placed from the message rather than from a corner, so it has
@@ -2144,6 +2334,281 @@ class LyricsWindow(QWidget):
     def _available_geometry(self) -> QRect:
         screen = self.screen() or QApplication.primaryScreen()
         return screen.availableGeometry() if screen else QRect(0, 0, 1440, 900)
+
+    # -- the compact layout -------------------------------------------------
+
+    @property
+    def _compact_active(self) -> bool:
+        """Whether the compact layout should be in force right now.
+
+        What the user asked for, minus the one thing that takes it back. A
+        sync pass needs the line before, the line after, a status row and a
+        tap bar across the bottom, and a strip has room for one of those:
+        the bar alone would BE the window. So the full layout is borrowed
+        for as long as the pass runs and given back when it ends, which is
+        the honest version of "behaves sensibly in compact" — the layout
+        that can carry the mode, rather than a strip that pretends to.
+        """
+        return self._compact and not self._syncing
+
+    def _set_compact(self, enabled: bool) -> None:
+        """Turn the compact layout on or off.
+
+        Off is not "compact with the rows back": it is the layout the app
+        has always had, at the height it was last left at, with no reveal,
+        no hover watching and no opacity effect on anything. That is the
+        layers rule, and this layer is held to it like the rest.
+        """
+        if enabled == self._compact:
+            return
+        self._compact = enabled
+        self._apply_compact()
+        self._render()
+        self._save_settings()
+        logger.info(
+            "compact layout %s (%dx%d)",
+            "on" if enabled else "off",
+            self.width(),
+            self.height(),
+        )
+
+    def _apply_compact(self) -> None:
+        """Put the window in the shape the layout in force asks for.
+
+        The one way in for both callers — the menu toggle and a sync pass
+        borrowing the full layout — so there is no path that can leave the
+        rows of one layout inside the margins of the other.
+
+        The height is swapped rather than recomputed. Each layout keeps the
+        height it was last left at, so going compact and coming back gives
+        the window its old shape rather than a shape derived from the
+        strip; and a sync pass, which borrows the full layout without being
+        asked to, hands the strip back at the height it took it from.
+        """
+        wanted = self._compact_active
+        changed = wanted is not self._compact_applied
+        if changed:
+            self._remember_height(self._compact_applied)
+            self._compact_applied = wanted
+            self._hovered = wanted and self._pointer_inside()
+        for row in (self._previous, self._upcoming):
+            row.setVisible(not wanted)
+        # A strip has room for one row, so its rows do not wrap: what will
+        # not fit is elided in _set_line_text instead.
+        for row in (self._current, self._pron):
+            row.setWordWrap(not wanted)
+        # Before the resize, not after: the floor is what decides how short
+        # the window is allowed to become, and Qt would clamp a strip back
+        # up to the five-row floor if it were still in force.
+        self._apply_layout_margins()
+        if changed:
+            self.resize(self.width(), self._height_for(wanted))
+        self._reelide()
+        self._apply_reveal_effects()
+        self._update_hover_watch()
+        self._place_buttons()
+
+    def _remember_height(self, compact: bool) -> None:
+        if compact:
+            self._compact_height = self.height()
+        else:
+            self._full_height = self.height()
+
+    def _height_for(self, compact: bool) -> int:
+        """The height to give this layout back: what it was last left at,
+        never below its own floor. A layout that has never been worn opens
+        at its floor, which for compact is the strip itself."""
+        floor = min_window_height(self._scale, compact=compact)
+        remembered = self._compact_height if compact else self._full_height
+        if not remembered:
+            return floor if compact else max(_DEFAULT_HEIGHT, floor)
+        return max(floor, remembered)
+
+    # -- the overlay controls, and coming out from under the pointer --------
+
+    def _revealable(self) -> tuple:
+        """The controls the compact layout puts away. Not the ⓘ, which is
+        placed beside the message it explains rather than in a gutter, and
+        not the tap row, which only exists in a mode compact steps aside
+        for."""
+        return (self._loop_button, self._speak_button, self._attempt_button)
+
+    def _offer_control(self, button, offered: bool) -> None:
+        """Whether this control has anything to do.
+
+        Not the same question as whether it is on screen, and separating
+        the two is what the compact layout needs: a control with nothing to
+        do is gone in either layout, and a control with something to do is
+        gone in compact until it is reached for.
+        """
+        self._control_offered[button] = offered
+        self._update_reveal()
+        self._show_control(button)
+
+    def _show_control(self, button) -> None:
+        """Put a control on screen, or take it off.
+
+        Faded out is not enough on its own: a widget at zero opacity is
+        still a widget under the pointer, and an invisible thing that can
+        be clicked is worse than either state it is between. So the
+        reveal reaching zero takes the control off the window entirely.
+        """
+        offered = self._control_offered.get(button, False)
+        button.setVisible(
+            offered and (self._reveal > 0.0 or not self._compact_applied)
+        )
+
+    def _reveal_target(self) -> float:
+        """How much of the overlay controls should be showing.
+
+        All of it, unless the compact layout is in force. There they stay
+        out of a window with room for one line, and come back for two
+        reasons: the pointer is over the window, or the window is waiting
+        for an answer.
+
+        The second is echo practice, and it is the reason the reveal is not
+        simply hover. The attempt phase pauses the song and hands the turn
+        over; the only way out of it is the done-button, and a prompt
+        nobody can see is not a prompt. So the controls are held out for
+        as long as the window is asking something, whatever the pointer is
+        doing.
+        """
+        if not self._compact_applied:
+            return 1.0
+        if self._hovered:
+            return 1.0
+        if self._loop.engaged and self._loop.phase is LoopPhase.ATTEMPT:
+            return 1.0
+        return 0.0
+
+    def _update_reveal(self, animate: bool = True) -> None:
+        """Head for wherever the reveal should now be, if that is not
+        already where it is heading."""
+        target = self._reveal_target()
+        if target == self._reveal_to:
+            return
+        self._reveal_to = target
+        self._stop_reveal()
+        if not animate or target == self._reveal:
+            self._reveal = target
+            self._apply_reveal()
+            return
+        animation = QVariantAnimation(self)
+        # Proportional, like the flight's: a reveal interrupted halfway
+        # comes back from halfway rather than making the whole journey
+        # again. At least a millisecond, or the animation never reports
+        # finishing.
+        animation.setDuration(max(1, round(_REVEAL_MS * abs(target - self._reveal))))
+        animation.setEasingCurve(_REVEAL_CURVE)
+        animation.setStartValue(self._reveal)
+        animation.setEndValue(target)
+        animation.valueChanged.connect(self._on_reveal_step)
+        animation.finished.connect(self._end_reveal)
+        animation.start()
+        self._reveal_anim = animation
+
+    def _on_reveal_step(self, value) -> None:
+        self._reveal = float(value)
+        self._apply_reveal()
+
+    def _end_reveal(self) -> None:
+        self._reveal_anim = None
+
+    def _stop_reveal(self) -> None:
+        if self._reveal_anim is not None:
+            self._reveal_anim.stop()
+            self._reveal_anim = None
+
+    def _apply_reveal(self) -> None:
+        """One value, two things: how solid the controls are, and whether
+        they are on the window at all."""
+        for effect in self._reveal_effects.values():
+            effect.setOpacity(self._reveal)
+        for button in self._revealable():
+            self._show_control(button)
+
+    def _apply_reveal_effects(self) -> None:
+        """Install the fade the compact layout's controls ride on, or take
+        it away again.
+
+        Taken away rather than left at full opacity, for the reason Reduce
+        Transparency gives about the material: an effect that is doing
+        nothing is still an effect, on every repaint of every control, and
+        "off removes the work" is what this layer promises. Setting a
+        widget's effect to None destroys the old one, so the reference goes
+        first.
+        """
+        for button in self._revealable():
+            if self._compact_applied:
+                if button not in self._reveal_effects:
+                    effect = QGraphicsOpacityEffect(button)
+                    button.setGraphicsEffect(effect)
+                    self._reveal_effects[button] = effect
+            elif self._reveal_effects.pop(button, None) is not None:
+                button.setGraphicsEffect(None)
+        self._stop_reveal()
+        self._reveal_to = self._reveal_target()
+        self._reveal = self._reveal_to
+        self._apply_reveal()
+
+    def _pointer_inside(self) -> bool:
+        """Whether the pointer is over this window, asked of the pointer.
+
+        Not ``underMouse()`` and not an enter/leave event, for two separate
+        reasons that both land here. ``underMouse()`` is false for the
+        window the moment the pointer is over one of its own children,
+        which is exactly when the answer has to be yes. And the events do
+        not arrive at all: see _check_pointer.
+        """
+        return self.frameGeometry().contains(QCursor.pos())
+
+    def _set_hovered(self, hovered: bool) -> None:
+        if hovered == self._hovered:
+            return
+        self._hovered = hovered
+        self._update_reveal()
+
+    def _check_pointer(self) -> None:
+        """One poll: is the pointer over this window?
+
+        MEASURED, and it corrected the first version of this outright. The
+        obvious implementation is enterEvent and leaveEvent, and it works
+        perfectly while the app is frontmost, which is how it was written
+        and how it passed. Driving the real pointer onto the real window
+        with the app backgrounded, which is the only state this app is ever
+        in, the window heard nothing: hovered stayed False with the cursor
+        provably inside its frame. Qt installs its tracking area
+        NSTrackingActiveInActiveApp, and this app runs under the accessory
+        activation policy and its window refuses focus, so it is never the
+        active app and there are no hover events for it to miss.
+
+        What still answers is the pointer's own position, which is a screen
+        coordinate and belongs to nobody. So this asks, on a timer, and the
+        timer runs only while the compact layout is in force and the window
+        is showing: a full-size window has its controls out anyway, and a
+        hidden one has no pointer over it. One poll costs 0.8us.
+        """
+        self._set_hovered(self._pointer_inside())
+
+    def _update_hover_watch(self) -> None:
+        """Poll only while the compact layout is on and the window is on
+        screen.
+
+        Called from each of the three things it depends on, so none of them
+        has to know about the others. The same shape as the notification
+        yield's watch, and the same cheapest half of "poll only as often as
+        needed": the difference between polling and not polling at all.
+        """
+        wanted = self._compact_applied and self._lyrics_visible
+        if wanted == self._hover_timer.isActive():
+            return
+        if wanted:
+            self._hover_timer.start()
+            logger.debug("compact: watching for the pointer")
+        else:
+            self._hover_timer.stop()
+            self._set_hovered(False)
+            logger.debug("compact: stopped watching for the pointer")
 
     # -- interaction: drag, resize, scroll-opacity, menu -------------------
 
@@ -2200,8 +2665,11 @@ class LyricsWindow(QWidget):
         width = max(_MIN_SIZE.width(), min(maximum.width(), rect.width()))
         # Height floor depends on the width the resize will land on (fonts
         # scale with width), so compute it from the clamped width.
-        scale = max(0.65, width / _BASE_WIDTH)
-        floor = min_window_height(scale, sync_bar=self._syncing)
+        floor = min_window_height(
+            _scale_for(width),
+            sync_bar=self._syncing,
+            compact=self._compact_applied,
+        )
         height = max(floor, min(maximum.height(), rect.height()))
         # Re-anchor so the edge being dragged is the one that gives.
         if self._resize_edges & Qt.Edge.LeftEdge:
@@ -2517,6 +2985,82 @@ class LyricsWindow(QWidget):
         animation.start()
         self._move_anim = animation
 
+    def _dock_to_top(self) -> None:
+        """Put the window under the menu bar, centred on its own screen.
+
+        An explicit command and nothing more: nothing snaps here, no edge
+        is magnetic, and the window is as draggable the instant after this
+        as the instant before. It exists because "centred under the menu
+        bar" is a position that is tedious to hit by hand and obvious to
+        want, especially with the compact layout on.
+
+        Where exactly is ``geometry.docked_position``'s business; what this adds
+        is the two things only a running window can answer — which screen
+        it is on, and how far down that screen the notch reaches.
+
+        A window that is away at the menu bar is moved by changing where
+        the flight will put it back, not by moving it: the flight is
+        holding the real position and would hand the old one straight back
+        at the end of the journey.
+        """
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            logger.debug("dock: no screen to dock to")
+            return
+        geometry = screen.geometry()
+        available = screen.availableGeometry()
+        inset = self._top_inset()
+        x, y = docked_position(
+            self.width(),
+            (geometry.x(), geometry.y(), geometry.width(), geometry.height()),
+            (available.x(), available.y(), available.width(), available.height()),
+            inset,
+        )
+        logger.info(
+            "dock: %d, %d on %s (available top %d, safe area top %d)",
+            x,
+            y,
+            screen.name(),
+            available.y(),
+            inset,
+        )
+        if self._flight_home is not None:
+            self._flight_home = (x, y, self._flight_home[2], self._flight_home[3])
+        else:
+            self._move_to(QPoint(x, y))
+        # Written from the target rather than from the window: the travel
+        # takes a phase length and neither of these may record a waypoint.
+        self._settings.setValue("window/pos", QPoint(x, y))
+        self._learn_position(QPoint(x, y))
+
+    def _top_inset(self) -> int:
+        """How far down the screen the notch reaches, in points.
+
+        Asked of the screen's own safe area rather than worked out from a
+        menu bar height, because the two come apart exactly where it
+        matters: a Mac set to hide its menu bar automatically gives the
+        whole screen back as available space and leaves the notch where it
+        was. Where the menu bar IS showing this is the smaller of the two
+        answers and changes nothing, which is why it is a floor and not a
+        replacement.
+
+        Zero everywhere the question cannot be asked — off cocoa, without
+        pyobjc, on a macOS with no safe areas, or with the window not on a
+        screen at all — which is also every case where a Mac has no notch
+        for it to describe.
+        """
+        nswindow = self._nswindow()
+        if nswindow is None:
+            return 0
+        try:
+            screen = nswindow.screen()
+            if screen is None:
+                return 0
+            return int(screen.safeAreaInsets().top)
+        except Exception:
+            logger.debug("no safe area for this screen", exc_info=True)
+            return 0
+
     def _stop_move(self) -> None:
         """Abandon a move in flight, leaving the window wherever it got to.
 
@@ -2529,14 +3073,18 @@ class LyricsWindow(QWidget):
             self._move_anim.stop()
             self._move_anim = None
 
-    def _learn_position(self) -> None:
+    def _learn_position(self, position: Optional[QPoint] = None) -> None:
         """Record where the window now sits for whichever app is in front.
 
-        Called when a drag or resize ends, which is the only moment the
-        user has expressed a preference about where the window goes. The
-        app in front is not this one: the window never takes focus and the
-        app is an accessory, so dragging it leaves the frontmost app
-        exactly as it was.
+        Called when a drag or resize ends, and when the window is docked to
+        the top: those are the moments the user has expressed a preference
+        about where the window goes. The app in front is not this one: the
+        window never takes focus and the app is an accessory, so dragging
+        it leaves the frontmost app exactly as it was.
+
+        ``position`` is passed by the callers that already know where the
+        window is going and would otherwise be asking mid-travel. A drag
+        has already landed and passes nothing.
         """
         refusal = learn_refusal(
             enabled=self._remember_position,
@@ -2546,7 +3094,7 @@ class LyricsWindow(QWidget):
         if refusal is not None:
             logger.debug("learn: nothing recorded, %s", refusal)
             return
-        position = self.pos()
+        position = self.pos() if position is None else position
         self._positions.remember(
             self._frontmost, position.x(), position.y(), self._frontmost_name
         )
@@ -2698,6 +3246,11 @@ class LyricsWindow(QWidget):
         echo.triggered.connect(self._set_echo_practice)
         actions[ECHO] = echo
 
+        compact = self._menu.addAction("Compact")
+        compact.setCheckable(True)
+        compact.triggered.connect(self._set_compact)
+        actions[COMPACT] = compact
+
         album_colour = self._menu.addAction("Album colour")
         album_colour.setCheckable(True)
         album_colour.triggered.connect(self._set_album_colour)
@@ -2717,6 +3270,13 @@ class LyricsWindow(QWidget):
         yield_notifications.setCheckable(True)
         yield_notifications.triggered.connect(self._set_yield_to_notifications)
         actions[YIELD_NOTIFICATIONS] = yield_notifications
+
+        # A command rather than a switch, and not checkable for that
+        # reason: it puts the window somewhere once. Nothing holds it
+        # there afterwards, so there is no state for a tick to describe.
+        dock_top = self._menu.addAction("Dock to top")
+        dock_top.triggered.connect(self._dock_to_top)
+        actions[DOCK_TOP] = dock_top
 
         remember_position = self._menu.addAction("Remember position per app")
         remember_position.setCheckable(True)
@@ -2841,6 +3401,9 @@ class LyricsWindow(QWidget):
         )
         self._menu_actions[SPOKEN].setChecked(self._spoken_enabled)
         self._menu_actions[ECHO].setChecked(self._echo_enabled)
+        # What the user asked for, not what a sync pass is borrowing: the
+        # tick describes the setting, and the pass gives the layout back.
+        self._menu_actions[COMPACT].setChecked(self._compact)
         self._menu_actions[ALBUM_COLOUR].setChecked(self._album_colour)
         self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
         self._menu_actions[MENUBAR_ANIMATION].setChecked(self._menubar_animation)
@@ -3013,6 +3576,9 @@ class LyricsWindow(QWidget):
         if not visible:
             self._stop_yield()
         self._update_yield_watch()
+        # A window at the menu bar has no pointer over it, and the reveal
+        # goes back with the watch so it does not come back revealed.
+        self._update_hover_watch()
         self._begin_flight(visible)
 
     # -- leaving for the menu bar, and coming back -------------------------
@@ -3863,15 +4429,23 @@ class LyricsWindow(QWidget):
         except (TypeError, ValueError):
             opacity = _DEFAULT_OPACITY
         self._set_opacity(opacity)
+        # Read before the size, and assigned rather than routed through the
+        # setter like every other layer here: the saved size belongs to
+        # whichever layout was in force when it was written, and a window
+        # restored into the wrong one would be clamped to the wrong floor
+        # before anything else had a chance to say so.
+        self._compact = self._settings.value("window/compact", False, type=bool)
+        self._compact_applied = self._compact
+        self._compact_height = self._settings.value(
+            "window/compact_height", 0, type=int
+        )
+        self._full_height = self._settings.value("window/full_height", 0, type=int)
         available = self._available_geometry()
         size = self._settings.value("window/size")
         if isinstance(size, QSize):
             self.resize(size.expandedTo(_MIN_SIZE).boundedTo(available.size()))
         else:
-            # Comfortably above min_window_height at scale 1.0 (183),
-            # so a first run opens at a shape it chose rather than at
-            # the floor it was clamped to.
-            self.resize(_BASE_WIDTH, 200)
+            self.resize(_BASE_WIDTH, _DEFAULT_HEIGHT)
         position = self._settings.value("window/pos")
         if isinstance(position, QPoint):
             self.move(_clamped_point(QRect(position, self.size()), available))
@@ -3945,6 +4519,9 @@ class LyricsWindow(QWidget):
         )
         self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
         self._update_yield_watch()
+        # The hover watch is not started here: _apply_compact does it, and
+        # it runs after the constructor has finished building the controls
+        # the reveal is about.
         # Open at Login is NOT restored from here: the stored value is what
         # the user last asked for, and the system is what is actually true.
         # Reading it back is the whole point, so the setting is only ever
@@ -3962,6 +4539,14 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/pos", self.pos())
         self._settings.setValue("window/size", self.size())
         self._settings.setValue("window/opacity", self._opacity)
+        self._settings.setValue("window/compact", self._compact)
+        # The height the OTHER layout was last left at. The live one is in
+        # window/size already; recording it twice is how the two would come
+        # to disagree. Written from whichever slot is not currently being
+        # worn, refreshed here so a quit mid-layout keeps both.
+        self._remember_height(self._compact_applied)
+        self._settings.setValue("window/compact_height", self._compact_height)
+        self._settings.setValue("window/full_height", self._full_height)
         self._settings.setValue("window/all_desktops", self._all_desktops)
         self._settings.setValue("window/album_colour", self._album_colour)
         self._settings.setValue("window/visible", self._lyrics_visible)
@@ -4003,6 +4588,8 @@ class LyricsWindow(QWidget):
         self._watcher.stop()
         self._display_watcher.stop()
         self._settle_timer.stop()
+        self._hover_timer.stop()
+        self._stop_reveal()
         self._stop_move()
         # Stopped before the save, like the flight below and for a milder
         # version of the same reason: a poll landing mid-teardown would ask

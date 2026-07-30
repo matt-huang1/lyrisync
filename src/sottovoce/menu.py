@@ -15,10 +15,12 @@ ROMANISATION = "romanisation"
 SPOKEN = "spoken"
 SPEECH_RATE = "speech_rate"
 ECHO = "echo"
+COMPACT = "compact"
 ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
 MENUBAR_ANIMATION = "menubar_animation"
 YIELD_NOTIFICATIONS = "yield_notifications"
+DOCK_TOP = "dock_top"
 REMEMBER_POSITION = "remember_position"
 POSITION_STATUS = "position_status"
 POSITION_LIST = "position_list"
@@ -38,10 +40,12 @@ MENU_ORDER = (
     SPOKEN,
     SPEECH_RATE,
     ECHO,
+    COMPACT,
     ALBUM_COLOUR,
     ALL_DESKTOPS,
     MENUBAR_ANIMATION,
     YIELD_NOTIFICATIONS,
+    DOCK_TOP,
     REMEMBER_POSITION,
     POSITION_STATUS,
     POSITION_LIST,
@@ -80,13 +84,22 @@ MENU_ORDER = (
 # only has anything to do while a song is playing, but a toggle that appeared
 # and vanished with playback would be one nobody could find when they wanted
 # it — which is, as ever, before the music starts.
+#
+# The compact layout and docking to the top are the same argument a third
+# and fourth time, and the pairing is deliberate: one is a standing choice
+# about the window's shape and the other a command about where it goes, and
+# both are answerable with nothing playing. Docking in particular is the
+# thing somebody reaches for while setting the window up, which is before
+# there is a song to gate it on.
 ALWAYS_VISIBLE = frozenset(
     {
         SHOW_LYRICS,
+        COMPACT,
         ALBUM_COLOUR,
         ALL_DESKTOPS,
         MENUBAR_ANIMATION,
         YIELD_NOTIFICATIONS,
+        DOCK_TOP,
         REMEMBER_POSITION,
         QUIT,
     }

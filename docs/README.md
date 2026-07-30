@@ -29,6 +29,8 @@ the reasoning: what was decided, why, and what was measured to check it.
   — vibrancy, light/dark, accessory policy, hairline and shadow
 - [Album colour](album-colour.md) — hue-only tinting, and the two bugs
   that shaped it
+- [The compact layout, and docking to the top](compact-and-docking.md) —
+  the strip, the pointer poll a backgrounded app needs, and the notch
 - [Per-app window position](per-app-position.md) — following the app you
   switched to, and the clock bug behind it
 - [Yielding to notifications](notification-yield.md) — fading out of a

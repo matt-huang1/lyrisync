@@ -6,6 +6,44 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Milestone 17 — a strip, and a place to put it
+
+**Compact** reduces the window to the line being sung, with the
+romanisation under it when that layer is on. No header, no line before, no
+line after. The floor comes off the same type scale the full layout uses,
+asked for two rows instead of five: **79 points against 183** at the
+default width. Each layout keeps the height it was last left at, so
+switching is not a way to lose the shape you gave it.
+
+**Dock to top** centres the window under the menu bar on the screen it is
+on. Centred on the screen rather than on what the Dock left of it, because
+the menu bar spans the screen and the notch is centred on it. The notch is
+cleared by the screen's own safe area rather than an assumed height, which
+matters in exactly one case and it is a case people use: a menu bar set to
+hide automatically gives the whole screen back and leaves the notch
+exactly where it was. It is a command, not a snap — nothing holds the
+window there, and it is as draggable the instant after as before.
+
+**The overlay controls go away in the strip and come back under the
+pointer.** The obvious way to do that is `enterEvent` and `leaveEvent`,
+and it works perfectly while the app is frontmost, which this app never
+is. Driven with the real pointer and the app backgrounded, the window
+heard nothing at all: Qt installs its tracking area
+`NSTrackingActiveInActiveApp`, and an accessory app that never activates
+has no hover events to miss. So the window asks where the pointer is
+instead, on a 100ms timer that runs only while the strip is on screen. One
+poll costs 0.8 microseconds.
+
+A long line used to wrap onto a second row that the strip had no room for,
+landing halfway across the romanisation. Every number was right and it was
+found by looking. Compact now elides.
+
+A sync pass takes the full layout back for as long as it runs. Echo
+practice does not: one line repeated is what the strip is for, and the
+loop engages many times a song. The controls are held out while an attempt
+is waiting, because that phase pauses the song and the done button is the
+only way out of it.
+
 ## Session D — a polish sweep, and three settings nobody had asked about
 
 **Every em dash in a user-visible string is gone**, and there were 29.
