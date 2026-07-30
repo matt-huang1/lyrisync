@@ -52,11 +52,11 @@ This is also the route that requires trusting nobody: you can read what you are 
 
 ### Or download the release
 
-[**LyriSync-1.0.0.zip**](https://github.com/matt-huang1/sottovoce/releases/download/v1.0.0/LyriSync-1.0.0.zip) (36 MB) — built from the `v1.0.0` tag. Check it before opening it:
+[**SottoVoce-1.1.0.zip**](https://github.com/matt-huang1/sottovoce/releases/download/v1.1.0/SottoVoce-1.1.0.zip) (36 MB) — built from the `v1.1.0` tag. Check it before opening it:
 
 ```sh
-shasum -a 256 ~/Downloads/LyriSync-1.0.0.zip
-# 52f7ac2bb5665d9b787d27c6a1c92d8cd22d0eadf21da677d52a1a15cba9482e
+shasum -a 256 ~/Downloads/SottoVoce-1.1.0.zip
+# 30a22e07cbe628e022f4944c755b10192e89bf9b766e3b564e1de0fee1f8483e
 ```
 
 1.0.0 was published before this app was renamed, so the zip and the app
