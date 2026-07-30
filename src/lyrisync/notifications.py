@@ -63,24 +63,90 @@ one rule and not two, and ``kCGWindowIsOnscreen`` — which the docs describe
 as optional and which is in fact present only while it is true — is the
 signal.
 
-## What "overlaps" can honestly mean
+## The rectangle is the whole display, and nothing distinguishes the cases
 
-The rectangle that window reports is the whole display: (0, 0 1710x1107)
-on a 1710x1107 screen, both for a banner in the top-right corner and for
-the full-height panel. macOS exposes no rectangle for the banner itself —
-the banner is drawn inside that host window and the only public way to
-find out where would be to capture its pixels, which is precisely the
-thing that needs the permission this design avoids.
+The rectangle that window reports is the whole display: (0, 0 1710x1107) on
+a 1710x1107 screen, both for a banner in the top-right corner and for the
+panel. macOS exposes no rectangle for the banner itself.
 
-So the intersection here is computed against the rectangle the system
-actually reports, and what that buys today is the display test: a
-notification on the built-in screen does not fade a window that is over on
-an external one. On a single display it means any notification while the
-window is showing. That is stated rather than dressed up, and the
-alternative was worse — a banner rectangle guessed from where banners
-usually appear would be a number picked by eye, in a project where the
-scrim alpha and the tint chroma are not, and it would be wrong the first
-time Apple moved them.
+Milestone 16 shipped the intersection against that rectangle, which meant
+the window dimmed for a banner it was nowhere near. 16.1 went looking for
+something better and **there is nothing**. Every field of the notification
+window was dumped in three states — nothing showing, a banner up, the panel
+open — and compared:
+
+| field | banner | panel |
+|---|---|---|
+| `kCGWindowNumber` | 54338 | 54338 |
+| `kCGWindowLayer` | 21 | 21 |
+| `kCGWindowBounds` | 0,0 1710x1107 | 0,0 1710x1107 |
+| `kCGWindowAlpha` | 1.0 | 1.0 |
+| `kCGWindowSharingState` | 1 | 1 |
+| `kCGWindowStoreType` | 1 | 1 |
+| `kCGWindowMemoryUsage` | 2368 | 2368 |
+| index in the on-screen list | 116 | 116 |
+| the set of keys macOS returned | identical | identical |
+
+**Identical in every field.** The window count does not change either — one
+window before, one during, one for the panel. `kCGWindowMemoryUsage` is
+2368 even with nothing on screen, so it is not a backing-store size and
+tells us nothing about what is drawn. The only signal in the whole record is
+`kCGWindowIsOnscreen` appearing, and it says *something* is showing, never
+what or where.
+
+So the choice was between the whole display and a heuristic, and this
+module now uses a heuristic — stated as one, here and in the docs.
+
+## The heuristic: the rightmost strip of the display
+
+Notifications appear in one place, and where that is was **measured from
+pixels** rather than assumed. Not at runtime — that would need the
+permission this whole design avoids — but once, in a harness, by diffing
+screen captures with the notification up against captures without it, over
+five trials per case with the results intersected so that anything moving
+for its own reasons drops out:
+
+| case | rectangle, in points | right edge |
+|---|---|---|
+| one short banner | 1349, 54  346x62 | 1695 |
+| a long wrapped banner | 1343, 44  360x120 | 1702 |
+| three stacked banners | 1340, 38  368x96 | 1708 |
+| the Notification Centre panel | 1294, 34  416x608 | 1710 |
+
+Every case is right-anchored and inside the rightmost 416 points. The panel
+is the widest, and its height depends on how much is in it — 608 to 713
+points measured, and it scrolls beyond that, so there is no maximum height
+to find.
+
+Hence the region: **the reported rectangle, narrowed to its rightmost
+``PLAUSIBLE_STRIP_WIDTH`` points, full height.** That fixes the reported
+bug — a window on the left three quarters of the screen is left alone — and
+keeps what milestone 16 had, because the rectangle being narrowed is still
+the one macOS reported, so a notification on another display still cannot
+reach this one. It also narrows *further* for free: ``min`` means that if
+Apple ever reports a real banner rectangle, that rectangle is used as-is
+rather than widened back out to a strip.
+
+What it gets wrong, plainly: a window parked in the bottom-right corner
+still fades for a banner in the top-right one, because the panel can reach
+that far and nothing distinguishes the panel from a banner. Full height is
+the honest over-approximation, and over-approximating is the right
+direction — a layer whose whole job is to get out of the way should fail by
+moving when it needn't, not by sitting there when it should.
+
+## Why the fade cannot be proportional
+
+The obvious refinement — fade in proportion to how much of the window is
+actually covered, or to how far the panel has been pulled open — is **not
+implementable without pixel capture**, and pixel capture is exactly the
+permission this feature exists without.
+
+It needs the real rectangle, and macOS reports the display. The only public
+route to the real one is reading the notification window's pixels
+(``CGWindowListCreateImage`` and friends), which is what the Screen
+Recording prompt guards. So the choice is a proportional fade behind a
+permission dialogue, or a fixed fade behind none. This picks none, and the
+fixed ceiling is the price.
 
 Pure and Qt-free apart from one door: the rules can be checked without a
 display, a notification, or pyobjc.
@@ -105,6 +171,28 @@ Rect = tuple[int, int, int, int]
 # Who counts as the notification system. One identifier, not a family:
 # see the module docstring on why Control Centre is not here.
 NOTIFICATION_BUNDLE_ID = "com.apple.notificationcenterui"
+
+# How wide the strip of a display is where notifications actually appear.
+#
+# THE ONE HEURISTIC IN THIS MODULE, and named so it reads as one. macOS
+# reports the whole display for both a banner and the panel, and 16.1
+# established that nothing in the window record tells the two apart, so
+# there is no way to derive this — only to measure where notifications go
+# and take the answer as a constant.
+#
+# Measured from pixels (screen captures diffed with the notification up
+# against captures without it, five trials per case, intersected): a short
+# banner occupies 346pt of width, a long one 360, three stacked 368, and the
+# Notification Centre panel 416 — every one of them anchored to the right
+# edge, the widest reaching it exactly.
+#
+# 440 rather than the measured 416, and the margin is deliberate rather than
+# nervous: banner and panel widths move with the system text size, with
+# localisation, and with whatever Apple does next, and the two failure
+# directions are not symmetric. Too wide fades the window when it did not
+# strictly need to; too narrow leaves it sitting over somebody's mail, which
+# is the entire thing this layer exists to stop.
+PLAUSIBLE_STRIP_WIDTH = 440
 
 # How faint the window goes while something is over it.
 #
@@ -154,18 +242,32 @@ YIELD_CEILING = 0.15
 # menu bar — this window should only have one sense of how fast it moves.
 YIELD_MS = 260
 
-# How often to look. A banner is on screen for about five seconds
-# (measured: 5.1s, twice), so this starts the fade within a third of a
-# second of one arriving and the window is out of the way well inside the
-# first fifth of its life. Measured at 0.652ms per poll, which is 0.34% of
-# one core at this interval — against 2.3% for the line change at a line
-# every four seconds.
+# How often to look while nothing is over the window. A banner is on screen
+# for about five seconds (measured: 5.1s, twice), so this starts the fade
+# within a third of a second of one arriving and the window is out of the way
+# well inside the first tenth of its life.
 #
 # Deliberately not derived from the monitor's own 300ms: they are the same
 # number for different reasons, and a change to how often Spotify is asked
 # about its position should not change how often the window server is asked
 # about its windows.
 POLL_SECONDS = 0.3
+
+# How often to look while the window IS faded, which is a different
+# question. Coming back late is worse than going away late: the window going
+# faint a third of a second into a banner nobody has read yet costs nothing,
+# while staying faint a third of a second after the screen is clear is the
+# user waiting for their own lyrics.
+#
+# So the interval drops while yielded and goes back afterwards. Measured at
+# 0.105ms of CPU per poll, this is 0.105% of one core — and only for the few
+# seconds a notification is actually up, against 0.035% the rest of the time.
+# Restore latency goes from one 300ms poll plus the 260ms fade to one 100ms
+# poll plus the fade.
+#
+# Not lower than 100ms because the fade is 260ms and dominates: halving this
+# again would buy 50ms off a ~360ms total and cost twice the polling.
+YIELDED_POLL_SECONDS = 0.1
 
 # Why the window is not yielding. Returned by yield_refusal so the caller
 # can log the reason from the same rule that decided it — the shape
@@ -175,6 +277,43 @@ DISABLED = "the layer is off"
 HIDDEN = "the window is hidden"
 SYNCING = "a sync pass is in progress"
 FLYING = "the window is mid-flight"
+
+
+def poll_interval_seconds(yielding: bool) -> float:
+    """How long until the next look, given what the window is doing now.
+
+    Two intervals rather than one, because the two directions are not worth
+    the same: going away late costs nothing (the banner has only just
+    arrived and nobody has read it), coming back late is the user waiting
+    for their own lyrics. So the layer looks harder exactly while it has
+    something to undo — which is also the only time the faster rate is
+    being paid for.
+    """
+    return YIELDED_POLL_SECONDS if yielding else POLL_SECONDS
+
+
+def plausible_region(reported: Rect) -> Rect:
+    """Where a notification described by ``reported`` can actually be.
+
+    THE HEURISTIC, and the name says so. macOS reports the whole display
+    for both a banner and the panel and nothing in the record distinguishes
+    them (see the module docstring), so this narrows the reported rectangle
+    to the rightmost ``PLAUSIBLE_STRIP_WIDTH`` points of itself.
+
+    Right-anchored, full height, and derived FROM the reported rectangle
+    rather than from a screen this module went and asked about — which is
+    what keeps milestone 16's one real property intact: the rectangle being
+    narrowed is the display the notification is on, so a banner on another
+    display still cannot reach a window over here.
+
+    ``min`` rather than an unconditional strip, so a reported rectangle
+    already narrower than the strip is handed back untouched. That is the
+    forward-compatible case, not a defensive one: the day macOS reports a
+    real banner rectangle, this stops being a heuristic by itself.
+    """
+    x, y, width, height = reported
+    strip = min(width, PLAUSIBLE_STRIP_WIDTH)
+    return (x + width - strip, y, strip, height)
 
 
 def yield_refusal(
@@ -211,17 +350,21 @@ def may_yield(**kwargs) -> bool:
     return yield_refusal(**kwargs) is None
 
 
-def in_the_way(window: Rect, occupied: Sequence[Rect]) -> bool:
-    """Whether any of ``occupied`` covers part of ``window``.
+def in_the_way(window: Rect, reported: Sequence[Rect]) -> bool:
+    """Whether a notification described by ``reported`` covers ``window``.
 
-    Any overlap at all, not a fraction of the window: with the system
-    reporting a whole display there is no fraction to threshold, and
-    inventing one would be describing a rectangle this code has never
-    seen. If macOS ever reports a tighter rectangle this narrows with it
-    for free, which is the other reason the intersection is real
-    arithmetic rather than a presence check.
+    Takes what the system said and narrows it here, rather than expecting
+    the caller to have done it: there is one path from a reported rectangle
+    to an answer, so there is no version of this that forgets the
+    heuristic and compares against a whole display again. That is what
+    milestone 16 shipped, and it is the bug 16.1 exists to fix.
+
+    Any overlap at all, not a fraction of the window. A threshold would be
+    describing how much of a rectangle this code has never seen is over
+    another, and the strip is already an over-approximation — thresholding
+    an approximation is precision theatre.
     """
-    return any(intersects(window, rect) for rect in occupied)
+    return any(intersects(window, plausible_region(rect)) for rect in reported)
 
 
 def yielded_opacity(user_opacity: float, level: float) -> float:

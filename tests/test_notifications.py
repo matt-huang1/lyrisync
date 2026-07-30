@@ -21,69 +21,170 @@ from lyrisync import notifications as n
 
 # The display this was all measured on, and the rectangle macOS actually
 # reports for a notification: the whole of it. Both a top-right banner and
-# the full-height panel come back as this.
+# the panel come back as this, in every field — which is why the region
+# below is a heuristic and not a reading.
 DISPLAY = (0, 0, 1710, 1107)
 SECOND_DISPLAY = (1710, -200, 1920, 1080)
-WINDOW = (600, 400, 460, 200)
+
+# Where the user might have put the window. AWAY is the case milestone 16
+# got wrong: a window nowhere near where notifications appear.
+AWAY = (600, 400, 460, 200)
+IN_THE_STRIP = (1300, 400, 400, 200)
+
+# The real rectangles, measured from pixels. Kept here so the region test
+# is against what notifications actually do rather than against the
+# constant restating itself.
+SHORT_BANNER = (1349, 54, 346, 62)
+LONG_BANNER = (1343, 44, 360, 120)
+STACKED_BANNERS = (1340, 38, 368, 96)
+PANEL = (1294, 34, 416, 608)
+
+
+# -- the region: the one heuristic ----------------------------------------
+
+
+def test_the_region_is_the_rightmost_strip_of_what_was_reported():
+    x, y, width, height = n.plausible_region(DISPLAY)
+    assert width == n.PLAUSIBLE_STRIP_WIDTH
+    assert x == 1710 - n.PLAUSIBLE_STRIP_WIDTH
+    assert (y, height) == (0, 1107), "full height: the panel's is content-dependent"
+
+
+def test_the_region_is_anchored_to_the_reported_right_edge():
+    """Not to a screen this module went and asked about. Narrowing the
+    reported rectangle is what keeps 16's real property: the rectangle is
+    the display the notification is on."""
+    for display in (DISPLAY, SECOND_DISPLAY):
+        x, _, width, _ = n.plausible_region(display)
+        assert x + width == display[0] + display[2]
+
+
+def test_every_measured_notification_falls_inside_the_region():
+    """The check that the constant is big enough for the thing it
+    approximates. If a future macOS moves banners left, this fails rather
+    than the layer quietly stopping."""
+    region = n.plausible_region(DISPLAY)
+    for name, rect in (
+        ("short banner", SHORT_BANNER),
+        ("long banner", LONG_BANNER),
+        ("three stacked", STACKED_BANNERS),
+        ("the panel", PANEL),
+    ):
+        assert rect[0] >= region[0], f"{name} starts left of the region"
+        assert rect[0] + rect[2] <= region[0] + region[2], f"{name} runs past it"
+
+
+def test_the_strip_has_margin_over_the_widest_thing_measured():
+    """440 against a measured 416, and the margin is the point: banner and
+    panel widths move with the system text size and with localisation, and
+    the two failure directions are not worth the same."""
+    assert n.PLAUSIBLE_STRIP_WIDTH > PANEL[2]
+
+
+def test_a_reported_rectangle_narrower_than_the_strip_is_left_alone():
+    """The forward-compatible case, not a defensive one. The day macOS
+    reports a real banner rectangle, this stops being a heuristic — without
+    an edit."""
+    assert n.plausible_region(SHORT_BANNER) == SHORT_BANNER
+    assert n.plausible_region(PANEL) == PANEL
+
+
+def test_a_display_narrower_than_the_strip_is_left_alone():
+    narrow = (0, 0, 320, 480)
+    assert n.plausible_region(narrow) == narrow
 
 
 # -- what counts as being in the way --------------------------------------
 
 
 def test_a_notification_over_the_window_is_in_the_way():
-    assert n.in_the_way(WINDOW, [DISPLAY])
+    assert n.in_the_way(IN_THE_STRIP, [DISPLAY])
+
+
+def test_a_window_nowhere_near_the_notification_is_left_alone():
+    """THE 16.1 BUG. macOS reports the whole display, so before the region
+    was narrowed this window dimmed for a banner in a corner it was nothing
+    like."""
+    assert not n.in_the_way(AWAY, [DISPLAY])
+
+
+def test_the_narrowing_happens_inside_in_the_way():
+    """One path from a reported rectangle to an answer, so no caller can
+    compare against a whole display again — which is exactly what shipped
+    in 16."""
+    assert not n.in_the_way(AWAY, [DISPLAY])
+    assert n.in_the_way(AWAY, [n.plausible_region(AWAY)]), "sanity: it can be covered"
 
 
 def test_nothing_on_screen_is_not_in_the_way():
     """The ordinary answer, most of the time: no notification window is on
     screen, so occupied_rects comes back empty."""
-    assert not n.in_the_way(WINDOW, [])
+    assert not n.in_the_way(IN_THE_STRIP, [])
 
 
 def test_a_notification_beside_the_window_is_not_in_the_way():
-    assert not n.in_the_way(WINDOW, [(0, 0, 100, 100)])
+    assert not n.in_the_way(IN_THE_STRIP, [(0, 0, 100, 100)])
 
 
 def test_a_corner_of_overlap_is_enough():
-    """Partial overlap counts. Any fraction would do — with the system
-    reporting a whole display there is no fraction to threshold, and a
-    minimum would be describing a rectangle this code has never seen."""
-    assert n.in_the_way(WINDOW, [(1000, 500, 200, 200)])  # bottom-right corner
-    assert n.in_the_way(WINDOW, [(500, 300, 150, 150)])  # top-left corner
+    """Partial overlap counts. A threshold would be describing how much of a
+    rectangle this code has never seen is over another, and the strip is
+    already an over-approximation."""
+    window = (1200, 400, 200, 200)  # its right edge reaches into the strip
+    assert n.in_the_way(window, [DISPLAY])
 
 
 def test_touching_edges_do_not_count():
     """A notification whose rectangle stops exactly where the window starts
     is not over it. Decided in one place — geometry.intersects — so this and
     the menu bar item's on-screen test cannot answer it differently."""
-    x, y, width, height = WINDOW
-    assert not n.in_the_way(WINDOW, [(x - 50, y, 50, height)])  # left
-    assert not n.in_the_way(WINDOW, [(x + width, y, 50, height)])  # right
-    assert not n.in_the_way(WINDOW, [(x, y - 50, width, 50)])  # above
-    assert not n.in_the_way(WINDOW, [(x, y + height, width, 50)])  # below
+    region = n.plausible_region(DISPLAY)
+    x, y, width, height = region
+    just_left = (x - 460, y, 460, height)
+    assert not n.in_the_way(just_left, [DISPLAY])
+    assert n.in_the_way((x - 459, y, 460, height), [DISPLAY])
 
 
 def test_any_one_of_several_is_enough():
-    assert n.in_the_way(WINDOW, [(0, 0, 10, 10), DISPLAY])
+    assert n.in_the_way(IN_THE_STRIP, [(0, 0, 10, 10), DISPLAY])
 
 
-def test_the_display_rectangle_covers_the_window_wherever_it_sits():
-    """What the measured rectangle means in practice on one display: a
-    notification anywhere on it is over the window anywhere on it. Stated
-    as a test rather than left as a surprise."""
-    for position in ((0, 0), (100, 100), (1250, 900), (1600, 1050)):
-        window = (position[0], position[1], 460, 200)
-        assert n.in_the_way(window, [DISPLAY])
+def test_the_region_still_covers_the_window_wherever_it_sits_in_the_strip():
+    """The cost of the heuristic, stated as a test rather than left as a
+    surprise: full height, so a window low on the right still fades for a
+    banner at the top of it. Nothing distinguishes the panel from a banner,
+    and the panel reaches that far."""
+    for y in (0, 200, 600, 900):
+        assert n.in_the_way((1400, y, 300, 180), [DISPLAY])
 
 
 def test_a_notification_on_another_display_does_not_reach_this_one():
-    """The one thing the full-display rectangle genuinely buys. A banner on
-    the built-in screen must not fade a window the user has parked on an
-    external one — and if macOS ever reports a tighter rectangle, the same
-    arithmetic narrows with it for free."""
-    on_second = (2000, 300, 460, 200)
+    """Milestone 16's one real property, preserved by narrowing the reported
+    rectangle rather than by asking a screen where its right edge is."""
+    on_second = (3200, 300, 400, 200)  # in the second display's own strip
     assert not n.in_the_way(on_second, [DISPLAY])
     assert n.in_the_way(on_second, [SECOND_DISPLAY])
+
+
+# -- how often to look ----------------------------------------------------
+
+
+def test_the_idle_rate_is_used_while_nothing_is_over_the_window():
+    assert n.poll_interval_seconds(False) == n.POLL_SECONDS
+
+
+def test_the_rate_goes_up_while_yielded():
+    """Coming back late is worse than going away late: a banner nobody has
+    read yet costs nothing, the user waiting for their own lyrics does."""
+    assert n.poll_interval_seconds(True) == n.YIELDED_POLL_SECONDS
+    assert n.YIELDED_POLL_SECONDS < n.POLL_SECONDS
+
+
+def test_the_faster_rate_is_not_finer_than_the_fade():
+    """The fade is 260ms and dominates the restore, so polling faster than
+    this buys less and less off the total for double the cost each time."""
+    assert n.YIELDED_POLL_SECONDS * 1000 <= n.YIELD_MS
+    assert n.YIELDED_POLL_SECONDS >= 0.05
 
 
 # -- how faint it goes ----------------------------------------------------

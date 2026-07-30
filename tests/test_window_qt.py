@@ -2906,6 +2906,30 @@ def test_the_all_desktops_toggle_cannot_touch_the_activation_policy():
 
 DISPLAY_RECT = (0, 0, 1710, 1107)
 
+
+def put_in_the_way(window):
+    """Move the window into the strip where notifications actually appear.
+
+    Needed since 16.1: the window's position is now part of the answer, so a
+    test that wants a fade has to say where the window is. Derived from the
+    region rather than written as a number, so the constant moving cannot
+    leave these tests quietly asserting nothing.
+    """
+    x, y, width, _ = n.plausible_region(DISPLAY_RECT)
+    window.move(x + 10, y + 10)
+    APP.processEvents()
+    assert n.in_the_way(
+        (window.frameGeometry().x(), window.frameGeometry().y(),
+         window.frameGeometry().width(), window.frameGeometry().height()),
+        [DISPLAY_RECT],
+    ), "the test's own premise: this window should be in the way"
+
+
+def put_out_of_the_way(window):
+    """Move the window well clear of where notifications appear."""
+    window.move(20, 400)
+    APP.processEvents()
+
 # windowOpacity() does not hand back what it was given: Qt stores it as an
 # 8-bit alpha, so 0.15 reads back as 38/255 = 0.14902. Measured, not
 # guessed at — the first version of these tests compared exactly and failed
@@ -2978,6 +3002,7 @@ def test_switching_it_on_fades_nothing_by_itself(make_window, monkeypatch):
 
 def test_a_notification_over_the_window_fades_it(make_window, monkeypatch):
     window = make_window()
+    put_in_the_way(window)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
 
@@ -2989,6 +3014,7 @@ def test_a_notification_over_the_window_fades_it(make_window, monkeypatch):
 
 def test_the_users_opacity_comes_back_when_it_clears(make_window, monkeypatch):
     window = make_window()
+    put_in_the_way(window)
     window._set_opacity(0.8)
     window._set_yield_to_notifications(True)
 
@@ -3025,6 +3051,7 @@ def test_an_already_dimmed_window_is_never_brightened(make_window, monkeypatch):
     further, never back up — measured against their own setting, not against
     full opacity."""
     window = make_window()
+    put_in_the_way(window)
     window._set_opacity(w._MIN_OPACITY)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
@@ -3043,6 +3070,7 @@ def test_a_repeat_poll_while_faded_starts_no_second_fade(make_window, monkeypatc
     what is already true is not news — the same dedupe shape as the line
     change's target index."""
     window = make_window()
+    put_in_the_way(window)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
 
@@ -3063,6 +3091,7 @@ def test_a_banner_clearing_mid_fade_turns_around_from_where_it_got_to(
     actually reached and pays for the distance left, rather than finishing a
     fade nobody is waiting for."""
     window = make_window()
+    put_in_the_way(window)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
     window._check_notifications()
@@ -3088,6 +3117,7 @@ def test_a_sync_pass_is_never_faded_under_the_user(make_window, monkeypatch):
     and a decorative feature does not get to fade an essential one. A pass
     beginning while the window is already faint hands the opacity back."""
     window = make_window()
+    put_in_the_way(window)
     load(window, PLAIN)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
@@ -3111,6 +3141,7 @@ def test_hiding_the_window_hands_the_opacity_back_and_stops_watching(
     that went away faded would come back faded, because the flight restores
     its own factor and not this one."""
     window = make_window()
+    put_in_the_way(window)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
     window._check_notifications()
@@ -3148,6 +3179,7 @@ def test_switching_the_layer_off_gives_the_window_back_at_once(
     """No fade on the way out of the layer: the user asked for the window
     back, not for it to drift back."""
     window = make_window()
+    put_in_the_way(window)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
     window._check_notifications()
@@ -3195,6 +3227,7 @@ def test_shutdown_stops_watching_and_hands_the_opacity_back(
     """A poll landing mid-teardown would ask the window server about a
     window being destroyed."""
     window = make_window()
+    put_in_the_way(window)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
     window._check_notifications()
@@ -3211,6 +3244,7 @@ def test_the_yield_is_never_written_into_the_saved_opacity(make_window, monkeypa
     """What gets persisted is what the user chose, not what a banner
     happened to be doing when the app quit."""
     window = make_window()
+    put_in_the_way(window)
     window._set_opacity(0.7)
     window._set_yield_to_notifications(True)
     notifications_at(monkeypatch, DISPLAY_RECT)
@@ -3243,3 +3277,154 @@ def test_only_one_place_writes_the_windows_opacity():
         )
     }
     assert callers == {"_apply_window_opacity"}
+
+
+def test_a_banner_leaves_a_window_nowhere_near_it_alone(make_window, monkeypatch):
+    """THE 16.1 BUG, at the level the user met it. macOS reports the whole
+    display for a banner in one corner, so before the region was narrowed
+    this window faded for something it was nothing like."""
+    window = make_window()
+    put_out_of_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+
+    window._check_notifications()
+    assert window._yielding is False
+    assert window._yield_anim is None
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+def test_dragging_into_the_way_starts_the_fade_at_the_next_poll(
+    make_window, monkeypatch
+):
+    """The position is read on every poll, not cached, so moving the window
+    under a banner that is already up is picked up without anything having to
+    tell the layer that the window moved."""
+    window = make_window()
+    put_out_of_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    assert window._yielding is False
+
+    put_in_the_way(window)
+    window._check_notifications()
+    assert window._yielding is True
+    settle_yield(window)
+    assert window.windowOpacity() == pytest.approx(n.YIELD_CEILING, abs=OPACITY_STEP)
+
+
+def test_dragging_out_of_the_way_ends_the_fade(make_window, monkeypatch):
+    window = make_window()
+    put_in_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+    assert window._yielding is True
+
+    put_out_of_the_way(window)
+    window._check_notifications()
+    settle_yield(window)
+    assert window._yielding is False
+    assert window.windowOpacity() == pytest.approx(window._opacity, abs=OPACITY_STEP)
+
+
+# -- the polling rate follows what the window is doing ---------------------
+
+
+def test_the_idle_rate_is_what_a_fresh_window_polls_at(make_window):
+    window = make_window()
+    assert window._yield_timer.interval() == int(n.POLL_SECONDS * 1000)
+
+
+def test_the_rate_goes_up_the_moment_the_fade_starts(make_window, monkeypatch):
+    """Before the animation, not after it: the short interval is wanted for
+    the poll that lands DURING the fade, which is where a banner dismissed
+    early would otherwise be missed for a full idle interval."""
+    window = make_window()
+    put_in_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+
+    window._check_notifications()
+    assert window._yield_anim is not None, "still fading"
+    assert window._yield_timer.interval() == int(n.YIELDED_POLL_SECONDS * 1000)
+
+
+def test_the_rate_goes_back_down_once_the_window_is_restored(
+    make_window, monkeypatch
+):
+    window = make_window()
+    put_in_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+    assert window._yield_timer.interval() == int(n.YIELDED_POLL_SECONDS * 1000)
+
+    notifications_at(monkeypatch)
+    window._check_notifications()
+    # Still fast: the window is not back yet. Reading only the target put the
+    # rate back here, while the window was still faint — so a second banner
+    # inside that 260ms met the idle rate.
+    assert window._yield_level > 0
+    assert window._yield_timer.interval() == int(n.YIELDED_POLL_SECONDS * 1000)
+
+    settle_yield(window)
+    assert window._yield_level == 0
+    assert window._yield_timer.interval() == int(n.POLL_SECONDS * 1000)
+
+
+def test_giving_the_opacity_back_also_gives_the_rate_back(make_window, monkeypatch):
+    """Every path out of a fade returns both, so there is no way to be left
+    polling three times as often as the layer needs for the rest of the
+    session."""
+    window = make_window()
+    put_in_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    assert window._yield_timer.interval() == int(n.YIELDED_POLL_SECONDS * 1000)
+
+    window._stop_yield()
+    assert window._yield_timer.interval() == int(n.POLL_SECONDS * 1000)
+
+
+def test_the_timer_stays_running_across_a_rate_change(make_window, monkeypatch):
+    """setInterval on a running QTimer restarts its countdown, which is fine
+    once per change and would be a timer that never fires if it happened on
+    every poll — hence the only-when-it-changes guard."""
+    window = make_window()
+    put_in_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    assert window._yield_timer.isActive()
+
+    window._check_notifications()
+    assert window._yield_timer.isActive()
+    settle_yield(window)
+    assert window._yield_timer.isActive()
+
+
+def test_a_repeat_poll_does_not_rewrite_the_interval(make_window, monkeypatch):
+    """The guard itself. Three polls a second land inside every banner; each
+    one calling setInterval would restart the countdown every time and the
+    timer would never actually reach it."""
+    window = make_window()
+    put_in_the_way(window)
+    window._set_yield_to_notifications(True)
+    notifications_at(monkeypatch, DISPLAY_RECT)
+    window._check_notifications()
+    settle_yield(window)
+
+    writes = []
+    real = window._yield_timer.setInterval
+    monkeypatch.setattr(
+        window._yield_timer,
+        "setInterval",
+        lambda ms: writes.append(ms) or real(ms),
+    )
+    for _ in range(5):
+        window._check_notifications()
+    assert writes == []

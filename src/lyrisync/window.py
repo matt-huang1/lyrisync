@@ -900,9 +900,13 @@ class LyricsWindow(QWidget):
         # that worked only during playback would be the fourteenth
         # milestone's lesson again — a feature indistinguishable from a
         # broken one.
+        #
+        # Its interval is not fixed: it drops while the window is faded, so
+        # coming back does not wait out a full idle-rate poll. See
+        # _apply_poll_interval.
         self._yield_timer = QTimer(self)
-        self._yield_timer.setInterval(int(notifications.POLL_SECONDS * 1000))
         self._yield_timer.timeout.connect(self._check_notifications)
+        self._apply_poll_interval()
 
         self._loop = LineLoop()
         self._loop_timer = QTimer(self)
@@ -2857,6 +2861,34 @@ class LyricsWindow(QWidget):
             self._yield_timer.stop()
             logger.debug("yield: stopped watching")
 
+    def _apply_poll_interval(self) -> None:
+        """Look harder while there is something to undo.
+
+        The two directions are not worth the same. Going faint a third of a
+        second into a banner costs nothing — it has only just arrived. Still
+        being faint a third of a second after the screen is clear is the
+        user waiting for their own lyrics, so while yielded the interval
+        drops to 100ms and the restore costs one short poll plus the fade
+        instead of one long poll plus the fade.
+
+        "Yielded" here means the window is not back yet — the target OR the
+        level. Reading only the target put the rate back to 300ms the moment
+        a banner cleared, while the fade home was still running, so a second
+        notification arriving inside that 260ms was met at the idle rate by a
+        window that was still faint. Found in the trace, not by reasoning:
+        the interval column showed 300 against a level of 1.0.
+
+        Only written when it changes: setInterval on a running timer restarts
+        the countdown, and doing that on every poll would mean a timer that
+        never fires at the idle rate at all.
+        """
+        engaged = self._yielding or self._yield_level > 0.0
+        wanted = int(notifications.poll_interval_seconds(engaged) * 1000)
+        if self._yield_timer.interval() == wanted:
+            return
+        self._yield_timer.setInterval(wanted)
+        logger.debug("yield: polling every %dms", wanted)
+
     def _check_notifications(self) -> None:
         """One poll: is the notification system over this window?
 
@@ -2901,6 +2933,9 @@ class LyricsWindow(QWidget):
         the remaining distance is worth.
         """
         self._yielding = yielding
+        # Before the animation, not after it: the faster rate is wanted for
+        # the poll that lands during the fade, not only once it has finished.
+        self._apply_poll_interval()
         end = 1.0 if yielding else 0.0
         start = self._yield_level
         if self._yield_anim is not None:
@@ -2940,6 +2975,9 @@ class LyricsWindow(QWidget):
         happened to fall."""
         self._yield_level = 1.0 if self._yielding else 0.0
         self._yield_anim = None
+        # The level has landed, so the rate can follow it home: this is where
+        # a fade back to nothing hands the idle interval back.
+        self._apply_poll_interval()
         self._apply_window_opacity()
 
     def _stop_yield(self) -> None:
@@ -2956,6 +2994,7 @@ class LyricsWindow(QWidget):
             self._yield_anim = None
         self._yielding = False
         self._yield_level = 0.0
+        self._apply_poll_interval()  # back to the idle rate with the opacity
         self._apply_window_opacity()
 
     def _toggle_lyrics_visible(self) -> None:

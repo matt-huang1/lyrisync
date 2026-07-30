@@ -85,26 +85,118 @@ panel by clicking the clock and closing it again was measured the same way.
 
 So there is one rule and not two.
 
-## What "overlaps" can honestly mean
+## The rectangle is the whole display — and nothing tells the cases apart
+
+*Milestone 16.1.*
 
 The rectangle that window reports is **the whole display**: `(0, 0
 1710x1107)` on a 1710x1107 screen, both for a banner in the top-right
-corner and for the full-height panel. macOS exposes no rectangle for the
-banner itself. The banner is drawn inside that host window, and the only
-public way to find out where would be to capture its pixels — which is
-exactly the thing that needs the permission this design avoids.
+corner and for the panel. macOS exposes no rectangle for the banner itself.
 
-So the intersection is computed against the rectangle the system actually
-reports, and what that buys today is the display test: a notification on
-the built-in screen does not fade a window parked on an external one. On a
-single display it means any notification while the window is showing.
+Milestone 16 shipped the intersection against that rectangle and it was
+wrong in practice: **the window dimmed for a banner it was nowhere near.**
 
-That is stated rather than dressed up. The alternative was worse: a banner
-rectangle guessed from where banners usually appear would be a number
-picked by eye, in a project where the scrim alpha and the tint chroma are
-not — and it would be wrong the first time Apple moved them. The
-intersection is real arithmetic, so if macOS ever reports a tighter
-rectangle this narrows with it for free.
+Before working around it, 16.1 went looking for a real signal. Every field
+of the notification window, dumped in three states and compared:
+
+| field | nothing showing | banner | panel |
+|---|---|---|---|
+| `kCGWindowNumber` | 54338 | 54338 | 54338 |
+| `kCGWindowLayer` | 21 | 21 | 21 |
+| `kCGWindowBounds` | 0,0 1710x1107 | 0,0 1710x1107 | 0,0 1710x1107 |
+| `kCGWindowAlpha` | 1.0 | 1.0 | 1.0 |
+| `kCGWindowSharingState` | 1 | 1 | 1 |
+| `kCGWindowStoreType` | 1 | 1 | 1 |
+| `kCGWindowMemoryUsage` | 2368 | 2368 | 2368 |
+| index in the on-screen list | 116 | 116 | 116 |
+| `kCGWindowIsOnscreen` | *absent* | true | true |
+| windows owned, on screen | 0 | 1 | 1 |
+| the set of keys returned | — | identical | identical |
+
+**A banner and the open panel are identical in every single field.** The
+window count does not change, the ordering does not change, and
+`kCGWindowMemoryUsage` is 2368 even with nothing on screen — so it is not a
+backing-store size and says nothing about what is drawn. The only signal in
+the entire record is `kCGWindowIsOnscreen` appearing, and it says *something*
+is showing, never what or where.
+
+So there is no pairing of a case with its region to be had, and the only
+remaining option is a heuristic.
+
+## The heuristic: the rightmost strip
+
+**This is a heuristic.** It is not read from anything; it is a constant, and
+where notifications appear was measured rather than assumed.
+
+Measured from pixels — legitimately, because this happened *once, in a
+harness that already had Screen Recording*, and the app ships the answer as
+a number instead of looking. Screen captures with the notification up were
+diffed against captures without it, five trials per case with the masks
+intersected so that anything moving for its own reasons drops out:
+
+| case | rectangle, in points | width | right edge |
+|---|---|---|---|
+| one short banner | 1349, 54  346x62 | 346 | 1695 |
+| a long wrapped banner | 1343, 44  360x120 | 360 | 1702 |
+| three stacked banners | 1340, 38  368x96 | 368 | 1708 |
+| the Notification Centre panel | 1294, 34  416x608 | 416 | 1710 |
+
+Every case is right-anchored and inside the rightmost **416 points**. The
+panel is the widest; its height depends on how much is in it — 608 to 713
+points measured, and it scrolls beyond that, so there is no maximum height
+to find.
+
+The region is therefore **the reported rectangle, narrowed to its rightmost
+`PLAUSIBLE_STRIP_WIDTH` points, full height**. That constant is **440**, not
+the measured 416: banner and panel widths move with the system text size and
+with localisation, and the two failure directions are not worth the same.
+Too wide fades the window when it did not strictly need to; too narrow
+leaves it sitting over somebody's mail, which is the whole thing this layer
+exists to stop.
+
+Narrowing *the reported rectangle*, rather than asking a screen where its
+right edge is, keeps milestone 16's one real property intact: the rectangle
+being narrowed is the display the notification is on, so a banner on another
+display still cannot reach a window over here. And the narrowing uses `min`,
+so a reported rectangle already narrower than the strip is handed back
+untouched — the day macOS reports a real banner rectangle, this stops being
+a heuristic without an edit.
+
+The narrowing happens **inside `in_the_way`**, not at the call site, so there
+is one path from a reported rectangle to an answer and no version of this
+that forgets and compares against a whole display again.
+
+**What it gets wrong, plainly:** a window parked in the bottom-right corner
+still fades for a banner in the top-right one. The panel can reach that far,
+nothing distinguishes the panel from a banner, and full height is the honest
+over-approximation. Over-approximating is the right direction here — a layer
+whose job is to get out of the way should fail by moving when it needn't,
+not by sitting there when it should have moved.
+
+Verified live: with the window at `(20, 400)`, well clear of the strip, a
+real banner sat on screen for 6.4 seconds and the window's opacity stayed at
+1.000 for every one of the traced frames. With the window at `(1280, 60)`,
+inside the strip, it faded as before.
+
+## Why the fade cannot be proportional
+
+Fading in proportion to how much of the window is actually covered — or to
+how far the Notification Centre panel has been pulled open — **is not
+implementable without pixel capture**, and pixel capture is precisely the
+permission this feature exists without.
+
+A proportional fade needs the real rectangle. macOS reports the display, and
+the investigation above establishes that nothing else in the window record
+narrows it. The only public route to the real geometry is reading the
+notification window's pixels — `CGWindowListCreateImage` and its successors
+— which is what the Screen Recording prompt guards, and which a test in this
+project forbids the module from even naming.
+
+So the choice is a proportional fade behind a permission dialogue, or a
+fixed fade behind none. This picks none. The fixed ceiling is the price, and
+it is a smaller one than the prompt would be.
+
+## One coordinate space
 
 Qt's geometry and the window list's bounds are the same coordinate space,
 which is not something to assume — milestone 12a found Qt's geometry
@@ -187,30 +279,57 @@ exactly a moment when the window is still on screen and still in the way. A
 layer that worked only during playback would be milestone 14's lesson
 again — a feature indistinguishable from a broken one.
 
-So it is a repeating `QTimer` at **300ms**, running only while the layer is
-on *and* the window is showing. Measured in the real app process:
+So it is a repeating `QTimer`, running only while the layer is on *and* the
+window is showing. Measured in the real app process: **0.105–0.126 ms of CPU
+per poll**, against 2.3% of a core for the line change at a line every four
+seconds. `kCGWindowListOptionOnScreenOnly` rather than the whole list is most
+of that — 0.123 ms against 2.227 ms for every window on the machine.
 
-- **0.105 ms of CPU** per poll (0.309 ms wall)
-- **0.035% of one core** at 300ms
+### Two intervals, because the two directions are not worth the same
 
-Against 2.3% of a core for the line change at a line every four seconds.
-`kCGWindowListOptionOnScreenOnly` rather than the whole list is most of
-that: 0.123 ms against 2.227 ms for every window on the machine.
+*Milestone 16.1.* Going away late costs nothing: the banner has only just
+arrived and nobody has read it yet. Coming back late is the user waiting for
+their own lyrics. So the interval is **300 ms while nothing is over the
+window and 100 ms while the window is faded**:
 
-A banner is on screen for about five seconds, so 300ms starts the fade well
-inside the first tenth of its life. Traced live, one real notification:
+| | interval | CPU |
+|---|---|---|
+| idle | 300 ms | 0.042% of one core |
+| yielded | 100 ms | 0.126–0.151% of one core |
+
+The faster rate is only paid for during the few seconds a notification is
+actually up. Not lower than 100 ms because the 260 ms fade dominates the
+restore — halving again would buy 50 ms off a ~360 ms total for twice the
+polling.
+
+"Yielded" means **the target or the level**: the rate stays fast until the
+window is actually back, not just until the banner has gone. That was found
+in the trace rather than reasoned about — the interval column read 300 next
+to a level of 1.0, which meant a second notification arriving inside the
+260 ms fade home met a still-faint window at the idle rate.
+
+### Restore latency, measured
+
+Traced by an independent 20 ms timer, so the figure does not depend on the
+app's own polling. Six trials with real notifications:
 
 ```
-t=1.12s  notification appears
-t=1.21s  fade begins            (level 0.009, opacity 0.988)
-t=1.45s  fully yielded          (level 1.000, opacity 0.149)
-t=6.44s  notification clears
-t=6.63s  fade back begins
-t=6.87s  fully restored         (level 0.000, opacity 1.000)
+t=1.10s  notification appears
+t=1.26s  fade begins            (159 ms after it appeared)
+t=1.50s  fully yielded          (241 ms of travel)
+t=6.41s  notification vanishes
+t=6.46s  fade home begins       ( 44-156 ms after it vanished)
+t=6.71s  fully restored         (289-395 ms after it vanished)
 ```
 
-90ms and 190ms from the change to the fade starting — inside one poll
-interval both ways — and 240ms of travel against the 260ms nominal.
+- **restore begins 44–156 ms** after the notification vanishes — one 100 ms
+  poll, with QTimer's usual jitter either side
+- **fully restored in 289–395 ms**, mean 342 ms
+
+Milestone 16, at a flat 300 ms, measured **430 ms** for the same thing, with
+the fade home starting 190 ms after the notification cleared. The theoretical
+worst case went from 560 ms (300 + 260) to 360 ms (100 + 260); the measured
+395 ms high water mark is that plus timer jitter.
 
 ## The cases that are refused, and why
 
@@ -263,3 +382,9 @@ spending the material is the *point* while something else needs the space.
 - **A different ceiling per appearance.** The interference depends on the
   panel and the backdrop, and light mode over a dark banner is already the
   worst pairing of the two.
+- **A fade proportional to how much is covered.** Not a judgement call —
+  [not implementable without pixel capture](#why-the-fade-cannot-be-proportional),
+  and pixel capture is the permission this feature exists without.
+- **Telling a banner from the panel.** Measured impossible: identical in
+  every field of the window record. That is what forces one region for both,
+  and the bottom-right corner case with it.

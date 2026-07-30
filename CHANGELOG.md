@@ -3,6 +3,59 @@
 Milestones in the order they happened. Dates are commit dates; the deeper
 reasoning behind each is in [docs/](docs/).
 
+## Milestone 16.1 — dim for the banner, not for the display
+
+Milestone 16 dimmed the window for banners it was **nowhere near**, because
+it intersected against the rectangle macOS reports and that rectangle is the
+whole display.
+
+Before working around it, this went looking for a real signal: every field of
+the notification window, dumped with nothing showing, with a banner up, and
+with the Notification Centre panel open. **A banner and the open panel are
+identical in every single field** — window number, layer, bounds, alpha,
+sharing state, store type, memory usage, even the index in the on-screen list
+and the set of keys returned. The window count does not change either, and
+`kCGWindowMemoryUsage` is 2368 with nothing on screen at all, so it is not a
+backing-store size. The only signal in the whole record is
+`kCGWindowIsOnscreen` appearing, and it says *something* is showing, never
+what or where.
+
+So the fix is a heuristic, and it is named and documented as one: the
+reported rectangle **narrowed to its rightmost 440 points**, full height.
+Where notifications actually appear was measured from pixels — once, in a
+harness that already had the permission, so the app ships a constant instead
+of looking: a short banner is 346pt wide, a long one 360, three stacked 368,
+the panel 416, every one of them anchored to the right edge. 440 rather than
+416 because those widths move with system text size and localisation, and the
+two failure directions are not worth the same.
+
+Narrowing the *reported* rectangle rather than asking a screen for its right
+edge keeps 16's one real property — a banner on another display still cannot
+reach a window over here — and `min` means the day macOS reports a real
+banner rectangle, this stops being a heuristic with no edit. Verified live: a
+window at `(20, 400)` sat through a 6.4-second banner with its opacity at
+1.000 for every traced frame.
+
+Measuring where notifications appear **took three attempts**, and the first
+two were confidently wrong: 1408pt wide, starting inside the menu bar. Three
+pollutants — this script's own output scrolling in the editor, the lyrics
+window animating, and its native shadow, which falls *outside* the window
+bounds so masking the rectangle was not enough. Rendering the diff mask and
+looking at it is what found all three. The numbers had been stable and
+repeatable the whole time.
+
+**Restoring is quicker.** The poll drops to 100ms while the window is faded
+and returns to 300ms once it is back, because going away late costs nothing
+and coming back late is the user waiting for their own lyrics. Restore now
+begins 44–156ms after a notification vanishes (was 190ms) and completes in
+289–395ms, mean 342ms (was 430ms). It costs 0.126% of one core, and only for
+the seconds a notification is up.
+
+And it is now written down that a fade **proportional** to how much is
+covered is not implementable without pixel capture — it needs the real
+rectangle, macOS reports the display, and the only public route to the real
+one is the thing the Screen Recording prompt guards.
+
 ## Milestone 16 — yield to notifications
 
 The window floats *above* notification banners — level 25 against their 21
