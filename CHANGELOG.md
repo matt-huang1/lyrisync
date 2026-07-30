@@ -6,6 +6,38 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Session C — a demo of the app as it is now
+
+**The README's GIF was 31 commits out of date.** It predated the menu bar
+item, the vibrancy material, light mode, the album tint, the type
+hierarchy, the flight and the rename; session B reported it and left it,
+because a demo is a recording of a real session and it is the user's call
+what it shows.
+
+It now shows four things in one take. The window floats over this
+repository's own source; the lines advance in time; the romanisation line
+appears **only under the lines that need it** — "they don't know 'bout us"
+alternates English and hangul every ~3.4 s, so the layer is seen arriving
+and leaving rather than merely being present; and ⇧⌘J flies the window
+into the menu bar item.
+
+**The middle of it is per-app position memory**, which no previous demo
+showed at all. Two backdrops, one position taught for each by dragging
+with the layer on — the editor at (310, 90), the Finder window on the
+repository folder at (870, 440) — and then the apps are switched. The
+window is seen taking itself across the screen, twice, because that is
+what it does.
+
+20.5 s, 720x462, 15 fps, 891 KB — still a fifth of the size budget, so
+neither the frame rate nor the width had to be given up for it.
+
+The recording rules that came out of it are in
+[CLAUDE.md](CLAUDE.md#packaging-and-identity); what went wrong on the way
+there — a throwaway editor profile, a Focus mode with no CLI, a pointer
+that turned out to be captured, a take ruined by Spotify bringing itself
+to the front, and a file browser quietly showing the developer's username
+— is in [the decision log](docs/decision-log.md).
+
 ## Session B — lyrics arrive sooner, and the log becomes two files
 
 **The fallback chain was sequential, and cost the sum of its attempts.**

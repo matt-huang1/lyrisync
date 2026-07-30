@@ -228,6 +228,14 @@ Rules that come with them:
   the gap), and archives are made with `ditto`, never `zip`.
 - **Bundle building stays out of CI**: the artefact is macOS-only and only
   a person can accept what matters about it.
+- **A recording of the app is a recording of a real machine.** The demo
+  GIF is shot against a *throwaway* editor profile (its own
+  `--user-data-dir`), with Do Not Disturb on and the pointer parked
+  off-frame — everything in the frame is real, so nothing in it may be
+  personal, and the developer's own windows are not the backdrop.
+  Nothing is configured for the camera. Everything borrowed is given
+  back, and the preferences plist is restored **after** the app quits,
+  because quitting writes to it.
 
 ### Layers
 
