@@ -110,8 +110,11 @@ it is, not at where it was going.
 
 ## The map
 
-Bundle identifier → (x, y), capped at 50 entries, least recently used
-dropped first. Recency counts a *use* rather than just a write: recalling
+Bundle identifier → (x, y, name), capped at 50 entries, least recently
+used dropped first. The name is the last one seen, kept so the list can
+read; a save that does not know it does not erase the one already there,
+because not knowing what an app is called this time is not evidence that
+last time was wrong. Recency counts a *use* rather than just a write: recalling
 a position refreshes the entry, or the app you switch to constantly but
 rarely re-place would be the first evicted.
 
@@ -120,11 +123,17 @@ be crude and why **Forget remembered positions** needs no confirmation.
 That is the whole difference between this and a hand-made sync, which is
 [never treated as cache](lyrics-and-caching.md).
 
-Stored as JSON in the settings file, as a list of triples rather than an
+Stored as JSON in the settings file, as a list of rows rather than an
 object so the eviction order is part of the format rather than a property
 of whichever JSON reader loads it back. A file somebody edited by hand
 degrades rather than taking the feature down: unreadable text yields an
 empty map, and one bad entry costs only itself.
+
+Rows have four fields since names arrived, and the three-field shape
+milestone 14 wrote is still read — a map saved before names existed keeps
+every position and simply has no labels until each app is next seen.
+Refusing the old shape would have cost the user everything they had
+taught it, to gain a label.
 
 ## The bug that made all of this look broken
 
@@ -191,7 +200,8 @@ the menu says so, in words, whenever it is opened:
 
 ```
 Remember position per app            ✓
-No positions remembered · com.apple.Safari not placed yet
+🧭 4 apps remembered · Safari is placed
+Remembered apps                      ▸
 Forget remembered positions
 ```
 
@@ -202,19 +212,51 @@ that has. A count alone leaves "is it working here?" unanswered; the
 position alone hides an empty map behind one app that happens to have no
 entry.
 
-It shows the bundle identifier rather than a friendly name. That is what
-the map is keyed on and what the log lines say, so someone comparing the
-two is comparing the same string — and asking macOS to localise it would
-mean reading something about the other app beyond the identifier it
-advertises, which this feature does not do.
+**Names, not identifiers**, with the app's own icon beside them. The
+first version of this readout printed `com.apple.Safari`, on the argument
+that it is what the map is keyed on and what the log says, so the two
+could be compared. That is a real argument and it belongs to the log: a
+menu is read by a person deciding whether a feature works, and an
+identifier makes them translate before they can answer. The name comes
+from the activation that brought the app forward, so it costs nothing —
+both halves arrive in the same notification — and it is **stored beside
+the position**, because the map outlives the sessions that taught it and
+an app that is not running cannot be asked what it is called. With no
+name anywhere, the identifier is still shown; it beats a blank.
 
-It is disabled, because it is a readout and not a control, and its
-`menuRole` is `NoRole` rather than Qt's default `TextHeuristicRole`: it
-is the one entry whose text the app does not write, and the heuristic
-that relocates "Preferences…" into the application menu matches
-substrings — `com.apple.systempreferences` would trip it. A diagnostic
-that moves itself depending on which app you switched to would vanish
-exactly when read.
+**No coordinates.** They answered a question nobody asks of a menu: a
+number pair cannot be checked against anything by eye, and the window is
+sitting at it in plain view. They stay in the DEBUG log, where a reader is
+comparing them with something. A detail toggle to put them back was
+considered and rejected — an extra entry for a fact already on screen, in
+a menu whose problem was never too little information.
+
+The readout is disabled, because it is a readout and not a control, and
+its `menuRole` is `NoRole` rather than Qt's default
+`TextHeuristicRole`: it is the one entry whose text the app does not
+write, and the heuristic that relocates "Preferences…" into the
+application menu matches substrings — "System Settings", or
+`com.apple.systempreferences` before it has a name, would trip it. A
+diagnostic that moves itself depending on which app you switched to would
+vanish exactly when read.
+
+**Remembered apps** lists what has been learned, most recently used
+first, each with its icon and name; clicking one forgets that app. It is
+the only menu in this app whose *contents* are rebuilt rather than only
+relabelled — everything else is a fixed set of entries whose visibility
+changes, because rebuilding the menu bar item's structure makes it
+flicker. A list of what has been learned cannot be a fixed set, and this
+one is assembled on its own `aboutToShow`: only while the user is looking
+at that submenu, never while the menu bar item is idle.
+
+Icons come from the workspace by bundle identifier rather than from a
+running process, so an app that is remembered but not running still has a
+face; one that has been uninstalled since simply has none, and its name
+still reads. They arrive as TIFF bytes so that nothing pyobjc-shaped
+crosses out of `frontmost.py`, and they are **redrawn at the size asked
+for**: `iconForFile_` hands back every representation from 16 to 1024,
+which is 74 MB of TIFF decoding to a 1024x1024 pixmap. Drawn once at 16
+points it is 12 KB, and comes back at the screen's own scale.
 
 The readout follows the *toggle*, not the map, and unlike the forget
 entry that is not about whether it could act. It names the frontmost app,
@@ -247,27 +289,61 @@ working from broken, would be worse than no line at all.
 asking the debounce about its own state afterwards and reconstructing the
 answer.
 
-### No on-window acknowledgement
+### The acknowledgement on the window
 
-Considered and declined. A flash on the window at the moment a position
-is recorded would answer the question at exactly the right time, and it
-was rejected on three counts:
+**This supersedes the refusal recorded here in 14.1.** That entry
+declined an on-window acknowledgement on three counts: a transient line
+would have to borrow the sung-line row, it would have to print a bundle
+identifier mid-lyric to say anything useful, and the wordless version —
+pulsing the hairline — would be a second animation of an edge that
+[13.2](appearance-and-materials.md) gave a single owner on purpose.
 
-- The only surface a transient line could take is the sung-line row —
-  the title card is the sole precedent for borrowing it, and that is
-  *about the song*. Covering a lyric to talk about the window is the
-  wrong trade in an ambient window.
-- To say anything the user could not already guess it would have to name
-  the app, which means printing a bundle identifier in the middle of the
-  lyrics. That is diagnostic text; it belongs in the menu and the log.
-- The wordless version — pulsing the hairline once — would be a second
-  animation of the album tint's edge, and
-  [13.2](appearance-and-materials.md) gave that edge a single owner
-  deliberately: the tint and the panel ride one cross-fade because two
-  animations of the same thing can only drift apart.
+The first two still stand, and no text was added to the window. The third
+was too strict, and the rule that replaces it is now
+[principle 12](../DESIGN_PHILOSOPHY.md): **transient feedback may briefly
+borrow a surface that persistent decoration owns, then return it.**
+Owning a surface and borrowing one are different things, provided the
+return is structural rather than remembered.
 
-The menu is refreshed at the moment of learning as well as on every
-opening, so the answer is one click away and always current.
+So when a position is recorded, the hairline warms for 520 ms and goes
+back:
+
+- **A half sine, one property.** `progress` runs 0 to 1 and the intensity
+  is `sin(π · progress)` — nothing at either end, peaking at 0.85 of the
+  way to the warm colour. One property with the whole rise and fall in it,
+  the same reasoning as the line change's signed `progress`, and it is why
+  there is no easing curve to choose and no step at either boundary.
+- **A mix at paint time, never in the tint state.** `_current_border()`
+  stays the album's own answer and is what a cross-fade starts and ends
+  on; `_painted_border()` applies the glow over it, once, in the frame
+  being drawn. A cover landing mid-glow therefore cross-fades underneath
+  it and cannot capture a warmed edge — which is exactly what would have
+  happened had the glow been folded into the tint, and it is what the
+  13.2 objection was really about.
+- **Giving it back is the animation ending**, not a piece of cleanup: the
+  mix reaches zero and the edge is the album's again, to the channel.
+- **One per gesture.** A second acknowledgement inside the first is
+  refused rather than restarted — it would read as a flicker rather than
+  as two answers — and that is also what makes a release delivered twice
+  harmless.
+- **Warm, because everything else here is cool.** The amber is the one
+  this app already uses for "your turn" in echo practice, darkened for
+  light mode like every other accent. It is deliberately *not* tinted by
+  the album: an acknowledgement that changed colour with the cover would
+  read as part of the artwork rather than as an answer.
+
+Measured, in both appearances, from the pixels `paintEvent` produced.
+Dark: the edge goes `(255,255,255,30)` to `(255,220,140,145)` at the peak
+and back. With a red cover in hand: `(237,130,130,110)` to
+`(252,201,122,157)` and back to `(237,130,130,110)` exactly. The
+animation itself is traced rather than photographed — macOS returns a
+stale frame on the first capture after a change, so frozen frames of a
+running animation are not evidence: 33 frames over 531 ms, peaking at
+0.85, ending at 0.0. **15.9 ms of CPU per drag**, about 0.5 ms a frame,
+against 92.7 ms for one line change.
+
+The menu is still refreshed at the moment of learning as well as on every
+opening, so the fuller answer is one click away and always current.
 
 ## The toggle
 
@@ -276,10 +352,13 @@ about where the window lives, answerable whether or not anything is
 playing and whether or not any position has been learned yet. The same
 argument as album colour.
 
-**Forget remembered positions** appears only once something has been
-learned, and disappears again when the map is cleared. It stays reachable
-with the layer switched off, so a bad map can be cleared without turning
-the feature back on to reach the control that clears it.
+**Forget remembered positions** and **Remembered apps** both appear only
+once something has been learned, and disappear again when the map is
+cleared. They stay reachable with the layer switched off, so a bad map
+can be cleared without turning the feature back on to reach the control
+that clears it — and a single app can be forgotten from the list rather
+than everything at once. Neither asks for confirmation, for the reason
+the map is capped at all: a position costs one drag to relearn.
 
 Off stops the observing as well as the moving: the notification
 subscription is removed, so with the layer off this app is not watching

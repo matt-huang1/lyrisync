@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,25 @@ logger = logging.getLogger(__name__)
 # can be reasoned about — and its structure tested — without pyobjc.
 DID_ACTIVATE = "NSWorkspaceDidActivateApplicationNotification"
 APPLICATION_KEY = "NSWorkspaceApplicationKey"
+
+# NSCompositingOperationSourceOver. Spelled out for the same reason as the
+# names above.
+_SOURCE_OVER = 2
+
+
+class AppIdentity(NamedTuple):
+    """An application as this app needs to talk about one: the identifier
+    it is keyed on, and the name a person would call it.
+
+    The name travels WITH the identifier rather than being looked up when
+    wanted. Both arrive together in the activation notification, so taking
+    the name then costs nothing and needs no second question; asking later
+    would mean walking the running-application list on every menu refresh,
+    and would have no answer at all for an app that has since quit.
+    """
+
+    bundle_id: str
+    name: Optional[str] = None
 
 
 def _workspace():
@@ -50,8 +69,8 @@ def _workspace():
     return NSWorkspace.sharedWorkspace()
 
 
-def current_bundle_id() -> Optional[str]:
-    """The bundle identifier of the frontmost app right now, or None.
+def current_app() -> Optional[AppIdentity]:
+    """The frontmost app right now, or None.
 
     Needed as well as the notification: the watcher can start at any
     moment, and until something else is activated the app in front has
@@ -63,12 +82,76 @@ def current_bundle_id() -> Optional[str]:
         return None
     try:
         app = workspace.frontmostApplication()
-        bundle_id = str(app.bundleIdentifier()) if app is not None else None
+        identity = _identity(app)
     except Exception:
         logger.debug("could not read the frontmost application", exc_info=True)
         return None
-    logger.debug("asked macOS for the frontmost app: %s", bundle_id)
-    return bundle_id
+    logger.debug("asked macOS for the frontmost app: %s", identity)
+    return identity
+
+
+def _identity(app) -> Optional[AppIdentity]:
+    """One NSRunningApplication as an AppIdentity, or None.
+
+    The name is optional in both directions: an app with no identifier is
+    nothing to key on and gives None, while an app with an identifier and
+    no name is perfectly usable — the readout falls back to the identifier
+    and says so.
+    """
+    if app is None:
+        return None
+    bundle_id = app.bundleIdentifier()
+    if not bundle_id:
+        return None
+    try:
+        name = app.localizedName()
+    except Exception:  # pragma: no cover - an app that will not say
+        name = None
+    return AppIdentity(str(bundle_id), str(name) if name else None)
+
+
+def app_icon_tiff(bundle_id: str, points: int) -> Optional[bytes]:
+    """The application's icon as TIFF bytes at ``points``, or None.
+
+    Bytes rather than an NSImage, so nothing pyobjc-shaped crosses out of
+    this module: the caller turns them into a QPixmap and the test suite
+    hands over a file's worth of bytes without AppKit.
+
+    Redrawn at the size wanted rather than handed over as it comes.
+    ``iconForFile_`` returns an image carrying every representation from
+    16 to 1024 — measured at **74 MB** of TIFF, decoding to a 1024x1024
+    pixmap — which is not a menu icon by any reading. Drawing it once into
+    an image of the size asked for costs 37 KB and comes back at the
+    screen's own scale.
+
+    Keyed on the bundle identifier through the workspace rather than on a
+    running process, so an app that is remembered but not running still
+    has a face. That is the whole point: the list of remembered apps
+    outlives the sessions that taught it.
+    """
+    workspace = _workspace()
+    if workspace is None or not bundle_id:
+        return None
+    try:
+        from AppKit import NSImage, NSMakeRect, NSZeroRect
+
+        url = workspace.URLForApplicationWithBundleIdentifier_(bundle_id)
+        if url is None:
+            return None  # not installed any more; the name still is known
+        image = workspace.iconForFile_(url.path())
+        if image is None:
+            return None
+        drawn = NSImage.alloc().initWithSize_((points, points))
+        drawn.lockFocus()
+        image.drawInRect_fromRect_operation_fraction_(
+            NSMakeRect(0, 0, points, points), NSZeroRect, _SOURCE_OVER, 1.0
+        )
+        drawn.unlockFocus()
+        data = drawn.TIFFRepresentation()
+    except Exception:
+        logger.debug("could not draw an icon for %s", bundle_id, exc_info=True)
+        return None
+    return bytes(data) if data is not None else None
 
 
 def own_bundle_id() -> Optional[str]:
@@ -91,7 +174,7 @@ def own_bundle_id() -> Optional[str]:
 
 
 class FrontmostWatcher:
-    """Calls back with a bundle identifier each time an app comes forward.
+    """Calls back with an AppIdentity each time an app comes forward.
 
     Block-based rather than an NSObject subclass with a selector: there is
     no state to hold on the Objective-C side, and a subclass would mean
@@ -100,7 +183,7 @@ class FrontmostWatcher:
     thing to hand back when stopping.
     """
 
-    def __init__(self, on_activate: Callable[[str], None]) -> None:
+    def __init__(self, on_activate: Callable[[AppIdentity], None]) -> None:
         self._on_activate = on_activate
         self._observer = None
         self._centre = None
@@ -155,28 +238,33 @@ class FrontmostWatcher:
         logger.debug("stopped watching for application activations")
 
     def _handle(self, notification) -> None:
-        """Pull the bundle identifier out of a notification and hand it on.
+        """Pull the app out of a notification and hand it on.
 
-        Deliberately forgiving: this runs inside AppKit's own dispatch, so
-        an exception here would surface somewhere unhelpful. An activation
-        that cannot be read is one the window does not follow, which is the
-        same outcome as an app with no remembered position.
+        Both halves of the identity are taken here, while the notification
+        still has the application object in hand: the identifier to key on
+        and the name to show. Deliberately forgiving otherwise — this runs
+        inside AppKit's own dispatch, so an exception here would surface
+        somewhere unhelpful. An activation that cannot be read is one the
+        window does not follow, which is the same outcome as an app with no
+        remembered position.
         """
         try:
             info = notification.userInfo()
             app = info.objectForKey_(APPLICATION_KEY) if info is not None else None
-            bundle_id = app.bundleIdentifier() if app is not None else None
+            identity = _identity(app)
         except Exception:
             logger.debug("unreadable activation notification", exc_info=True)
             return
-        if not bundle_id:
+        if identity is None:
             # A process with no bundle identifier is nothing to key on. Said
             # out loud, because from further up the chain this is
             # indistinguishable from no notification having arrived at all.
             logger.debug("activation notification with no bundle identifier")
             return
-        logger.debug("activation notification: %s", bundle_id)
+        logger.debug(
+            "activation notification: %s (%s)", identity.bundle_id, identity.name
+        )
         try:
-            self._on_activate(str(bundle_id))
+            self._on_activate(identity)
         except Exception:
             logger.exception("activation handler failed")

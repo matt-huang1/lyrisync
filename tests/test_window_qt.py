@@ -54,6 +54,7 @@ except Exception as exc:  # pragma: no cover - platform plugin missing
     pytest.skip(f"Qt cannot start: {exc}", allow_module_level=True)
 
 from lyrisync import appearance as ap  # noqa: E402
+from lyrisync import frontmost  # noqa: E402
 from lyrisync import hotkey  # noqa: E402
 from lyrisync import login_item  # noqa: E402
 from lyrisync import menu as m  # noqa: E402
@@ -1122,12 +1123,32 @@ VSCODE = "com.microsoft.VSCode"
 SAFARI = "com.apple.Safari"
 
 
+NAMES = {
+    VSCODE: "Code",
+    SAFARI: "Safari",
+    "com.apple.Notes": "Notes",
+    "com.lyrisync.lyrisync": "LyriSync",
+}
+
+
+_UNSET = object()
+
+
+def activate(window, bundle_id, name=_UNSET):
+    """What NSWorkspace hands the window: an identifier AND a name, taken
+    from the same announcement."""
+    if name is _UNSET:
+        name = NAMES.get(bundle_id)
+    window._on_app_activated(frontmost.AppIdentity(bundle_id, name))
+
+
 def remembering(make_window, frontmost_app=VSCODE):
     """A window with the layer on and an app in front of it."""
     window = make_window()
     window.show()
     window._set_remember_position(True)
     window._frontmost = frontmost_app
+    window._frontmost_name = NAMES.get(frontmost_app)
     APP.processEvents()
     return window
 
@@ -1211,7 +1232,7 @@ def test_the_window_moves_to_a_remembered_position_on_activation(make_window):
     end_a_drag(window, 300, 200)
     window.move(10, 10)
 
-    window._on_app_activated(VSCODE)
+    activate(window, VSCODE)
     window._settle_timer.stop()  # fire the settle by hand, deterministically
     window._debounce._since -= w.SETTLE_SECONDS
     window._apply_settled_app()
@@ -1229,7 +1250,7 @@ def finish_move(window):
 
 def settle(window, bundle_id):
     """An activation that has been frontmost long enough to act on."""
-    window._on_app_activated(bundle_id)
+    activate(window, bundle_id)
     window._settle_timer.stop()
     window._debounce._since -= w.SETTLE_SECONDS
     window._apply_settled_app()
@@ -1246,7 +1267,7 @@ def test_a_timer_that_fires_early_asks_again_rather_than_dropping_the_move(
     end_a_drag(window, 400, 300)
     window.move(10, 10)
 
-    window._on_app_activated(VSCODE)
+    activate(window, VSCODE)
     window._settle_timer.stop()
     window._apply_settled_app()  # asked immediately: far too early
 
@@ -1320,7 +1341,7 @@ def test_cmd_tabbing_through_apps_does_not_move_the_window(make_window):
     window.move(10, 10)
 
     for app in (VSCODE, SAFARI, "com.apple.Notes", VSCODE):
-        window._on_app_activated(app)
+        activate(window, app)
 
     assert window._move_anim is None
     assert window.pos() == QPoint(10, 10)
@@ -1444,7 +1465,7 @@ def test_our_own_activation_does_not_become_the_frontmost_app(make_window):
     window = remembering(make_window, frontmost_app=VSCODE)
     window._own_bundle_id = "com.lyrisync.lyrisync"
 
-    window._on_app_activated("com.lyrisync.lyrisync")
+    activate(window, "com.lyrisync.lyrisync")
 
     assert window._frontmost == VSCODE
     end_a_drag(window, 300, 200)
@@ -1460,8 +1481,8 @@ def test_our_own_activation_does_not_disturb_an_app_that_is_settling(make_window
     window._positions.remember(SAFARI, 400, 300)
     window.move(10, 10)
 
-    window._on_app_activated(SAFARI)
-    window._on_app_activated("com.lyrisync.lyrisync")
+    activate(window, SAFARI)
+    activate(window, "com.lyrisync.lyrisync")
 
     assert window._debounce.pending == SAFARI
     window._settle_timer.stop()
@@ -1477,16 +1498,17 @@ def test_asking_who_is_in_front_refuses_ourselves(make_window):
     first drag would be refused for a reason the user cannot act on."""
     window = make_window()
     window._own_bundle_id = "com.lyrisync.lyrisync"
-    with patch.object(
-        w.frontmost, "current_bundle_id", return_value="com.lyrisync.lyrisync"
-    ):
+    ourselves = frontmost.AppIdentity("com.lyrisync.lyrisync", "LyriSync")
+    with patch.object(w.frontmost, "current_app", return_value=ourselves):
         window._set_remember_position(True)
     assert window._frontmost is None
 
-    with patch.object(w.frontmost, "current_bundle_id", return_value=VSCODE):
+    with patch.object(
+        w.frontmost, "current_app", return_value=frontmost.AppIdentity(VSCODE, "Code")
+    ):
         window._set_remember_position(False)
         window._set_remember_position(True)
-    assert window._frontmost == VSCODE
+    assert (window._frontmost, window._frontmost_name) == (VSCODE, "Code")
 
 
 def test_the_menu_says_what_has_been_learned_and_where_we_are(make_window):
@@ -1497,12 +1519,36 @@ def test_the_menu_says_what_has_been_learned_and_where_we_are(make_window):
     assert m.POSITION_STATUS in visible_keys(window)
     status = window._menu_actions[m.POSITION_STATUS]
     assert "No positions remembered" in status.text()
-    assert VSCODE in status.text()
+    assert "Code not placed yet" in status.text()
 
     end_a_drag(window, 300, 200)
 
     assert "1 app remembered" in status.text()
-    assert "300, 200" in status.text()
+    assert "Code is placed" in status.text()
+
+
+def test_the_readout_names_an_app_it_only_knows_from_the_map(make_window):
+    """The name is stored beside the position precisely so an app that is
+    not running — and cannot be asked what it is called — is still
+    readable in the menu."""
+    window = remembering(make_window)
+    window._positions.remember(SAFARI, 10, 20, "Safari")
+    window._frontmost, window._frontmost_name = SAFARI, None
+
+    window._refresh_menu()
+
+    assert "Safari is placed" in window._menu_actions[m.POSITION_STATUS].text()
+
+
+def test_the_readout_falls_back_to_the_identifier_with_no_name(make_window):
+    """An app never seen running and never placed has no name anywhere.
+    Its identifier beats a blank."""
+    window = remembering(make_window)
+    window._frontmost, window._frontmost_name = "com.unknown.app", None
+
+    window._refresh_menu()
+
+    assert "com.unknown.app" in window._menu_actions[m.POSITION_STATUS].text()
 
 
 def test_the_readout_is_a_readout_and_not_a_control(make_window):
@@ -1511,29 +1557,34 @@ def test_the_readout_is_a_readout_and_not_a_control(make_window):
 
 
 def test_the_readout_cannot_be_relocated_by_its_own_text(make_window):
-    """The only entry whose text the app does not write: it carries whatever
-    bundle identifier is in front. Qt's default text heuristic matches
-    substrings, so com.apple.systempreferences would move this item into the
-    application menu — a diagnostic that disappears when you go to read it."""
+    """The only entry whose text the app does not write: it carries another
+    app's name — "System Settings" now that names are shown, and the
+    identifier when there is no name. Qt's default text heuristic matches
+    substrings either way, and would move this item into the application
+    menu: a diagnostic that disappears when you go to read it."""
     window = remembering(make_window)
     status = window._menu_actions[m.POSITION_STATUS]
     assert status.menuRole() == QAction.MenuRole.NoRole
 
-    window._frontmost = "com.apple.systempreferences"
-    window._refresh_menu()
-    assert status.menuRole() == QAction.MenuRole.NoRole
-    assert "com.apple.systempreferences" in status.text()
+    for bundle_id, name in (
+        ("com.apple.systempreferences", None),
+        ("com.apple.systempreferences", "System Settings"),
+    ):
+        window._frontmost, window._frontmost_name = bundle_id, name
+        window._refresh_menu()
+        assert status.menuRole() == QAction.MenuRole.NoRole
+        assert (name or bundle_id) in status.text()
 
 
 def test_the_readout_follows_the_frontmost_app(make_window):
     window = remembering(make_window)
     end_a_drag(window, 300, 200)
 
-    window._on_app_activated(SAFARI)
+    activate(window, SAFARI)
     window._refresh_menu()
 
     status = window._menu_actions[m.POSITION_STATUS].text()
-    assert SAFARI in status and "not placed yet" in status
+    assert "Safari not placed yet" in status
     assert "1 app remembered" in status  # what is known has not changed
 
 
@@ -1550,6 +1601,236 @@ def test_reading_the_menu_is_not_using_a_position(make_window):
     window._positions.remember("com.apple.Notes", 3, 3)
 
     assert window._positions.peek(VSCODE) is None  # still the oldest
+
+
+def test_the_learned_name_reaches_the_map(make_window):
+    """Learned from the activation that brought the app forward, so the map
+    can name it long after it has quit."""
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    assert window._positions.name_for(VSCODE) == "Code"
+    assert '"Code"' in window._settings.value("window/app_positions")
+
+
+# -- the list of remembered apps ------------------------------------------
+
+
+def listed_apps(window):
+    """The app rows, without the hint that explains what clicking does."""
+    return [
+        action.text()
+        for action in window._positions_menu.actions()
+        if action.isEnabled() and not action.isSeparator()
+    ]
+
+
+def test_the_remembered_apps_menu_lists_them_by_name(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    window._frontmost, window._frontmost_name = SAFARI, "Safari"
+    end_a_drag(window, 40, 60)
+
+    window._rebuild_positions_menu()
+
+    assert listed_apps(window) == ["Safari", "Code"]  # most recently used first
+
+
+def test_the_remembered_apps_menu_is_rebuilt_from_the_map(make_window):
+    """The entries ARE the map, and the map changes without the menu being
+    involved — so it is assembled on opening rather than kept in step. That
+    is also why it is the one menu here whose contents are rebuilt at all."""
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    window._rebuild_positions_menu()
+    assert listed_apps(window) == ["Code"]
+
+    window._positions.forget_all()
+    window._rebuild_positions_menu()
+
+    assert listed_apps(window) == []
+
+
+def test_clicking_a_remembered_app_forgets_only_that_one(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    window._frontmost, window._frontmost_name = SAFARI, "Safari"
+    end_a_drag(window, 40, 60)
+    window._rebuild_positions_menu()
+
+    safari = next(
+        a for a in window._positions_menu.actions() if a.text() == "Safari"
+    )
+    safari.trigger()
+
+    assert window._positions.peek(SAFARI) is None
+    assert window._positions.peek(VSCODE) == (300, 200)
+    assert window._settings.value("window/app_positions") == window._positions.to_json()
+
+
+def test_forgetting_the_last_app_takes_the_list_away_with_it(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    assert m.POSITION_LIST in visible_keys(window)
+
+    window._rebuild_positions_menu()
+    next(a for a in window._positions_menu.actions() if a.text() == "Code").trigger()
+
+    assert m.POSITION_LIST not in visible_keys(window)
+    assert m.FORGET_POSITIONS not in visible_keys(window)
+
+
+def test_an_app_with_no_icon_is_still_listed(make_window):
+    """Off macOS there are no icons at all, and on it an app can have been
+    uninstalled since. A name with no face still reads."""
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+
+    window._rebuild_positions_menu()
+
+    entry = next(a for a in window._positions_menu.actions() if a.text() == "Code")
+    assert entry.icon().isNull()  # the offscreen platform has no AppKit
+
+
+def test_the_readout_asks_for_an_icon_only_when_the_app_changes(make_window):
+    """_refresh_menu runs on every render — three times a second — and
+    drawing an icon is two calls into AppKit."""
+    window = remembering(make_window)
+    asked = []
+
+    with patch.object(w, "_MENU_ICON_POINTS", 16), patch.object(
+        window, "_app_icon", side_effect=lambda key: asked.append(key)
+    ):
+        window._refresh_menu()
+        window._refresh_menu()
+        window._refresh_menu()
+        assert asked == [VSCODE]
+
+        activate(window, SAFARI)
+        window._refresh_menu()
+        window._refresh_menu()
+        assert asked == [VSCODE, SAFARI]
+
+
+# -- the acknowledgement ---------------------------------------------------
+
+
+def finish_glow(window):
+    """Run the acknowledgement to its end without waiting it out."""
+    if window._glow_anim is not None:
+        window._glow_anim.setCurrentTime(window._glow_anim.duration())
+    APP.processEvents()
+
+
+def test_a_learned_position_is_acknowledged_on_the_window(make_window):
+    """The gesture ends in silence otherwise, which is this feature's
+    oldest problem restated: nothing on screen distinguishes a drag that
+    was learned from a drag that was not."""
+    window = remembering(make_window)
+    assert window._glow == 0.0
+
+    end_a_drag(window, 300, 200)
+
+    assert window._glow_anim is not None
+    window._glow_anim.setCurrentTime(window._glow_anim.duration() // 2)
+    APP.processEvents()
+    assert window._glow > 0.0
+
+
+def test_nothing_is_acknowledged_when_nothing_was_learned(make_window):
+    """A refused drag must look like a refused drag. The glow says "that
+    counted", so it may only appear where something was recorded."""
+    window = make_window()  # the layer is off
+    window.show()
+    window._frontmost = VSCODE
+    end_a_drag(window, 300, 200)
+    assert window._glow_anim is None
+    assert window._glow == 0.0
+
+
+def test_the_edge_is_handed_back_exactly(make_window):
+    """Borrowed, not taken. The album's own edge before and after, to the
+    channel, with a cover in hand so there is something to give back."""
+    window = remembering(make_window)
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+    window._on_artwork_ready("t1", RED_COVER)
+    settle_tint(window)
+    before = window._painted_border()
+    assert before == ap.tinted(ap.DARK, RED_COVER, ap.Appearance.DARK).border
+
+    end_a_drag(window, 300, 200)
+    # Halfway, because the shape starts and ends at nothing: at the moment
+    # the drag lands there is deliberately no glow yet to see.
+    window._glow_anim.setCurrentTime(window._glow_anim.duration() // 2)
+    APP.processEvents()
+    assert window._painted_border() != before  # borrowed
+    finish_glow(window)
+
+    assert window._painted_border() == before  # and returned
+    assert window._glow == 0.0
+    assert window._current_border() == before  # never written into the tint
+
+
+def test_a_cover_arriving_mid_glow_is_not_captured_with_the_glow_in_it(make_window):
+    """The reason the glow is a paint-time mix and not part of the tint
+    state: a cross-fade beginning mid-acknowledgement would otherwise take
+    a warmed edge as its start and keep some of it for good."""
+    window = remembering(make_window)
+    window._set_album_colour(True)
+    window._on_track_change(art_snapshot())
+
+    end_a_drag(window, 300, 200)
+    window._glow_anim.setCurrentTime(window._glow_anim.duration() // 2)
+    APP.processEvents()
+    window._on_artwork_ready("t1", RED_COVER)  # a cover lands mid-glow
+    settle_tint(window)
+    finish_glow(window)
+
+    assert window._painted_border() == ap.tinted(
+        ap.DARK, RED_COVER, ap.Appearance.DARK
+    ).border
+
+
+def test_the_glow_does_not_fire_twice_for_one_gesture(make_window):
+    """One drag is one thing the user did. A second glow starting inside
+    the first would read as a flicker rather than as two answers — and a
+    release delivered twice is the same case."""
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    first = window._glow_anim
+
+    window._learn_position()  # as a second release would
+    window._learn_position()
+
+    assert window._glow_anim is first
+
+
+def test_a_later_drag_is_acknowledged_again(make_window):
+    window = remembering(make_window)
+    end_a_drag(window, 300, 200)
+    finish_glow(window)
+    window._glow_at -= w.GLOW_SECONDS  # as the clock would have moved on
+
+    end_a_drag(window, 120, 90)
+
+    assert window._glow_anim is not None
+
+
+def test_the_acknowledgement_leaves_the_line_transition_alone(make_window):
+    """Different surfaces, different animations: the glow is a colour on
+    the hairline, the line change is an effect on the text. Neither may
+    stop the other."""
+    window = remembering(make_window)
+    load(window, SYNCED, track_id="t9")
+    window._on_position_update(snapshot(position=0.0, track_id="t9"))
+    fx_before = window._current_fx.progress
+
+    end_a_drag(window, 300, 200)
+    window._glow_anim.setCurrentTime(window._glow_anim.duration() // 2)
+    APP.processEvents()
+
+    assert window._current_fx.progress == fx_before
+    assert window._glow > 0.0
 
 
 def test_the_readout_goes_with_the_layer(make_window):

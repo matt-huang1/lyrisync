@@ -19,6 +19,7 @@ ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
 REMEMBER_POSITION = "remember_position"
 POSITION_STATUS = "position_status"
+POSITION_LIST = "position_list"
 FORGET_POSITIONS = "forget_positions"
 OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
@@ -39,6 +40,7 @@ MENU_ORDER = (
     ALL_DESKTOPS,
     REMEMBER_POSITION,
     POSITION_STATUS,
+    POSITION_LIST,
     FORGET_POSITIONS,
     OPEN_AT_LOGIN,
     SYNC,
@@ -91,10 +93,12 @@ def visible_entries(
     at login when the app is running from a source checkout, so offering
     the switch there would be offering something that cannot work.
 
-    Forgetting learned positions appears once there is something to
-    forget, and disappears again the moment there is not — including when
-    the layer itself is switched off, because a bad map should be
-    clearable without turning the feature back on first.
+    The list of remembered apps and the entry that forgets all of them
+    both appear once there is something to forget, and disappear again the
+    moment there is not — including when the layer itself is switched off,
+    because a bad map should be clearable without turning the feature back
+    on first. They follow the map for the same reason: a list of nothing
+    and a way to clear nothing are both entries that cannot act.
 
     The position readout is shown only while the layer is ON, and unlike
     every other entry here that is not about whether it could act. It is
@@ -115,7 +119,7 @@ def visible_entries(
     if login_item_offered:
         shown.add(OPEN_AT_LOGIN)
     if positions_remembered:
-        shown.add(FORGET_POSITIONS)
+        shown.update((POSITION_LIST, FORGET_POSITIONS))
     if remembering_positions:
         shown.add(POSITION_STATUS)
     return _with_separators(shown)

@@ -141,6 +141,31 @@ def symbol_icon(
     return icon
 
 
+def icon_from_tiff(data: bytes, points: int) -> Optional[QIcon]:
+    """An icon decoded from TIFF bytes, labelled with the scale it came at.
+
+    For application icons, which arrive from ``frontmost.app_icon_tiff``
+    as bytes rather than as an NSImage — nothing pyobjc-shaped crosses out
+    of that module, so this end needs no AppKit and the test suite can
+    hand over a file's worth of bytes.
+
+    Not a template image, unlike everything else here: an app's icon is
+    its own artwork and colouring it would be defacing somebody's brand.
+    The device pixel ratio is derived from what actually decoded rather
+    than from the screen — the drawing was done by macOS at whatever scale
+    it chose, and dividing pixels by points is what that scale IS.
+    """
+    if not data or points <= 0:
+        return None
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(data):
+        logger.debug("an application icon did not decode")
+        return None
+    ratio = max(1.0, pixmap.width() / points)
+    pixmap.setDevicePixelRatio(ratio)
+    return QIcon(pixmap)
+
+
 def icon_size(button_side: int) -> QSize:
     """Glyph box inside a button box, leaving the padding the hover
     highlight needs to read as a rounded square around it."""

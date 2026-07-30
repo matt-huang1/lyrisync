@@ -10,13 +10,18 @@ import pytest
 
 from lyrisync.app_positions import (
     ARRIVAL,
+    GLOW_PEAK,
+    GLOW_SECONDS,
     MAX_ENTRIES,
     REPEAT,
     SETTLE_SECONDS,
     UNKEYABLE,
     ActivationDebounce,
     AppPositions,
+    display_label,
+    glow_intensity,
     learn_refusal,
+    may_acknowledge,
     may_learn,
     may_move,
     move_refusal,
@@ -188,6 +193,90 @@ def test_booleans_are_not_coordinates():
     """JSON true/false decode to Python ints, so a sloppy check would
     accept [id, true, false] as the point (1, 0)."""
     assert len(AppPositions.from_json('[["app", true, false]]')) == 0
+
+
+def test_a_name_is_stored_beside_the_position():
+    """The map outlives the sessions that taught it: an app that is not
+    running cannot be asked its name, and a list of bundle identifiers is
+    a list nobody can read."""
+    positions = AppPositions()
+    positions.remember(VSCODE, 120, 340, "Code")
+    assert positions.name_for(VSCODE) == "Code"
+
+    restored = AppPositions.from_json(positions.to_json())
+    assert restored.name_for(VSCODE) == "Code"
+    assert restored.recall(VSCODE) == (120, 340)
+
+
+def test_re_placing_an_app_without_a_name_keeps_the_one_it_had():
+    """Not knowing what an app is called this time is not evidence that
+    the name learned last time was wrong."""
+    positions = AppPositions()
+    positions.remember(VSCODE, 1, 1, "Code")
+    positions.remember(VSCODE, 2, 2, None)
+    assert positions.name_for(VSCODE) == "Code"
+    assert positions.recall(VSCODE) == (2, 2)
+
+
+def test_a_new_name_replaces_the_old_one():
+    """Apps are renamed and localisations change; the last one seen wins."""
+    positions = AppPositions()
+    positions.remember(VSCODE, 1, 1, "Code")
+    positions.remember(VSCODE, 1, 1, "Visual Studio Code")
+    assert positions.name_for(VSCODE) == "Visual Studio Code"
+
+
+def test_an_app_with_no_name_has_none_rather_than_an_empty_string():
+    positions = AppPositions()
+    positions.remember(VSCODE, 1, 1, "")
+    assert positions.name_for(VSCODE) is None
+    assert positions.name_for("never.seen") is None
+    assert positions.name_for(None) is None
+
+
+def test_a_map_saved_before_names_existed_still_loads():
+    """Milestone 14 wrote three fields. Refusing that shape would cost the
+    user every position they had, to gain a label."""
+    positions = AppPositions.from_json('[["com.apple.Safari", 12, 34]]')
+    assert positions.recall(SAFARI) == (12, 34)
+    assert positions.name_for(SAFARI) is None
+
+
+def test_a_stored_name_that_is_not_a_name_costs_only_its_own_entry():
+    raw = '[["a", 1, 2, "Fine"], ["b", 3, 4, 99], ["c", 5, 6, null]]'
+    positions = AppPositions.from_json(raw)
+    assert positions.bundle_ids == ("a", "c")
+    assert positions.name_for("a") == "Fine"
+    assert positions.name_for("c") is None
+
+
+def test_the_list_reads_most_recent_first():
+    """The order a list should read in, and the reverse of the order things
+    are evicted in."""
+    positions = AppPositions()
+    positions.remember(VSCODE, 1, 1, "Code")
+    positions.remember(SAFARI, 2, 2, "Safari")
+    positions.remember(NOTES, 3, 3, None)
+
+    assert positions.listed() == (
+        (NOTES, None),
+        (SAFARI, "Safari"),
+        (VSCODE, "Code"),
+    )
+
+
+def test_the_list_is_empty_with_nothing_learned():
+    assert AppPositions().listed() == ()
+
+
+def test_forgetting_one_app_leaves_the_rest():
+    positions = AppPositions()
+    positions.remember(VSCODE, 1, 1, "Code")
+    positions.remember(SAFARI, 2, 2, "Safari")
+
+    assert positions.forget(VSCODE) is True
+    assert positions.forget(VSCODE) is False  # already gone
+    assert positions.listed() == ((SAFARI, "Safari"),)
 
 
 def test_the_stored_cap_is_applied_on_load():
@@ -467,31 +556,63 @@ def test_the_summary_names_the_count_and_the_app_in_front():
     """Both halves, because there are two ways to doubt an implicit
     feature: whether anything has been learned at all, and whether THIS
     app — the one a drag would record against — is one of them."""
-    summary = status_summary(count=3, frontmost=SAFARI, position=(120, 340))
+    summary = status_summary(
+        count=3, frontmost=SAFARI, frontmost_name="Safari", placed=True
+    )
     assert "3 apps remembered" in summary
-    assert SAFARI in summary
-    assert "120, 340" in summary
+    assert "Safari is placed" in summary
 
 
 def test_the_summary_says_when_the_app_in_front_has_no_position():
-    summary = status_summary(count=3, frontmost=SAFARI, position=None)
+    summary = status_summary(
+        count=3, frontmost=SAFARI, frontmost_name="Safari", placed=False
+    )
     assert "3 apps remembered" in summary
-    assert SAFARI in summary
-    assert "340" not in summary
+    assert "Safari not placed yet" in summary
+
+
+def test_the_summary_carries_no_coordinates():
+    """They answered a question nobody asks of a menu: a number pair cannot
+    be checked by eye, and the window is already sitting at it. They stay in
+    the DEBUG log, where a reader is comparing them with something."""
+    summary = status_summary(
+        count=1, frontmost=SAFARI, frontmost_name="Safari", placed=True
+    )
+    assert not any(character.isdigit() for character in summary.split("·")[1])
+
+
+def test_the_summary_uses_the_name_a_person_would_use():
+    """The identifier was the first answer and it was the wrong one:
+    precision is what the log is for, and com.microsoft.VSCode makes a
+    reader translate before they can answer the question they came with."""
+    summary = status_summary(
+        count=1, frontmost=VSCODE, frontmost_name="Code", placed=True
+    )
+    assert "Code is placed" in summary
+    assert VSCODE not in summary
+
+
+def test_the_summary_falls_back_to_the_identifier_with_no_name():
+    """An app never seen running has no name to show, and its identifier
+    beats a blank."""
+    summary = status_summary(count=1, frontmost=VSCODE, frontmost_name=None, placed=True)
+    assert VSCODE in summary
 
 
 def test_an_empty_map_is_said_out_loud():
     """The state a user cannot tell from a broken feature, so it is the one
     that most needs words. Still names the app in front: that is the app
     the next drag would record against."""
-    summary = status_summary(count=0, frontmost=SAFARI, position=None)
+    summary = status_summary(
+        count=0, frontmost=SAFARI, frontmost_name="Safari", placed=False
+    )
     assert "No positions remembered" in summary
-    assert SAFARI in summary
+    assert "Safari" in summary
 
 
 def test_one_app_is_not_one_apps():
     assert "1 app remembered" in status_summary(
-        count=1, frontmost=SAFARI, position=(0, 0)
+        count=1, frontmost=SAFARI, frontmost_name="Safari", placed=True
     )
 
 
@@ -499,7 +620,7 @@ def test_the_summary_admits_when_it_does_not_know_what_is_in_front():
     """Off macOS, or before any activation has been announced. Saying so
     beats a blank half-sentence."""
     for absent in (None, ""):
-        summary = status_summary(count=2, frontmost=absent, position=None)
+        summary = status_summary(count=2, frontmost=absent, placed=False)
         assert "2 apps remembered" in summary
         assert "unknown" in summary
 
@@ -507,8 +628,81 @@ def test_the_summary_admits_when_it_does_not_know_what_is_in_front():
 def test_the_summary_is_one_line_whatever_it_says():
     """It is a menu entry. A second line would be shown as a box glyph."""
     for state in (
-        dict(count=0, frontmost=None, position=None),
-        dict(count=1, frontmost=SAFARI, position=None),
-        dict(count=50, frontmost=VSCODE, position=(-40, 900)),
+        dict(count=0, frontmost=None, placed=False),
+        dict(count=1, frontmost=SAFARI, frontmost_name="Safari", placed=False),
+        dict(count=50, frontmost=VSCODE, placed=True),
     ):
         assert "\n" not in status_summary(**state)
+
+
+# -- what an app is called -------------------------------------------------
+
+
+def test_an_app_is_labelled_by_its_name():
+    assert display_label(VSCODE, "Code") == "Code"
+
+
+def test_an_app_with_no_name_is_labelled_by_its_identifier():
+    """The old behaviour, kept exactly, for an app never seen running."""
+    assert display_label(VSCODE, None) == VSCODE
+    assert display_label(VSCODE, "") == VSCODE
+
+
+def test_an_app_with_neither_is_labelled_with_nothing_rather_than_None():
+    assert display_label(None, None) == ""
+
+
+# -- the acknowledgement ---------------------------------------------------
+
+
+def test_the_glow_starts_and_ends_at_nothing():
+    """So the hairline leaves and returns to exactly the album's own colour,
+    with no step at either boundary — borrowed, not taken."""
+    assert glow_intensity(0.0) == 0.0
+    assert glow_intensity(1.0) == 0.0
+    assert glow_intensity(-0.5) == 0.0
+    assert glow_intensity(2.0) == 0.0
+
+
+def test_the_glow_rises_and_falls_within_one_property():
+    """One property with the whole shape in it, like the line change's
+    signed progress, rather than two animations handing over."""
+    rising = [glow_intensity(phase / 10) for phase in range(1, 6)]
+    falling = [glow_intensity(phase / 10) for phase in range(5, 10)]
+    assert rising == sorted(rising)
+    assert falling == sorted(falling, reverse=True)
+    assert glow_intensity(0.5) == pytest.approx(GLOW_PEAK)
+
+
+def test_the_glow_never_replaces_the_edge_entirely():
+    """An acknowledgement, not an alert: the hairline should look briefly
+    warmer, not briefly gone."""
+    peak = max(glow_intensity(phase / 100) for phase in range(101))
+    assert 0.0 < peak < 1.0
+
+
+def test_the_first_acknowledgement_is_always_allowed():
+    assert may_acknowledge(now=100.0, last=None)
+
+
+def test_a_second_acknowledgement_inside_the_first_is_refused():
+    """One per gesture. A glow starting inside a glow reads as a flicker
+    rather than as two answers — and it is what makes a release delivered
+    twice harmless."""
+    assert not may_acknowledge(now=100.0, last=100.0)
+    assert not may_acknowledge(now=100.0 + GLOW_SECONDS / 2, last=100.0)
+
+
+def test_a_later_drag_is_acknowledged_again():
+    """A hair past the gap rather than exactly on it: 100.0 + 0.52 - 100.0
+    is 0.519999999999996 in binary floating point, so an exact-boundary
+    assertion would be testing the arithmetic rather than the rule. Two
+    monotonic clock readings never land on it either."""
+    assert may_acknowledge(now=100.0 + GLOW_SECONDS + 0.001, last=100.0)
+    assert may_acknowledge(now=200.0, last=100.0)
+
+
+def test_the_acknowledgement_is_brief():
+    """Short and quiet: the window is ambient, and this is a confirmation
+    rather than an event."""
+    assert 0.2 <= GLOW_SECONDS <= 1.0

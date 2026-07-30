@@ -66,8 +66,12 @@ from lyrisync import appearance
 from lyrisync.app_positions import (
     ActivationDebounce,
     AppPositions,
+    GLOW_SECONDS,
     SETTLE_SECONDS,
+    display_label,
+    glow_intensity,
     learn_refusal,
+    may_acknowledge,
     move_refusal,
     status_summary,
 )
@@ -101,6 +105,7 @@ from lyrisync.menu import (
     ECHO,
     FORGET_POSITIONS,
     OPEN_AT_LOGIN,
+    POSITION_LIST,
     POSITION_STATUS,
     QUIT,
     REMEMBER_POSITION,
@@ -132,6 +137,7 @@ from lyrisync.speech import (
     speak_korean,
 )
 from lyrisync.sync_session import interpolated_position
+from lyrisync import symbols
 from lyrisync.symbols import (
     SPEAK_FALLBACK_GLYPH,
     SPEAK_SYMBOL,
@@ -238,6 +244,12 @@ _TINT_FADE_MS = 600
 # arrives in the same gesture, so both ends are eased.
 _MOVE_MS = _FADE_MS
 _MOVE_CURVE = QEasingCurve.Type.InOutSine
+
+# How big an application icon is drawn for the menu. macOS puts 16-point
+# icons beside menu items; this is asked for in points and comes back at
+# the screen's own scale, so a Retina menu gets a 32-pixel icon rather than
+# a 16-pixel one stretched.
+_MENU_ICON_POINTS = 16
 
 # How long shutdown waits for the monitor thread and then for the worker
 # pool. Long enough for a poll to finish its osascript (2s timeout) or a
@@ -671,6 +683,18 @@ class LyricsWindow(QWidget):
         self._positions = AppPositions()
         self._debounce = ActivationDebounce(SETTLE_SECONDS)
         self._frontmost: Optional[str] = None
+        # What that app is called, taken from the same announcement as its
+        # identifier. The map keeps its own copy for apps that are not
+        # running; this is the one for the app in front right now.
+        self._frontmost_name: Optional[str] = None
+        # The acknowledgement: how much of the warm colour the hairline is
+        # carrying, and when the last one started (one per gesture).
+        self._glow = 0.0
+        self._glow_anim: Optional[QVariantAnimation] = None
+        self._glow_at: Optional[float] = None
+        # Which app the readout is showing an icon for, so a menu refresh
+        # on every render does not redraw one three times a second.
+        self._readout_icon_for: Optional[str] = None
         self._own_bundle_id = frontmost.own_bundle_id()
         self._watcher = frontmost.FrontmostWatcher(self._on_app_activated)
         self._move_anim: Optional[QPropertyAnimation] = None
@@ -1531,9 +1555,32 @@ class LyricsWindow(QWidget):
         return appearance.blend(self._tint_from, self._tint_to, self._tint_mix)
 
     def _current_border(self) -> appearance.RGBA:
-        """The hairline on screen right now — the same mix, so the edge and
-        the panel arrive together."""
+        """The hairline the album has asked for — the same mix as the
+        panel, so the edge and the panel arrive together.
+
+        Deliberately without the acknowledgement glow. This is what the
+        tint cross-fade starts and ends on, and a glow folded in here
+        would be captured as ``_border_from`` by any fade that began mid-
+        acknowledgement and stay in the edge for good. Borrowed is not the
+        same as taken.
+        """
         return appearance.blend(self._border_from, self._border_to, self._tint_mix)
+
+    def _painted_border(self) -> appearance.RGBA:
+        """What the hairline actually is this frame: the album's edge, warmed
+        by however much of the acknowledgement is showing.
+
+        The glow lives here and nowhere else — one mix applied at the last
+        moment, over whatever the tint currently says. That is what lets a
+        cover arriving mid-glow cross-fade underneath it without either
+        animation knowing about the other, and what makes handing the edge
+        back a matter of the mix reaching zero rather than of restoring a
+        remembered value.
+        """
+        edge = self._current_border()
+        if self._glow <= 0.0:
+            return edge
+        return appearance.blend(edge, self._palette.learned_glow, self._glow)
 
     def _set_tint(self, tint_rgb, animate: bool = True) -> None:
         """Cross-fade the panel and its edge to a new cover colour.
@@ -1650,7 +1697,7 @@ class LyricsWindow(QWidget):
 
         width = 1.0 / max(1.0, self.devicePixelRatioF())
         inset = width / 2
-        pen = QPen(_qcolor(self._current_border()))
+        pen = QPen(_qcolor(self._painted_border()))
         pen.setWidthF(width)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1907,7 +1954,7 @@ class LyricsWindow(QWidget):
         self._remember_position = enabled
         self._settings.setValue("window/remember_position", enabled)
         if enabled:
-            self._frontmost = self._read_frontmost()
+            self._read_frontmost()
             started = self._watcher.start()
             logger.info(
                 "per-app positions on: frontmost=%s watching=%s remembered=%d own=%s",
@@ -1924,22 +1971,24 @@ class LyricsWindow(QWidget):
             self._stop_move()
         self._refresh_menu()
 
-    def _read_frontmost(self) -> Optional[str]:
+    def _read_frontmost(self) -> None:
         """Ask macOS which app is in front, refusing ourselves.
 
         The same rule as the activation handler, at the other door. Asking
         while LyriSync happens to be frontmost — the layer switched on from
         a menu opened over our own window — would seed the frontmost app as
         us, and the first drag would be refused for a reason the user could
-        not act on. None is the honest answer: unknown until the next
+        not act on. Unknown is the honest answer: unknown until the next
         activation says otherwise, which the readout shows as much.
         """
-        bundle_id = frontmost.current_bundle_id()
+        identity = frontmost.current_app()
         ours = self._own_bundle_id
-        if bundle_id and ours is not None and bundle_id == ours:
-            logger.debug("frontmost app is us — treating it as unknown for now")
-            return None
-        return bundle_id
+        if identity is None or (ours is not None and identity.bundle_id == ours):
+            if identity is not None:
+                logger.debug("frontmost app is us — treating it as unknown for now")
+            self._frontmost, self._frontmost_name = None, None
+            return
+        self._frontmost, self._frontmost_name = identity.bundle_id, identity.name
 
     def _forget_positions(self) -> None:
         """Throw the whole map away. No confirmation: every entry costs one
@@ -1950,7 +1999,61 @@ class LyricsWindow(QWidget):
         logger.info("forgot every remembered window position")
         self._refresh_menu()
 
-    def _on_app_activated(self, bundle_id: str) -> None:
+    def _forget_one_position(self, bundle_id: str) -> None:
+        """Forget a single app, from the list of them. No confirmation for
+        the same reason forget-all needs none — and less: this one costs a
+        single drag in a single app to undo."""
+        if self._positions.forget(bundle_id):
+            self._settings.setValue("window/app_positions", self._positions.to_json())
+            logger.info("forgot the remembered position for %s", bundle_id)
+        self._refresh_menu()
+
+    def _rebuild_positions_menu(self) -> None:
+        """Fill the submenu with what is remembered, most recent first.
+
+        Rebuilt on opening rather than kept in step, because the entries
+        ARE the map and the map changes without the menu being involved.
+        Each row is the app's own icon and name, and clicking it forgets
+        that app: a list of things you cannot act on would be a worse
+        answer than the count already gives.
+        """
+        self._positions_menu.clear()
+        listed = self._positions.listed()
+        # A disabled entry rather than addSection: a section's TEXT is not
+        # drawn on macOS — measured, by opening this menu and finding four
+        # apps and no heading — so it would have been an instruction that
+        # existed only in the source. First, because it explains the list
+        # before the click rather than after it.
+        hint = self._positions_menu.addAction("Click an app to forget it")
+        hint.setEnabled(False)
+        hint.setMenuRole(QAction.MenuRole.NoRole)
+        for bundle_id, name in listed:
+            entry = self._positions_menu.addAction(display_label(bundle_id, name))
+            icon = self._app_icon(bundle_id)
+            if icon is not None:
+                entry.setIcon(icon)
+            entry.setMenuRole(QAction.MenuRole.NoRole)  # the text is not ours
+            entry.setToolTip(bundle_id)  # the identifier, for anyone who wants it
+            entry.triggered.connect(
+                lambda checked=False, key=bundle_id: self._forget_one_position(key)
+            )
+        logger.debug("remembered-apps menu rebuilt with %d entries", len(listed))
+
+    def _app_icon(self, bundle_id: Optional[str]):
+        """The app's icon as a QIcon, or None where there is not one.
+
+        Two calls deep into AppKit, so it is never asked for on a path that
+        runs often: the submenu asks on opening, and the readout asks only
+        when the app in front changes.
+        """
+        if not bundle_id:
+            return None
+        data = frontmost.app_icon_tiff(bundle_id, _MENU_ICON_POINTS)
+        if not data:
+            return None
+        return symbols.icon_from_tiff(data, _MENU_ICON_POINTS)
+
+    def _on_app_activated(self, identity) -> None:
         """An app came to the front. Runs on the main thread — NSWorkspace
         posts there and the block is delivered on the posting thread — so
         this is an ordinary UI call, same as the hotkey's.
@@ -1966,6 +2069,7 @@ class LyricsWindow(QWidget):
         user would see nothing being learned for no visible reason. What
         the window follows is the last app that was not us.
         """
+        bundle_id = identity.bundle_id
         if not self._remember_position:
             logger.debug("activation: %s ignored, the layer is off", bundle_id)
             return
@@ -1976,9 +2080,9 @@ class LyricsWindow(QWidget):
                 self._frontmost,
             )
             return
-        self._frontmost = bundle_id
+        self._frontmost, self._frontmost_name = bundle_id, identity.name
         outcome = self._debounce.observe(bundle_id, time.monotonic())
-        logger.debug("activation: %s (%s)", bundle_id, outcome)
+        logger.debug("activation: %s (%s) [%s]", bundle_id, identity.name, outcome)
         self._settle_timer.start(int(SETTLE_SECONDS * 1000))
 
     def _apply_settled_app(self) -> None:
@@ -2089,16 +2193,71 @@ class LyricsWindow(QWidget):
             logger.debug("learn: nothing recorded, %s", refusal)
             return
         position = self.pos()
-        self._positions.remember(self._frontmost, position.x(), position.y())
+        self._positions.remember(
+            self._frontmost, position.x(), position.y(), self._frontmost_name
+        )
         self._settings.setValue("window/app_positions", self._positions.to_json())
         logger.debug(
-            "learn: %d, %d recorded for %s (%d apps remembered)",
+            "learn: %d, %d recorded for %s (%s) (%d apps remembered)",
             position.x(),
             position.y(),
             self._frontmost,
+            self._frontmost_name,
             len(self._positions),
         )
+        self._acknowledge_learned()
         self._refresh_menu()  # the forget entry appears with the first entry
+
+    # -- the acknowledgement ----------------------------------------------
+
+    def _acknowledge_learned(self) -> None:
+        """Say, on the window, that a position was just recorded.
+
+        The gesture is a drag and it ends in silence, which is this
+        feature's oldest problem restated: nothing on screen distinguishes
+        a drag that was learned from a drag that was not. So the hairline
+        warms for half a second and goes back.
+
+        One per gesture. A second glow starting inside the first would
+        read as a flicker rather than as two answers, and it is also what
+        makes a release delivered twice harmless.
+        """
+        now = time.monotonic()
+        if not may_acknowledge(now=now, last=self._glow_at):
+            logger.debug("acknowledgement: still glowing, not restarting")
+            return
+        self._glow_at = now
+        if self._glow_anim is not None:
+            self._glow_anim.stop()
+        animation = QVariantAnimation(self)
+        animation.setDuration(int(GLOW_SECONDS * 1000))
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.valueChanged.connect(self._on_glow_step)
+        animation.finished.connect(self._end_glow)
+        animation.start()
+        self._glow_anim = animation
+        logger.debug("acknowledgement: hairline glow for %.0fms", GLOW_SECONDS * 1000)
+
+    def _on_glow_step(self, value) -> None:
+        """The phase runs 0 to 1; the intensity rises and falls within it.
+
+        One property with the whole shape in it, rather than two animations
+        handing over — the same reasoning as the line change's signed
+        ``progress``, and it is what guarantees the edge starts and ends at
+        exactly the tint's own colour.
+        """
+        self._glow = glow_intensity(float(value))
+        self.update()
+
+    def _end_glow(self) -> None:
+        """Hand the edge back, exactly. The glow is a mix applied at paint
+        time and never written into the tint state, so returning it is
+        setting one float to zero — there is nothing to restore because
+        nothing was taken."""
+        self._glow = 0.0
+        self._glow_anim = None
+        self.update()
 
     def wheelEvent(self, event) -> None:
         """Wheel over the window chrome (margins, header, synced lines).
@@ -2219,6 +2378,18 @@ class LyricsWindow(QWidget):
         position_status.setMenuRole(QAction.MenuRole.NoRole)
         actions[POSITION_STATUS] = position_status
 
+        # The one menu whose CONTENTS are rebuilt rather than only
+        # relabelled. Everything else here is a fixed set of entries whose
+        # visibility changes, because rebuilding the menu bar item's own
+        # structure makes it flicker — but a list of what has been learned
+        # cannot be a fixed set, and this one is assembled only while the
+        # user is looking at this submenu, never while the menu bar item is
+        # idle. Its own aboutToShow, so opening the parent menu costs
+        # nothing.
+        self._positions_menu = self._menu.addMenu("Remembered apps")
+        self._positions_menu.aboutToShow.connect(self._rebuild_positions_menu)
+        actions[POSITION_LIST] = self._positions_menu.menuAction()
+
         # Appears only once something has been learned (see menu.py).
         forget_positions = self._menu.addAction("Forget remembered positions")
         forget_positions.triggered.connect(self._forget_positions)
@@ -2246,6 +2417,35 @@ class LyricsWindow(QWidget):
         self._menu.aboutToShow.connect(self._reread_login_item)
         self._menu.aboutToShow.connect(self._refresh_menu)
 
+    def _refresh_position_readout(self) -> None:
+        """The line that says what the layer knows, and the icon beside it.
+
+        The name comes from the activation that brought this app forward,
+        falling back to the one the map learned when it was last placed —
+        which is what lets an app that has since quit still be named — and
+        to the identifier when neither exists.
+
+        ``peek``, not ``recall``: a glance at the menu is not evidence the
+        user still switches to that app, and letting it refresh recency
+        would make the eviction order describe where they have been
+        looking. The icon is fetched only when the app in front changes,
+        because this runs on every render and drawing one is two calls into
+        AppKit.
+        """
+        action = self._menu_actions[POSITION_STATUS]
+        name = self._frontmost_name or self._positions.name_for(self._frontmost)
+        action.setText(
+            status_summary(
+                count=len(self._positions),
+                frontmost=self._frontmost,
+                frontmost_name=name,
+                placed=self._positions.peek(self._frontmost) is not None,
+            )
+        )
+        if self._frontmost != self._readout_icon_for:
+            self._readout_icon_for = self._frontmost
+            action.setIcon(self._app_icon(self._frontmost) or QIcon())
+
     def _refresh_menu(self) -> None:
         """Bring the shared menu in line with the current state. Cheap
         enough to run on every render, so the menu bar item is already
@@ -2270,16 +2470,7 @@ class LyricsWindow(QWidget):
             action.setVisible(key in visible)
         if sync_label is not None:
             self._menu_actions[SYNC].setText(sync_label)
-        # peek, not recall: a glance at the menu is not evidence the user
-        # still switches to that app, and letting it refresh recency would
-        # make the eviction order describe where they have been looking.
-        self._menu_actions[POSITION_STATUS].setText(
-            status_summary(
-                count=len(self._positions),
-                frontmost=self._frontmost,
-                position=self._positions.peek(self._frontmost),
-            )
-        )
+        self._refresh_position_readout()
         self._menu_actions[SHOW_LYRICS].setChecked(self._lyrics_visible)
         self._menu_actions[ROMANISATION].setChecked(
             self._view_model.romanisation_enabled
@@ -2724,7 +2915,7 @@ class LyricsWindow(QWidget):
             "window/remember_position", False, type=bool
         )
         if self._remember_position:
-            self._frontmost = self._read_frontmost()
+            self._read_frontmost()
             started = self._watcher.start()
             logger.info(
                 "per-app positions restored on: frontmost=%s watching=%s "

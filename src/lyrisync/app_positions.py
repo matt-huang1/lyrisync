@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections import OrderedDict
-from typing import Iterable, Optional
+from typing import NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,23 @@ UNKEYABLE = "unkeyable"  # nothing to key on, so nothing to settle
 SETTLE_SECONDS = 0.4
 
 
+class Placement(NamedTuple):
+    """Where the window goes for an app, and what that app is called.
+
+    The name is carried because the map outlives the sessions that taught
+    it: an app that is not running cannot be asked its name, and a list of
+    bundle identifiers is a list nobody can read. It is the LAST SEEN
+    name, deliberately — if macOS ever declines to say, the app keeps the
+    name it had rather than reverting to its identifier.
+    """
+
+    x: int
+    y: int
+    name: Optional[str] = None
+
+
 class AppPositions:
-    """Bundle identifier → (x, y), least recently used dropped first.
+    """Bundle identifier → Placement, least recently used dropped first.
 
     Recency counts a *use*, not just a write: recalling a position for an
     app is evidence you still switch to it, so it refreshes the entry.
@@ -75,7 +91,7 @@ class AppPositions:
 
     def __init__(self, limit: int = MAX_ENTRIES) -> None:
         self._limit = max(1, int(limit))
-        self._entries: "OrderedDict[str, tuple[int, int]]" = OrderedDict()
+        self._entries: "OrderedDict[str, Placement]" = OrderedDict()
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -88,13 +104,22 @@ class AppPositions:
         """Least recently used first — the order they would be evicted."""
         return tuple(self._entries)
 
-    def remember(self, bundle_id: str, x: int, y: int) -> None:
+    def remember(
+        self, bundle_id: str, x: int, y: int, name: Optional[str] = None
+    ) -> None:
         """Record where the window sits for this app, replacing whatever
-        was there. The newest entry is the last to be evicted."""
+        was there. The newest entry is the last to be evicted.
+
+        A name of None does not erase the one already stored: the caller
+        not knowing what an app is called this time is not evidence that
+        the name it learned last time was wrong.
+        """
         if not bundle_id:
             return
-        self._entries.pop(bundle_id, None)
-        self._entries[bundle_id] = (int(x), int(y))
+        previous = self._entries.pop(bundle_id, None)
+        if name is None and previous is not None:
+            name = previous.name
+        self._entries[bundle_id] = Placement(int(x), int(y), name or None)
         while len(self._entries) > self._limit:
             evicted, _ = self._entries.popitem(last=False)
             logger.debug("forgot the position for %s (map full)", evicted)
@@ -102,14 +127,18 @@ class AppPositions:
     def recall(self, bundle_id: Optional[str]) -> Optional[tuple[int, int]]:
         """The remembered position, or None. None means "leave the window
         alone" — never a default, because a default would move the window
-        somewhere the user never put it."""
+        somewhere the user never put it.
+
+        The point only, not the name: every caller of this is about to
+        move a window.
+        """
         if not bundle_id:
             return None
-        position = self._entries.get(bundle_id)
-        if position is None:
+        placement = self._entries.get(bundle_id)
+        if placement is None:
             return None
         self._entries.move_to_end(bundle_id)
-        return position
+        return (placement.x, placement.y)
 
     def peek(self, bundle_id: Optional[str]) -> Optional[tuple[int, int]]:
         """The remembered position without counting a use.
@@ -122,7 +151,25 @@ class AppPositions:
         """
         if not bundle_id:
             return None
-        return self._entries.get(bundle_id)
+        placement = self._entries.get(bundle_id)
+        return None if placement is None else (placement.x, placement.y)
+
+    def name_for(self, bundle_id: Optional[str]) -> Optional[str]:
+        """The last name seen for this app, or None. Never counts a use,
+        for the same reason ``peek`` does not."""
+        if not bundle_id:
+            return None
+        placement = self._entries.get(bundle_id)
+        return None if placement is None else placement.name
+
+    def listed(self) -> tuple[tuple[str, Optional[str]], ...]:
+        """Every remembered app as (identifier, name), most recently used
+        first — the order a list should read in, and the reverse of the
+        order things are evicted in."""
+        return tuple(
+            (bundle_id, placement.name)
+            for bundle_id, placement in reversed(self._entries.items())
+        )
 
     def forget(self, bundle_id: str) -> bool:
         return self._entries.pop(bundle_id, None) is not None
@@ -135,10 +182,20 @@ class AppPositions:
     # -- persistence ------------------------------------------------------
 
     def to_json(self) -> str:
-        """A list of triples rather than an object, so the recency order is
+        """A list of rows rather than an object, so the recency order is
         part of the format rather than a property of whichever JSON
-        implementation reads it back."""
-        return json.dumps([[key, x, y] for key, (x, y) in self._entries.items()])
+        implementation reads it back.
+
+        Four fields now — the name came later — and a row is written with
+        all four even when the name is null, so the shape on disk does not
+        depend on what happened to be known.
+        """
+        return json.dumps(
+            [
+                [key, place.x, place.y, place.name]
+                for key, place in self._entries.items()
+            ]
+        )
 
     @classmethod
     def from_json(cls, raw: object, limit: int = MAX_ENTRIES) -> "AppPositions":
@@ -161,22 +218,33 @@ class AppPositions:
             if parsed is None:
                 logger.debug("skipped a malformed app position entry: %r", entry)
                 continue
-            bundle_id, x, y = parsed
-            positions.remember(bundle_id, x, y)
+            bundle_id, x, y, name = parsed
+            positions.remember(bundle_id, x, y, name)
         return positions
 
 
-def _parse_entry(entry: object) -> Optional[tuple[str, int, int]]:
-    if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+def _parse_entry(entry: object) -> Optional[tuple[str, int, int, Optional[str]]]:
+    """One stored row, in either shape.
+
+    Three fields is what milestone 14 wrote and is still read: a map saved
+    before names existed keeps every position and simply has no names
+    until each app is next seen. Upgrading a format by making the new
+    field optional costs one branch; refusing the old shape would cost the
+    user every position they had.
+    """
+    if not isinstance(entry, (list, tuple)) or len(entry) not in (3, 4):
         return None
-    bundle_id, x, y = entry
+    bundle_id, x, y = entry[0], entry[1], entry[2]
+    name = entry[3] if len(entry) == 4 else None
     if not isinstance(bundle_id, str) or not bundle_id:
         return None
     if isinstance(x, bool) or isinstance(y, bool):
         return None  # JSON true/false are ints in Python; they are not points
     if not isinstance(x, int) or not isinstance(y, int):
         return None
-    return bundle_id, x, y
+    if name is not None and not isinstance(name, str):
+        return None
+    return bundle_id, x, y, name or None
 
 
 class ActivationDebounce:
@@ -339,11 +407,28 @@ def may_move(*, enabled: bool, visible: bool, dragging: bool, syncing: bool) -> 
 # -- saying what is known -------------------------------------------------
 
 
+def display_label(bundle_id: Optional[str], name: Optional[str]) -> str:
+    """What to call an app on screen: its name, or its identifier when
+    that is all there is.
+
+    The identifier was the readout's first answer and it was the wrong
+    one. It is precise, and precision is what the log is for — a menu is
+    read by a person deciding whether a feature works, and
+    `com.microsoft.VSCode` makes them translate before they can answer.
+    The fallback keeps the old behaviour exactly, for an app that has
+    never been seen running.
+    """
+    if name:
+        return name
+    return bundle_id or ""
+
+
 def status_summary(
     *,
     count: int,
     frontmost: Optional[str],
-    position: Optional[tuple[int, int]],
+    frontmost_name: Optional[str] = None,
+    placed: bool = False,
 ) -> str:
     """One line naming what the layer knows, for the menu to show.
 
@@ -354,11 +439,10 @@ def status_summary(
     and the position alone would hide an empty map behind one app that
     happens to have no entry.
 
-    The bundle identifier is shown rather than a friendly name. It is what
-    the map is keyed on and what the log lines say, so a reader comparing
-    the two is comparing the same string; asking macOS to localise it
-    would be a second name for one thing, and would mean reading something
-    about the other app beyond the identifier it advertises.
+    No coordinates. They answered a question nobody asked of a menu: a
+    number pair cannot be checked against anything by eye, and the window
+    is already sitting at it in plain view. They stay in the DEBUG log,
+    where a reader is comparing them with something.
     """
     if count == 0:
         learned = "No positions remembered"
@@ -368,7 +452,54 @@ def status_summary(
         learned = f"{count} apps remembered"
     if not frontmost:
         return f"{learned} · frontmost app unknown"
-    if position is None:
-        return f"{learned} · {frontmost} not placed yet"
-    x, y = position
-    return f"{learned} · {frontmost} at {x}, {y}"
+    label = display_label(frontmost, frontmost_name)
+    return f"{learned} · {label} {'is placed' if placed else 'not placed yet'}"
+
+
+# -- acknowledging that a position was learned ----------------------------
+#
+# The drag is the whole gesture and it ends in silence, which is the
+# feature's oldest problem restated: the window looks identical whether it
+# recorded anything or not. A short warm glow on the hairline is the
+# answer — the edge is borrowed for half a second and handed straight
+# back, which is why the tint is not touched and nothing is captured.
+
+
+# How long the whole acknowledgement lasts, rise and fall together. Two
+# line-change phases, deriving from the one constant the window's motion is
+# already built out of rather than inventing a number beside it.
+GLOW_SECONDS = 0.52
+
+# The most of the warm colour the edge ever carries, as a mix towards it.
+# Short of 1.0 because this is an acknowledgement and not an alert: the
+# hairline should look briefly warmer, not briefly replaced.
+GLOW_PEAK = 0.85
+
+
+def glow_intensity(phase: float) -> float:
+    """How much of the warm colour the hairline carries, 0 to GLOW_PEAK.
+
+    ONE property with a rise and a fall in it, rather than two animations
+    handing over — the same reasoning as the line change's signed
+    ``progress``. A half sine is the shape: nothing at either end, so the
+    edge leaves and returns to exactly the tint's own colour with no step
+    at either boundary, and no easing curve to choose.
+    """
+    if phase <= 0.0 or phase >= 1.0:
+        return 0.0
+    return GLOW_PEAK * math.sin(math.pi * phase)
+
+
+def may_acknowledge(*, now: float, last: Optional[float]) -> bool:
+    """Whether a learned position should be acknowledged on the window.
+
+    One glow per gesture. A drag that ends is one thing the user did, and
+    a second acknowledgement landing inside the first would read as a
+    flicker rather than as two answers — the window would be talking about
+    itself. Anything within one glow of the last one is therefore refused
+    rather than restarted, which also makes this the guard against a
+    release that arrives twice.
+    """
+    if last is None:
+        return True
+    return (now - last) >= GLOW_SECONDS

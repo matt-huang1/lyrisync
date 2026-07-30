@@ -18,11 +18,15 @@ from lyrisync import frontmost
 
 
 class FakeApp:
-    def __init__(self, bundle_id):
+    def __init__(self, bundle_id, name=None):
         self._bundle_id = bundle_id
+        self._name = name
 
     def bundleIdentifier(self):
         return self._bundle_id
+
+    def localizedName(self):
+        return self._name
 
 
 class FakeInfo:
@@ -57,22 +61,31 @@ class FakeCentre:
         self.removed.append(token)
         self.blocks.pop(token, None)
 
-    def post(self, bundle_id):
+    def post(self, bundle_id, name=None):
         """What AppKit does when an app comes forward."""
         for _, block in list(self.blocks.values()):
-            block(FakeNotification(FakeApp(bundle_id)))
+            block(FakeNotification(FakeApp(bundle_id, name)))
 
 
 class FakeWorkspace:
-    def __init__(self, frontmost_app="com.apple.Safari"):
+    def __init__(self, frontmost_app="com.apple.Safari", name="Safari"):
         self.centre = FakeCentre()
-        self._frontmost = FakeApp(frontmost_app) if frontmost_app else None
+        self._frontmost = FakeApp(frontmost_app, name) if frontmost_app else None
+        self.urls = {}
+        self.icons = {}
 
     def notificationCenter(self):
         return self.centre
 
     def frontmostApplication(self):
         return self._frontmost
+
+    def URLForApplicationWithBundleIdentifier_(self, bundle_id):
+        path = self.urls.get(bundle_id)
+        return FakeURL(path) if path else None
+
+    def iconForFile_(self, path):
+        return self.icons.get(path)
 
 
 @pytest.fixture
@@ -96,14 +109,30 @@ def test_starting_subscribes_to_the_activation_notification(workspace):
     assert names == [frontmost.DID_ACTIVATE]
 
 
-def test_an_activation_reaches_the_callback_as_a_bundle_id(workspace):
+def test_an_activation_reaches_the_callback_as_an_identity(workspace):
+    """Both halves at once. The name is taken while the notification still
+    has the application in hand — asking later would mean walking the
+    running-application list, and would have no answer at all for an app
+    that has since quit."""
     seen = []
     watcher = frontmost.FrontmostWatcher(seen.append)
     watcher.start()
 
-    workspace.centre.post("com.microsoft.VSCode")
+    workspace.centre.post("com.microsoft.VSCode", "Code")
 
-    assert seen == ["com.microsoft.VSCode"]
+    assert seen == [frontmost.AppIdentity("com.microsoft.VSCode", "Code")]
+
+
+def test_an_app_that_will_not_say_its_name_is_still_an_arrival(workspace):
+    """The identifier is what the map is keyed on; the name is a courtesy,
+    and the readout falls back to the identifier when there is none."""
+    seen = []
+    watcher = frontmost.FrontmostWatcher(seen.append)
+    watcher.start()
+
+    workspace.centre.post("com.microsoft.VSCode", None)
+
+    assert seen == [frontmost.AppIdentity("com.microsoft.VSCode", None)]
 
 
 def test_stopping_removes_the_observer(workspace):
@@ -161,7 +190,86 @@ def test_a_failing_handler_never_escapes_into_appkit(workspace):
 def test_the_current_app_can_be_asked_for_directly(workspace):
     """Needed as well as the notification: the watcher can start at any
     moment, and the app already in front has never been announced."""
-    assert frontmost.current_bundle_id() == "com.apple.Safari"
+    assert frontmost.current_app() == frontmost.AppIdentity(
+        "com.apple.Safari", "Safari"
+    )
+
+
+# -- icons -----------------------------------------------------------------
+
+
+class FakeURL:
+    def __init__(self, path):
+        self._path = path
+
+    def path(self):
+        return self._path
+
+
+class FakeImage:
+    """Enough NSImage to be drawn into another one and asked for TIFF."""
+
+    def __init__(self, tiff=b"TIFF"):
+        self._tiff = tiff
+        self.drawn = []
+
+    def initWithSize_(self, size):
+        self.size = size
+        return self
+
+    def lockFocus(self):
+        self.locked = True
+
+    def unlockFocus(self):
+        self.locked = False
+
+    def drawInRect_fromRect_operation_fraction_(self, rect, from_rect, op, alpha):
+        self.drawn.append((rect, op, alpha))
+
+    def TIFFRepresentation(self):
+        return self._tiff
+
+
+def test_an_icon_comes_back_as_plain_bytes(workspace, monkeypatch):
+    """Bytes, not an NSImage: nothing pyobjc-shaped crosses out of this
+    module, so the caller needs no AppKit to turn it into a pixmap."""
+    workspace.urls = {"com.apple.Safari": "/Applications/Safari.app"}
+    workspace.icons = {"/Applications/Safari.app": FakeImage(b"SAFARI")}
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "AppKit",
+        _fake_appkit(FakeImage(b"DRAWN")),
+    )
+
+    assert frontmost.app_icon_tiff("com.apple.Safari", 16) == b"DRAWN"
+
+
+def test_an_app_that_is_not_installed_has_no_icon(workspace, monkeypatch):
+    """A remembered app can be uninstalled between sessions. Its name is
+    still known, so the list still reads — it simply has no face."""
+    workspace.urls = {}
+    monkeypatch.setitem(__import__("sys").modules, "AppKit", _fake_appkit(FakeImage()))
+
+    assert frontmost.app_icon_tiff("com.apple.Safari", 16) is None
+
+
+def test_no_icon_without_a_workspace(no_workspace):
+    assert frontmost.app_icon_tiff("com.apple.Safari", 16) is None
+
+
+def test_an_empty_identifier_is_never_asked_about(workspace):
+    assert frontmost.app_icon_tiff("", 16) is None
+
+
+def _fake_appkit(image):
+    """A stand-in AppKit module holding just what app_icon_tiff imports."""
+    import types
+
+    module = types.ModuleType("AppKit")
+    module.NSImage = type("NSImage", (), {"alloc": staticmethod(lambda: image)})
+    module.NSMakeRect = lambda *args: args
+    module.NSZeroRect = ()
+    return module
 
 
 # -- with no workspace at all ---------------------------------------------
@@ -185,7 +293,7 @@ def test_stopping_what_never_started_is_harmless(no_workspace):
 
 
 def test_the_current_app_is_unknown_without_a_workspace(no_workspace):
-    assert frontmost.current_bundle_id() is None
+    assert frontmost.current_app() is None
 
 
 def test_a_workspace_that_raises_is_survivable(monkeypatch):
@@ -202,7 +310,7 @@ def test_a_workspace_that_raises_is_survivable(monkeypatch):
     monkeypatch.setattr(frontmost, "_workspace", lambda: Hostile())
     watcher = frontmost.FrontmostWatcher(lambda _: None)
     assert watcher.start() is False
-    assert frontmost.current_bundle_id() is None
+    assert frontmost.current_app() is None
 
 
 # -- the door itself -------------------------------------------------------

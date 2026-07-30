@@ -187,6 +187,66 @@ keeps the same distinction, which is why a failed download and an image
 that will not decode are different outcomes in the code rather than one
 `None`.
 
+## 11. The best features are invisible when they work
+
+Per-app window position memory is the clearest example this project has.
+It removed a friction that was being paid many times a day — drag the
+lyrics out of the way of the editor, drag them back for the browser — and
+the measure of its success is that **it is never noticed while working**.
+The window is simply where it should be. Nobody thinks about it, which is
+the point.
+
+That is worth stating because it cuts against the instinct to make work
+visible. A feature that announced itself here would be worse, not better:
+this window floats over somebody else's screen while they are doing
+something else.
+
+The corollary is the harder half, and it was learned the expensive way. A
+feature nobody notices is a feature nobody can tell from a broken one.
+Per-app positions shipped, silently did nothing for a whole milestone
+because a drag was quietly refused, and the report that came back was two
+things at once: *it does not work*, and *I cannot tell whether I am using
+it right*. The second was the real defect. So invisible-while-working
+buys an obligation:
+
+- **it must be possible to ask.** The menu says how many apps are
+  remembered and whether the app in front is one of them, by name and
+  icon, whenever it is opened.
+- **the moment of learning gets a brief answer** — half a second of warm
+  on the hairline, and then gone.
+- **every refusal names itself** in the log, from one rule that also
+  decides the refusal, so the explanation cannot disagree with what
+  happened.
+
+None of that makes the feature visible in use. It makes it *answerable*
+when asked, which is a different thing.
+
+## 12. Transient feedback may borrow a surface, then give it back
+
+Milestone 13.2 gave the hairline a single owner: the album tint, on one
+cross-fade shared with the panel, because two animations of the same
+colour can only drift apart. Milestone 14.1 then declined to acknowledge a
+learned position on that edge, citing exactly that rule.
+
+That was too strict, and the distinction that resolves it is between
+*owning* a surface and *borrowing* one. Persistent decoration owns the
+hairline; an acknowledgement may take it for half a second and hand it
+back — provided the borrowing is built so that giving it back is
+guaranteed rather than remembered to be done:
+
+- the glow is a mix applied **at paint time**, over whatever the tint
+  currently says. It is never written into the tint state, so a cover
+  arriving mid-glow cross-fades underneath it and cannot capture a warmed
+  edge as its starting colour.
+- the shape starts and ends at zero — a half sine, one property — so
+  there is no step at either boundary and no value to restore.
+- returning the surface is the animation reaching its end, not a piece of
+  cleanup that could be skipped.
+
+Stated generally: **a transient may borrow what a persistent thing owns,
+if the loan is structural.** If handing it back depends on remembering to
+hand it back, the answer is still no.
+
 ---
 
 ## What this is not

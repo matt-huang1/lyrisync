@@ -3,6 +3,22 @@
 Milestones in the order they happened. Dates are commit dates; the deeper
 reasoning behind each is in [docs/](docs/).
 
+## Milestone 14.2 — names, faces, and a word back
+
+The menu now says **Safari**, with Safari's icon, where it used to say
+`com.apple.Safari`; the name is taken from the same activation as the
+identifier and stored beside the position, so an app that is not running
+is still readable. Coordinates left the menu for the log. A new
+**Remembered apps** submenu lists what has been learned, most recent
+first, and clicking one forgets that app.
+
+And the drag that teaches a position now gets an answer: the hairline
+warms for half a second and hands the edge straight back to the album
+tint. That reverses 14.1's refusal under a rule this milestone adds to
+the design philosophy — transient feedback may borrow a surface that
+persistent decoration owns, provided the return is structural rather than
+remembered.
+
 ## Milestone 14.1 — making it visible, and finding out why it was not
 
 Reported as not working, and — the more useful half — as impossible to

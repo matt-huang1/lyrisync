@@ -79,6 +79,13 @@ class Palette:
     # untinted one; with a cover in hand it carries the album's hue, and
     # carries it far harder than the panel can (see BORDER_CHROMA).
     border: RGBA
+    # The warm colour the hairline is briefly mixed towards when a window
+    # position has just been learned. Deliberately NOT tinted by the album:
+    # an acknowledgement that changed colour with the cover would be read
+    # as part of the artwork rather than as an answer, and the answer is
+    # the same every time. Warm because every other accent in this app is
+    # cool — nothing else on the window can be mistaken for it.
+    learned_glow: RGBA
 
     # Text, in the order it appears down the window.
     header: RGBA
@@ -131,6 +138,9 @@ DARK = Palette(
     scrim=(14, 15, 20, 150),
     solid=(18, 18, 24, 232),
     border=(255, 255, 255, 30),
+    # The amber this app already uses for "your turn" — one warm accent,
+    # not two.
+    learned_glow=(255, 214, 120, 165),
     header=(255, 255, 255, 130),
     context=(255, 255, 255, 148),
     current=(255, 255, 255, 250),
@@ -176,6 +186,9 @@ LIGHT = Palette(
     scrim=(246, 247, 250, 134),
     solid=(248, 249, 252, 236),
     border=(0, 0, 0, 38),
+    # Darkened like every other accent here: (255, 214, 120) on a pale
+    # panel is a hairline that has gone missing rather than warm.
+    learned_glow=(150, 96, 0, 170),
     header=(18, 19, 26, 140),
     context=(18, 19, 26, 165),
     current=(18, 19, 26, 250),

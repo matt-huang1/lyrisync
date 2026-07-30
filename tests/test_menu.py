@@ -139,6 +139,7 @@ def test_open_at_login_sits_with_the_window_behaviour_entries():
         m.ALL_DESKTOPS,
         m.REMEMBER_POSITION,
         m.POSITION_STATUS,
+        m.POSITION_LIST,
         m.FORGET_POSITIONS,
         m.OPEN_AT_LOGIN,
     )
@@ -152,6 +153,17 @@ def test_forgetting_is_offered_only_once_there_is_something_to_forget():
     position and goes again when the map is cleared."""
     assert m.FORGET_POSITIONS not in entries()
     assert m.FORGET_POSITIONS in entries(positions_remembered=True)
+
+
+def test_the_list_of_remembered_apps_follows_the_map():
+    """A list of nothing is an entry that cannot act, which is the same
+    rule the forget entry follows — and it appears beside it, because the
+    list is where a single app is forgotten."""
+    assert m.POSITION_LIST not in entries()
+    assert m.POSITION_LIST in entries(positions_remembered=True)
+    assert m.POSITION_LIST in entries(
+        positions_remembered=True, remembering_positions=False
+    )
 
 
 def test_forgetting_stays_reachable_with_the_layer_switched_off():
