@@ -82,11 +82,11 @@ def _no_real_world():
     patch.setattr(socket.socket, "connect_ex", guard_connect_ex)
     patch.setattr(socket, "create_connection", guard_create_connection)
 
-    # -- subprocesses (osascript to Spotify, `say` to the speakers) -------
-    # The monitor, the player commands and the spoken reference all reach
-    # the outside world through subprocess and nothing else, so one guard
-    # covers all three. Tests that exercise those paths stub the function
-    # above this line (`_osascript`, `speak_korean`, the QRunnables).
+    # -- subprocesses (`say` to the speakers) -----------------------------
+    # The spoken reference is what is left here: Spotify is no longer asked
+    # by launching osascript, it is asked in-process, and that has a door
+    # of its own below. Tests that exercise this path stub the function
+    # above this line (`speak_korean`, the QRunnables).
     real_run = subprocess.run
     real_popen = subprocess.Popen
 
@@ -138,6 +138,39 @@ def _no_real_world():
         real_artwork_init(self, cache_dir)
 
     patch.setattr(ArtworkProvider, "__init__", guard_artwork_init)
+
+    # -- the developer's own Spotify --------------------------------------
+    # Every question and every command now goes out as an Apple event sent
+    # from this process, which is cheaper than launching osascript and just
+    # as capable of pausing the developer's music or seeking their song to
+    # zero. The subprocess guard above used to cover this and no longer
+    # can, so the door it went through gets a guard of its own — and it is
+    # the same door in both directions, because `_ask` is what read a
+    # snapshot AND what sends `pause`.
+    from sottovoce import player_monitor
+
+    def guard_cocoa():
+        raise _violation(
+            "NSAppleScript — a test may not send Apple events to the "
+            "developer's Spotify, nor ask whether they have it open; stub "
+            "player_monitor._ask and player_monitor.spotify_running"
+        )
+
+    patch.setattr(player_monitor, "_cocoa", guard_cocoa)
+
+    # And the other half of following Spotify: an observer on the system's
+    # distributed notification centre would sit there for the life of the
+    # process, waking on every track the developer plays and calling back
+    # into whatever the test has since torn down.
+    from sottovoce import player_events
+
+    def guard_distributed_centre():
+        raise _violation(
+            "NSDistributedNotificationCenter — a test may not observe the "
+            "developer's Spotify"
+        )
+
+    patch.setattr(player_events, "_distributed_center", guard_distributed_centre)
 
     # -- the developer's own login items ----------------------------------
     # SMAppService registers the app to launch at login for the real user,

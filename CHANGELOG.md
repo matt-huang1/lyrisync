@@ -6,6 +6,48 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Milestone 19 — the same app, a fifteenth of the energy
+
+No feature changed. The app's twelve-hour energy impact sat beside a chat
+client's and about triple Spotify's, which is not what a lyrics window
+should cost, and the measurement said almost none of it was the work.
+
+**Spotify is asked from inside this process now.** Every poll used to
+launch `osascript`: 58.8ms of CPU for a question whose answer takes 4.3ms,
+three times a second, forever. Almost all of the difference was fork,
+exec, LaunchServices, TCC and the AppleScript framework being loaded and
+thrown away — and it did not land only on us. Four system daemons woke on
+every poll and were flat without one, about 30 percentage points of one
+core between them.
+
+**And it is asked far less often.** Spotify broadcasts
+`com.spotify.client.PlaybackStateChanged` whenever the track or the state
+changes, so the app waits to be told instead of asking: track changes,
+play, pause, a song ending, and Spotify starting and quitting all arrive
+within about a fifth of a second of happening. Between times the playback
+position is worked out from the clock, which turns out to be exact — over
+92 seconds it disagreed with Spotify by 1.4ms. What is left for the loop
+to catch is a **seek**, which Spotify announces to nobody, and it looks
+once a second for one. A seek made in Spotify's own window is picked up in
+up to a second where it used to be a third of one; a seek this app makes
+is never waited for at all.
+
+If the announcement never arrives — an older Spotify, a Mac where the
+observer will not install — the app goes back to asking three times a
+second, on its own, without sniffing for a version.
+
+**A line change costs a fifth less.** The sung line was being laid out and
+rasterised from scratch 37 times per change, for a fade and a ten-pixel
+rise; nothing about it moves during a phase, so it is drawn once per phase
+now. And the panel underneath it is filled straight rather than as two
+rounded rectangles when the repainted strip is between the corners, which
+is the same pixels — asserted byte for byte, at 1x and 2x.
+
+Measured end to end over the same minute of playback, alternating between
+the two revisions: the app's CPU including its subprocesses **21.8% of one
+core to 1.5%**, Activity Monitor's energy impact **4.05 to 1.45**, idle
+wakeups **105/s to 21/s**, and queries put to Spotify **197 to 70**.
+
 ## Milestone 18 — the strip fits the song
 
 In the compact layout the window now sizes itself to the track. When a

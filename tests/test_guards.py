@@ -65,10 +65,36 @@ def test_loopback_still_works(escapes):
 
 
 def test_spotify_cannot_be_commanded(escapes):
-    """osascript is how every player command reaches Spotify — a seek, a
-    pause, a resume. Unstubbed, a test restarts the developer's music."""
+    """An Apple event is how every player command reaches Spotify — a
+    seek, a pause, a resume. Unstubbed, a test restarts the developer's
+    music. This used to be caught by the subprocess guard, because the
+    events were sent by launching osascript; they are sent from this
+    process now, and the door they go through is what is shut."""
     with pytest.raises(RuntimeError, match="test escape"):
         pm.set_position(0.0)
+    assert escapes.drain()
+
+
+def test_spotify_cannot_be_asked_anything_either(escapes):
+    """The same door in the other direction: reading a snapshot is the
+    other thing `_ask` does, and a test that took one would be a test
+    whose result depended on what the developer had playing."""
+    with pytest.raises(RuntimeError, match="test escape"):
+        pm.read_snapshot()
+    assert escapes.drain()
+
+
+def test_spotify_cannot_be_observed(escapes):
+    """The announcement observer would sit on the system's distributed
+    notification centre for the life of the process, waking on every track
+    the developer plays. It is registered at window construction, so
+    without this every Qt test would leave one behind."""
+    from sottovoce import player_events
+
+    announcer = player_events.PlaybackAnnouncer(lambda: None)
+    with pytest.raises(RuntimeError, match="test escape"):
+        announcer.start()
+    assert not announcer.listening
     assert escapes.drain()
 
 

@@ -13,7 +13,7 @@ changing it.
 
 ## Architecture in brief
 
-Three parts that do not know about each other: `player_monitor.py` polls
+Three parts that do not know about each other: `player_monitor.py` follows
 Spotify over AppleScript, `lyrics_provider.py` answers with lyrics, and
 `window.py` is the only thing that knows either exists. Everything that
 can be logic rather than widget is a **Qt-free pure module** —
@@ -21,13 +21,14 @@ can be logic rather than widget is a **Qt-free pure module** —
 `geometry.py`, `typography.py`, `appearance.py`, `transition.py`,
 `flight.py`, `app_positions.py`, `gestures.py`, `romanize.py`,
 `menubar.py`, `http_client.py`, `settings.py`, `notifications.py`,
-`failure.py`. That is
+`failure.py`, `player_events.py`. That is
 why the contrast floor is a test rather than a judgement, and why the
 whole suite runs headless on Linux.
 
-Threads: the UI thread (Qt only — it never runs a subprocess), one monitor
-`QThread` polling every ~300ms, and a `QThreadPool` for one-shot work
-(lyrics fetch, artwork fetch, `say`, seek, pause/resume). Full map in
+Threads: the UI thread (Qt only — it never blocks on Spotify), one monitor
+`QThread` ticking every ~300ms and querying Spotify about once a second,
+and a `QThreadPool` for one-shot work (lyrics fetch, artwork fetch, `say`,
+seek, pause/resume). Full map in
 [docs/architecture.md](docs/architecture.md).
 
 ## Session rules
@@ -56,13 +57,15 @@ Threads: the UI thread (Qt only — it never runs a subprocess), one monitor
 
 ## The testing guards
 
-`tests/conftest.py` shuts ten doors for the whole session. They are the
+`tests/conftest.py` shuts twelve doors for the whole session. They are the
 alarm, not the fix — the seams are the fix.
 
 | guard | catches |
 |---|---|
 | outbound sockets (at `socket`, not `urllib`) | any lyrics or artwork fetch |
-| `subprocess.run` / `Popen` | `osascript` to Spotify, `say` to the speakers |
+| `subprocess.run` / `Popen` | `say` to the speakers |
+| `player_monitor._cocoa()` | every question and every command to Spotify |
+| `player_events._distributed_center()` | an observer on the developer's Spotify |
 | `LyricsProvider()` on its defaults | the real `.lyrics_cache/` and `.user_syncs/` |
 | `ArtworkProvider()` on its default | the real `.artwork_cache/`, and the CDN |
 | `QSettings("sottovoce", "sottovoce")` | the real preferences plist |
@@ -216,6 +219,19 @@ Rules that come with them:
   model is bounded — past that, the world moved and the display snaps.
 - **`grab()`/`render()` does not apply a `QGraphicsEffect`.** Verify by
   tracing `draw()`.
+- **The sung line is rasterised once per phase, not once per frame.** Qt
+  has no cache for `sourcePixmap` on a widget source and never calls
+  `sourceChanged` for one either, so the invalidation is the window's
+  own: four funnels, plus a repaint that arrives without `progress`
+  having moved re-rendering anyway, which is the net under a fifth.
+- **A repaint between the corner radii is filled straight.** The panel is
+  a rectangle with a line down each side there, so three axis-aligned
+  fills replace two antialiased rounded rectangles — and that they are
+  the same pixels is asserted byte for byte, at 1x and 2x, not reasoned
+  about.
+- **A harness that agrees with itself is not a measurement.** A
+  `processEvents` spin loop reads 100% of a core in every condition; an
+  instrumented copy of `draw()` measures the copy.
 - **macOS hands back a stale frame** on the first capture after a change:
   motion is measured, not photographed. A screenshot harness must pump the
   event loop, never `sleep` in it.
@@ -246,14 +262,50 @@ Rules that come with them:
   not forgotten: reaching it would cost the hue-only design, and nothing
   is read against the hairline.
 
-### System integration
+### Following Spotify
 
-- **A `tell` block needs the app's dictionary at COMPILE time**, so the
-  snapshot script cannot run at all where Spotify is not installed and its
-  own "is not running" first line is never reached. The dictionary-free
-  probe is a **second script**, asked only when the snapshot fails, and
-  the answer is remembered — a Mac with no Spotify must not pay for a
-  compile that cannot succeed, three times a second, forever.
+- **AppleScript is never compiled or sent unless Spotify is already
+  running.** A `tell` block needs the app's dictionary at COMPILE time,
+  and so, it turns out, does naming an application at all: compiled in
+  this process, a script about an application that is not installed puts
+  macOS's "Where is Spotify?" chooser in front of the user and blocks the
+  thread. The dictionary-free probe does the same — what cannot be
+  resolved is the application, not its vocabulary. Whether Spotify is
+  running is therefore an **AppKit** question (`NSRunningApplication`,
+  0.017ms), asked before anything is compiled, and the gate lives inside
+  `_ask` so a command added later cannot miss it.
+- **Every question and command is sent from this process**, through one
+  compiled-once `NSAppleScript` per script, **serialised behind one
+  lock** — three threads sharing one script measured fifty times slower
+  than one at a time. Launching `osascript` cost 58.8ms of CPU against
+  4.3ms, and woke four daemons on every poll.
+- **A query's timeout lives in the script.** `NSAppleScript` sends with
+  the Apple Event Manager's default of about a minute, and a minute is
+  one wedged Spotify away from a monitor thread outliving shutdown's
+  bounded wait. `with timeout of N seconds` needs no dictionary.
+- **The announcement is a doorbell, not an answer.** Spotify's
+  `PlaybackStateChanged` says "ask again"; the payload is thrown away,
+  because it has no artwork URL and because track identity may have
+  exactly one definition. It must be observed **by name** — registering
+  for everything receives nothing.
+- **A seek is announced to nobody**, and that is the only reason a poll
+  loop survives. Everything else rings: track changes, play, pause, a
+  song ending, Spotify quitting and starting, each driven and timed.
+- **Between queries the position is arithmetic on the monotonic clock**,
+  and it is exact rather than approximate (1.4ms over 92 seconds). The
+  window still hears a position every `POLL_INTERVAL_SECONDS`; what
+  changed is what that costs.
+- **A seek this app made is never waited for**: the player commands call
+  `disturb()` in a `finally`, so a failed command counts too. Module
+  level, so a command cannot be added that forgets.
+- **The slower rate is lost, not earned.** It starts the moment the
+  observer registers, because announcements only arrive when something
+  changes and waiting for one means asking three times a second through
+  an uninterrupted song. A track or state change discovered with nothing
+  having rung takes it away, and the next properly announced one gives it
+  back. Nothing sniffs a Spotify version.
+
+### System integration
 - **Accessory activation policy is unconditional** and applied before any
   window exists, with `LSUIElement` in the plist for the instant before it
   runs. There is no Regular policy to fall back to.

@@ -146,12 +146,15 @@ from sottovoce.menu import (
     visible_entries,
 )
 from sottovoce import notifications
+from sottovoce.player_events import PlaybackAnnouncer
 from sottovoce.player_monitor import (
     POLL_INTERVAL_SECONDS,
     PlaybackState,
     PlayerMonitor,
     PlayerSnapshot,
     SpotifyQueryError,
+    announce,
+    observing,
     pause_playback,
     resume_playback,
     set_position,
@@ -333,8 +336,10 @@ _READOUT_TRAIL = 14
 _READOUT_GAP = 6
 
 # How long shutdown waits for the monitor thread and then for the worker
-# pool. Long enough for a poll to finish its osascript (2s timeout) or a
-# fetch to notice it is done, short enough that quit still feels like quit.
+# pool. Long enough for a tick to finish the round trip it is waiting on
+# (measured at 133ms with Spotify running, and there is no timeout on it
+# to fall back to) or a fetch to notice it is done, short enough that quit
+# still feels like quit.
 _SHUTDOWN_WAIT_MS = 3000
 
 _TITLE_CARD_SECONDS = 2.0
@@ -482,12 +487,41 @@ class LineFade(QGraphicsEffect):
     the next layout pass and would ripple into the rows above and below.
     Drawing the source pixmap at an offset touches no geometry at all,
     which is also why the rest of the window cannot feel this happening.
+
+    ## The source is rasterised once per phase, not once per frame
+
+    ``sourcePixmap`` re-renders the whole source widget — two labels, so
+    two full text layouts and two runs of glyph rasterisation. Qt has no
+    cache for it on a widget source; measured with the sampler, that
+    render was the single largest thing in a line change, and inside it
+    ``QPainter::drawText`` alone was a third of every frame's paint.
+
+    Nothing about the source moves during a phase. The line's text is set
+    once, at the swap, between the two phases; the only thing changing
+    from frame to frame is ``progress``, which is a number this effect
+    multiplies an offset and an opacity by. So the pixmap is kept and
+    reused: measured, 37.5 renders per line change became 2.2.
+
+    Two rules keep the cache honest, and they are layered on purpose:
+
+    - anything that changes what the box shows calls ``invalidate()``.
+      There are four such places and each is a funnel the window already
+      had: ``_set_line_text`` (either row's words, re-elision included),
+      ``_set_pronunciation`` (the row appearing or going), ``_restyle``
+      (colour and type size) and ``_animate_line`` (the start of a phase).
+    - a repaint that arrives without ``progress`` having moved since the
+      last one is not a frame of an animation, so it re-renders anyway.
+      That is the state the window spends almost all of its time in, so
+      the ordinary case is exactly what it always was, and a fifth funnel
+      that someone forgets is caught here rather than shown stale.
     """
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._progress = 0.0
         self._travel = 0.0
+        self._cached = None
+        self._drawn_at: Optional[float] = None
 
     @property
     def travel(self) -> float:
@@ -508,6 +542,12 @@ class LineFade(QGraphicsEffect):
     # Declared as a Qt property so QPropertyAnimation can drive it.
     progress = Property(float, _get_progress, _set_progress)
 
+    def invalidate(self) -> None:
+        """The source is about to look different, so what was rasterised
+        of it is worth nothing. Cheap enough to call without checking: it
+        drops a reference."""
+        self._cached = None
+
     def boundingRectFor(self, rect):
         """Room to draw outside the source, or the travel would be
         clipped to the widget's own box and the line would appear to
@@ -515,22 +555,26 @@ class LineFade(QGraphicsEffect):
         return QRectF(rect).adjusted(0, -self._travel, 0, self._travel)
 
     def draw(self, painter) -> None:
-        # sourcePixmap returns the pixmap and writes where to put it into
-        # the QPoint it is handed — an out-parameter, not a second return
-        # value. Ignoring it would draw the block at the widget's origin
-        # instead of its own.
-        offset = QPoint()
-        pixmap = self.sourcePixmap(
-            Qt.CoordinateSystem.LogicalCoordinates,
-            offset,
-            QGraphicsEffect.PixmapPadMode.NoPad,
-        )
-        if pixmap.isNull():
-            return
+        moved = self._drawn_at is not None and self._drawn_at != self._progress
+        self._drawn_at = self._progress
+        if self._cached is None or not moved:
+            # sourcePixmap returns the pixmap and writes where to put it
+            # into the QPoint it is handed — an out-parameter, not a second
+            # return value. Ignoring it would draw the block at the
+            # widget's origin instead of its own.
+            offset = QPoint()
+            pixmap = self.sourcePixmap(
+                Qt.CoordinateSystem.LogicalCoordinates,
+                offset,
+                QGraphicsEffect.PixmapPadMode.NoPad,
+            )
+            if pixmap.isNull():
+                self._cached = None
+                return
+            self._cached = (pixmap, QPointF(offset))
+        pixmap, offset = self._cached
         painter.setOpacity(max(0.0, 1.0 - abs(self._progress)))
-        painter.drawPixmap(
-            QPointF(offset) + QPointF(0.0, self._progress * self._travel), pixmap
-        )
+        painter.drawPixmap(offset + QPointF(0.0, self._progress * self._travel), pixmap)
 
 
 class MonitorThread(QThread):
@@ -1166,6 +1210,20 @@ class LyricsWindow(QWidget):
         self._monitor_thread.state_changed.connect(self._on_state_change)
         self._monitor_thread.start()
 
+        # Spotify's own announcement that something changed, which is what
+        # lets the monitor stop asking three times a second. Unconditional
+        # like the display watcher and for the same reason: it is not a
+        # layer with an "off", it is the app being told rather than
+        # guessing. Delivered on this thread, and it touches nothing here
+        # — it sets a flag the monitor's own thread reads.
+        self._announcer = PlaybackAnnouncer(announce)
+        # The monitor is told whether anything is listening rather than
+        # asked to work it out: an announcement only arrives when
+        # something CHANGES, so a monitor that waited for one before
+        # slowing down would ask three times a second through a whole
+        # song that nobody interrupted.
+        observing(self._announcer.start())
+
         self._dots_timer = QTimer(self)
         self._dots_timer.timeout.connect(self._tick_dots)
         self._dots_timer.start(400)
@@ -1644,6 +1702,11 @@ class LyricsWindow(QWidget):
     def _animate_line(self, end: float, curve: QEasingCurve.Type) -> None:
         if self._fade_anim is not None:
             self._fade_anim.stop()
+        # A phase is where the cache pays for itself, and its first frame
+        # is the one render it costs. Dropped here rather than trusted
+        # from the swap, because the swap is only one of the two phases
+        # and the other one starts from whatever was already on screen.
+        self._current_fx.invalidate()
         animation = QPropertyAnimation(self._current_fx, b"progress", self)
         # The duration this transition was scheduled for, which is the
         # nominal one unless the next line arrives too soon for it.
@@ -1724,6 +1787,10 @@ class LyricsWindow(QWidget):
         re-eliding an already elided line would eat it a word at a time.
         """
         self._full_text[label] = text
+        # Both rows of the sung block are behind the fade's cached
+        # rasterisation, and this is the only thing that writes either of
+        # them — including the re-elision a resize does mid-change.
+        self._current_fx.invalidate()
         if not self._compact_applied:
             label.setText(text)
             return
@@ -1744,7 +1811,10 @@ class LyricsWindow(QWidget):
 
     def _set_pronunciation(self, text: str) -> None:
         self._set_line_text(self._pron, text)
+        # A row appearing or going changes the block's shape, which
+        # _set_line_text above has no way to know about.
         self._pron.setVisible(bool(text))
+        self._current_fx.invalidate()
 
     # -- rendering ---------------------------------------------------------
 
@@ -2113,15 +2183,36 @@ class LyricsWindow(QWidget):
         Both come from the tint state rather than from the palette
         directly, because both carry the album's hue and both have to
         arrive on the same cross-fade.
+
+        ## A band away from the corners is drawn straight
+
+        A line change repaints a strip across the middle of the window,
+        37 times, and this runs for every one of them: measured with the
+        sampler, it became the single largest thing in a line change once
+        the sung line stopped being re-rasterised, and the two rounded
+        rectangles were most of it.
+
+        Between the corner radii the shape is not rounded — it is a
+        rectangle with a vertical line down each side — so when the
+        damaged rectangle lies inside that band the same pixels come out
+        of three axis-aligned fills, with no path to build and no
+        antialiasing to compute. That the pixels ARE the same is asserted
+        rather than reasoned about: a test compares the two paths grab
+        for grab, byte for byte, over every band the window has.
         """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_panel(painter, QRectF(event.rect()))
+
+    def _paint_panel(self, painter, damaged) -> None:
+        """The panel and its edge, into whatever painter is handed over.
+
+        Separated from paintEvent so the two routes below can be compared
+        against each other on a plain image: a QPainter on a widget only
+        exists during a real paint event, so a claim about identical
+        pixels could not otherwise be checked.
+        """
         rect = QRectF(self.rect())
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(_qcolor(self._current_background()))
-        painter.drawRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
-
         # One device pixel at rest, and up to three while a learned
         # position is being acknowledged: the colour alone was a change of
         # a few hundred pixels on a 460-point window, which the eye does
@@ -2129,8 +2220,36 @@ class LyricsWindow(QWidget):
         # colour ride the one glow value, so the edge cannot be left thick
         # and cool, and both return to exactly what they were.
         width = glow_width(1.0 / max(1.0, self.devicePixelRatioF()), self._glow)
+        fill = _qcolor(self._current_background())
+        edge = _qcolor(self._painted_border())
+
+        if self._straight_band(damaged):
+            # Three axis-aligned fills: the background across the damaged
+            # rows, and the hairline down each side of them. The same two
+            # colours and the same width as below, read from the same
+            # place, so there is still one answer to what the panel looks
+            # like. Antialiasing stays ON: the saving is the path, and
+            # turning the rasteriser's rules off for one of two routes
+            # that must agree would be trading the property for the cost.
+            painter.fillRect(
+                QRectF(rect.left(), damaged.top(), rect.width(), damaged.height()),
+                fill,
+            )
+            painter.fillRect(
+                QRectF(rect.left(), damaged.top(), width, damaged.height()), edge
+            )
+            painter.fillRect(
+                QRectF(rect.right() - width, damaged.top(), width, damaged.height()),
+                edge,
+            )
+            return
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
+
         inset = width / 2
-        pen = QPen(_qcolor(self._painted_border()))
+        pen = QPen(edge)
         pen.setWidthF(width)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -2138,6 +2257,19 @@ class LyricsWindow(QWidget):
             rect.adjusted(inset, inset, -inset, -inset),
             _CORNER_RADIUS - inset,
             _CORNER_RADIUS - inset,
+        )
+
+    def _straight_band(self, damaged) -> bool:
+        """Whether ``damaged`` lies where the panel's outline is straight.
+
+        Between the two corner radii, where the shape is a rectangle with
+        a vertical line down each side. Nothing about the horizontal
+        extent matters: the sides ARE the shape there, at every height in
+        the band.
+        """
+        return (
+            damaged.top() >= _CORNER_RADIUS
+            and damaged.bottom() <= self.height() - _CORNER_RADIUS
         )
 
     def resizeEvent(self, event) -> None:
@@ -2186,6 +2318,18 @@ class LyricsWindow(QWidget):
             return _scale_for(self._compact_width)
         return _scale_for(self.width())
 
+    def _restyle(self) -> None:
+        """The one place the window's stylesheet is written.
+
+        One place because the sung line's effect caches what it rasterised
+        of that line, and a colour or a type size arriving without the
+        cache being dropped is a line drawn in the appearance it used to
+        have. Two callers, a scale change and an appearance change, and
+        neither has to remember: this does.
+        """
+        self.setStyleSheet(_style_for(self._scale, self._family_stack, self._palette))
+        self._current_fx.invalidate()
+
     def _apply_scale(self) -> None:
         """Fonts, margins, spacing, and button boxes track window width
         near-linearly, so everything stays visually proportional from min
@@ -2193,9 +2337,7 @@ class LyricsWindow(QWidget):
         scale = self._type_scale()
         if abs(scale - self._scale) > 0.01:
             self._scale = scale
-            self.setStyleSheet(
-                _style_for(scale, self._family_stack, self._palette)
-            )
+            self._restyle()
             self._apply_layout_margins()
             row_gap = max(1, round(ROW_SPACING * scale))
             self._layout.setSpacing(row_gap)
@@ -4401,7 +4543,7 @@ class LyricsWindow(QWidget):
         margins, the fade timers, an engaged loop, a sync pass in
         progress — is untouched, because none of it is a colour.
         """
-        self.setStyleSheet(_style_for(self._scale, self._family_stack, self._palette))
+        self._restyle()
         self._apply_material_appearance()
         self._apply_speak_icon(button_side(self._scale))
         self._apply_why_icon(button_side(self._scale))
@@ -4908,6 +5050,12 @@ class LyricsWindow(QWidget):
         # repaints it. Removed beside the hotkey, and for the same reason.
         self._watcher.stop()
         self._display_watcher.stop()
+        # The third thing that can call in, and the newest: Spotify's
+        # announcement holds an observer that wakes the monitor. Beside
+        # the other two rather than with the monitor below, because what
+        # matters is that nothing outside can still reach in, not which of
+        # ours it reaches.
+        self._announcer.stop()
         self._settle_timer.stop()
         self._hover_timer.stop()
         self._stop_reveal()
@@ -4929,7 +5077,7 @@ class LyricsWindow(QWidget):
         self._stop_flight()
         self._save_settings()
         self._monitor_thread.stop()
-        # Poll may be mid-osascript (up to its 2s timeout).
+        # A tick may be mid-query, waiting on Spotify to answer.
         if not self._monitor_thread.wait(_SHUTDOWN_WAIT_MS):
             logger.warning("monitor thread did not stop in time")
         # Queued work that has not started yet is simply dropped: a fetch

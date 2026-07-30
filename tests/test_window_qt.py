@@ -39,6 +39,7 @@ from PySide6.QtCore import (  # noqa: E402
     QEvent,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
     QRunnable,
     QSettings,
@@ -71,6 +72,7 @@ from sottovoce import login_item  # noqa: E402
 from sottovoce import menu as m  # noqa: E402
 from sottovoce import menubar as mb  # noqa: E402
 from sottovoce import notifications as n  # noqa: E402
+from sottovoce import player_events  # noqa: E402
 from sottovoce import settings as preferences  # noqa: E402
 from sottovoce import vibrancy  # noqa: E402
 from sottovoce import window as w  # noqa: E402
@@ -148,6 +150,14 @@ def no_real_world(monkeypatch):
     # which is the plain window every other test in this file describes.
     # Tests that want a setting on assign window._display_options.
     monkeypatch.setattr(w.accessibility, "_workspace", lambda: None)
+    # Answered rather than blocked for the fourth time, and for the fourth
+    # reason that is the same reason: every window built here starts the
+    # announcer, and handing back None is the branch a machine without
+    # pyobjc takes — so the real PlaybackAnnouncer runs its real code and
+    # finds nothing to observe, which is also the case the monitor's fast
+    # rate exists for. The conftest guard stays armed for anything that
+    # reaches around it.
+    monkeypatch.setattr(player_events, "_distributed_center", lambda: None)
 
 
 @pytest.fixture
@@ -1075,6 +1085,249 @@ def test_a_seek_back_into_the_current_line_still_snaps(make_window):
     assert window._displayed_index == 0
     assert window._current.text() == "one"
     assert window._swap_timer.isActive()  # and the change is scheduled afresh
+
+
+# -- the line change: what it costs to draw --------------------------------
+#
+# `sourcePixmap` re-renders the whole source widget — two labels, so two
+# text layouts and two runs of glyph rasterisation — and Qt has no cache
+# for it on a widget source. Measured with the sampler on a real window,
+# that render was the single largest thing in a line change, and inside it
+# QPainter::drawText alone was a third of every frame's paint. Nothing
+# about the source moves during a phase, so it is rasterised once per
+# phase and not once per frame.
+
+
+class CountingFade(w.LineFade):
+    """The real effect, with the one expensive call counted.
+
+    A subclass rather than a patch, for the reason the pool has: assigning
+    to something process-wide leaks into every test that runs afterwards.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.renders = 0
+
+    def sourcePixmap(self, *args, **kwargs):
+        self.renders += 1
+        return super().sourcePixmap(*args, **kwargs)
+
+
+def counting_window(make_window):
+    """A window whose sung line is behind a counting effect.
+
+    Shown, because a hidden widget does not paint and an effect that is
+    never drawn counts nothing: the first version of this measured zero
+    renders and would have passed for any implementation at all.
+    """
+    window = synced_window(make_window)
+    effect = CountingFade(window._current_box)
+    window._current_fx = effect
+    window._current_box.setGraphicsEffect(effect)
+    window._apply_motion()
+    window.show()
+    APP.processEvents()
+    window._current_box.repaint()
+    assert effect.renders, "the effect is not being drawn at all"
+    return window, effect
+
+
+def repaint(window, times=1):
+    """Force the effect to draw, the way an animation frame does."""
+    for _ in range(times):
+        window._current_box.repaint()
+
+
+def test_a_phase_rasterises_the_line_once_however_many_frames_it_has(make_window):
+    window, effect = counting_window(make_window)
+    window._animate_line(-1.0, QEasingCurve.Type.InSine)
+    effect.renders = 0
+    for step in range(1, 9):
+        effect.progress = -step / 8.0
+        repaint(window)
+    assert effect.renders == 1, "re-rendered the same words once a frame"
+
+
+def test_a_repaint_that_is_not_a_frame_rasterises_again(make_window):
+    """The state the window spends almost all of its time in. A repaint
+    arriving without progress having moved is not a frame of an animation,
+    so the ordinary case is exactly what it always was — and a funnel
+    somebody forgets to invalidate is caught here rather than shown
+    stale."""
+    window, effect = counting_window(make_window)
+    repaint(window)
+    effect.renders = 0
+    repaint(window, times=3)
+    assert effect.renders == 3
+
+
+@pytest.mark.parametrize(
+    ("what", "change"),
+    [
+        ("the words", lambda win: win._set_line_text(win._current, "a new line")),
+        ("the romanisation", lambda win: win._set_pronunciation("saeroun")),
+        ("the romanisation going", lambda win: win._set_pronunciation("")),
+        ("the type and colour", lambda win: win._restyle()),
+    ],
+)
+def test_anything_that_changes_the_line_drops_what_was_drawn_of_it(
+    make_window, what, change
+):
+    """Mid-phase, which is the only time it can matter and the only time
+    it is hard: a resize re-elides the line while it is moving, and an
+    appearance change repaints it. Either one drawn from the cache would
+    be the line as it used to be."""
+    window, effect = counting_window(make_window)
+    window._animate_line(-1.0, QEasingCurve.Type.InSine)
+    effect.progress = -0.25
+    repaint(window)
+    effect.renders = 0
+
+    change(window)
+    effect.progress = -0.5  # the phase carries on
+    repaint(window)
+    assert effect.renders == 1, f"{what} changed and the old drawing was reused"
+
+
+def test_a_resize_mid_change_re_elides_and_is_not_drawn_from_the_cache(make_window):
+    """The route the parametrised case above stands in for, driven for
+    real: the strip elides against the window's width, so a drag while a
+    line is moving changes the words themselves."""
+    window, effect = counting_window(make_window)
+    window._compact_applied = True
+    window._animate_line(-1.0, QEasingCurve.Type.InSine)
+    effect.progress = -0.25
+    repaint(window)
+    effect.renders = 0
+
+    window._relayout()
+    effect.progress = -0.5
+    repaint(window)
+    assert effect.renders == 1
+
+
+def panel_pixels(window, damaged, straight, ratio):
+    """What _paint_panel puts on an image for ``damaged``.
+
+    ``straight`` picks the route by lying to the band test, which is what
+    makes the two comparable: the same call, the same painter settings,
+    the same window, one branch apart.
+
+    ``ratio`` is the screen's device pixel ratio, because that is what the
+    hairline's width is derived from and 1 is the one value a Mac never
+    has. The image is allocated in DEVICE pixels and told its ratio, so
+    the rasteriser works where the difference could actually show.
+    """
+    from PySide6.QtGui import QImage, QPainter
+
+    image = QImage(
+        int(window.width() * ratio),
+        int(window.height() * ratio),
+        QImage.Format.Format_ARGB32,
+    )
+    image.setDevicePixelRatio(ratio)
+    image.fill(0)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    with patch.object(w.LyricsWindow, "_straight_band", lambda self, r: straight), \
+            patch.object(w.LyricsWindow, "devicePixelRatioF", lambda self: ratio):
+        window._paint_panel(painter, QRectF(damaged))
+    painter.end()
+    return image
+
+
+@pytest.mark.parametrize("ratio", [1.0, 2.0])
+@pytest.mark.parametrize("glow", [0.0, 0.5, 1.0])
+def test_a_band_is_drawn_straight_and_it_is_the_same_pixels(make_window, glow, ratio):
+    """The claim, checked rather than reasoned about. Between the corner
+    radii the panel is a rectangle with a line down each side, so three
+    axis-aligned fills produce exactly what the two rounded rectangles do
+    — including at 2x, where the hairline is half a logical pixel wide and
+    a rounding difference between the two routes would be visible, and
+    while the edge is thickened by an acknowledged position."""
+    window = make_window()
+    window._glow = glow
+    for top in range(w._CORNER_RADIUS, window.height() - w._CORNER_RADIUS - 8, 7):
+        damaged = QRect(0, top, window.width(), 8)
+        fast = panel_pixels(window, damaged, True, ratio)
+        slow = panel_pixels(window, damaged, False, ratio)
+        device = QRect(
+            int(damaged.x() * ratio), int(damaged.y() * ratio),
+            int(damaged.width() * ratio), int(damaged.height() * ratio),
+        )
+        band_of = lambda img: img.copy(device).constBits().tobytes()  # noqa: E731
+        assert band_of(fast) == band_of(slow), (
+            f"the band at y={top} differs at {ratio}x"
+        )
+
+
+def test_the_corners_are_not_a_band(make_window):
+    """The rounded part has to go through the path, or the window would
+    have square corners while a line changed near the top of it."""
+    window = make_window()
+    assert not window._straight_band(QRectF(0, 0, window.width(), 20))
+    assert not window._straight_band(
+        QRectF(0, window.height() - 20, window.width(), 20)
+    )
+    assert not window._straight_band(QRectF(0, 0, window.width(), window.height()))
+    middle = QRectF(0, w._CORNER_RADIUS, window.width(), 10)
+    assert window._straight_band(middle)
+
+
+def test_the_line_change_repaints_inside_the_band(make_window):
+    """The whole reason the branch exists: the sung line sits between the
+    corners, so a line change takes the cheap route 37 times."""
+    window = synced_window(make_window)
+    window.show()
+    APP.processEvents()
+    box = window._current_box
+    damaged = window._current_fx.boundingRectFor(QRectF(box.rect())).translated(
+        box.mapTo(window, box.rect().topLeft())
+    )
+    assert window._straight_band(damaged)
+
+
+# -- being told rather than asking ----------------------------------------
+
+
+def test_the_window_listens_for_spotifys_own_announcement(make_window):
+    """Unconditional, like the display watcher and for the same reason: it
+    is not a layer with an "off", it is the app being told rather than
+    guessing. With no door in the suite the subscription simply finds
+    nothing to observe, which is also the case the monitor's fast rate
+    exists for."""
+    window = make_window()
+    assert isinstance(window._announcer, player_events.PlaybackAnnouncer)
+    assert window._announcer.listening is False
+
+
+def test_the_monitor_is_told_whether_anything_is_listening(make_window):
+    """And told the truth: with no door in the suite the observer does not
+    register, so the monitor must keep asking at its old rate — which is
+    the same branch a Mac without pyobjc takes."""
+    window = make_window()
+    assert window._announcer.listening is False
+    assert w.observing() is False
+    monitor = window._monitor_thread._monitor
+    assert monitor.interval() == monitor.poll_interval
+
+
+def test_the_announcement_only_ever_rings_the_monitors_bell(make_window):
+    """It is delivered on the UI thread and must not touch the window from
+    there: what it does is set a flag the monitor's own thread reads."""
+    window = make_window()
+    assert window._announcer._on_announcement is w.announce
+
+
+def test_the_observer_is_given_back_before_anything_is_destroyed(make_window):
+    """The third thing that can still call in, beside the hotkey and the
+    two workspace observers."""
+    window = make_window()
+    stopped = []
+    window._announcer.stop = lambda: stopped.append(True)
+    window._shutdown()
+    assert stopped == [True]
 
 
 def test_the_effect_reserves_room_for_the_travel(make_window):

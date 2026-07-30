@@ -1,21 +1,59 @@
-"""Poll the Spotify desktop app via AppleScript and emit playback events.
+"""Ask the Spotify desktop app what it is doing, and emit playback events.
 
 This module knows nothing about lyrics or the UI. It exposes:
 
 - ``PlayerSnapshot`` / ``PlaybackState``: what Spotify is doing right now
-- ``read_snapshot()``: one osascript query
-- ``PlayerMonitor``: polls on an interval and fires callbacks on changes
+- ``read_snapshot()``: one AppleScript query
+- ``PlayerMonitor``: runs a loop and fires callbacks on changes
 
-All fields are fetched in a single osascript call that returns
-newline-separated values, so every poll is one subprocess and the fields
+All fields are fetched in a single AppleScript expression that returns
+newline-separated values, so every query is one round trip and the fields
 are read atomically — a track change can't produce a snapshot mixing old
 and new metadata.
+
+## The query is sent from THIS process, not by launching osascript
+
+For thirteen milestones every query was ``subprocess.run(["osascript",
+...])``, three times a second, forever. Measured on an M4, against the
+identical script sent through ``NSAppleScript`` in-process:
+
+| | CPU per query | wall |
+|---|---|---|
+| ``osascript`` subprocess | 58.8 ms | 200 ms |
+| ``NSAppleScript``, compiled once | 5.5 ms | 133 ms |
+| ``NSAppleScript``, compiled each time | 24.3 ms | 133 ms |
+
+Almost none of that 58.8ms was the question. It was fork, exec,
+LaunchServices, TCC, and the AppleScript framework being loaded and thrown
+away, 3.3 times a second — and it did not land only on us: the daemons
+that carry a process launch (``launchservicesd``, ``tccd``,
+``runningboardd``, ``loginwindow``) woke on every poll and were idle
+without one.
+
+The script is compiled ONCE and kept, which is the difference between
+5.5ms and 24.3ms, and every execution is serialised behind one lock. That
+lock is not defensive: measured, three threads executing the same compiled
+script concurrently took 6.8s per execution against 0.13s serialised, with
+no errors and no wrong answers — fifty times slower for the privilege of
+being unserialised.
+
+## And it is asked far less often than it used to be
+
+``player_events.py`` observes Spotify's own announcement that something
+changed, so the loop no longer has to discover a track change by asking.
+Between queries the position is interpolated from the monotonic clock,
+which is exact rather than approximate: measured against Spotify's own
+answer every five seconds for 92 seconds, the largest disagreement was
+1.4ms.
+
+What is left for the loop to catch is a SEEK, which is measured to produce
+no announcement at all. See ``RECONCILE_SECONDS``.
 """
 
 from __future__ import annotations
 
 import logging
-import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -24,7 +62,10 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-_OSASCRIPT_TIMEOUT = 2.0
+# Spotify's bundle identifier, which is how this module asks whether it is
+# running. Not localised, not a path, and the same kind of identity the
+# notification yield and the position layer key apps on.
+SPOTIFY_BUNDLE_ID = "com.spotify.client"
 
 # One call, newline-separated output: either "not_running", or the player
 # state alone (no track loaded — the try block leaves output untouched when
@@ -36,46 +77,86 @@ _OSASCRIPT_TIMEOUT = 2.0
 # `artwork url` would fail the whole expression and take the six fields
 # with it — the app would show a running player and never find a song,
 # for the sake of a colour. Nested, the cost of that is one missing line.
-# The one question that needs no dictionary, and therefore the only one
-# that can be asked on a Mac with no Spotify on it.
 #
-# ``running`` is a property of AppleScript's own generic application class,
-# so this compiles anywhere. Everything in the snapshot script below is
-# Spotify's OWN terminology — `player state`, `spotify url`, even `current
-# track` — and AppleScript resolves terminology at COMPILE time, out of the
-# application bundle on disk. With no bundle to read, the snapshot script
-# does not fail at runtime with "not running": it fails to compile at all,
-# with a syntax error, before its first line is ever reached. Measured on a
-# Mac by asking with an application name that is not installed:
-# "141:146: syntax error: Expected “,” but found identifier. (-2741)".
+# ## Why nothing here may be asked of a Mac with no Spotify on it
 #
-# That is why this exists as a second script rather than as the first line
-# of the first one, where it already is and where it is unreachable.
-_RUNNING_SCRIPT = (
-    'if application "Spotify" is not running then return "not_running"\n'
-    'return "running"'
-)
+# Everything below is Spotify's OWN terminology — `player state`, `spotify
+# url`, even `current track` — and AppleScript resolves terminology at
+# COMPILE time, out of the application bundle on disk. With no bundle to
+# read, this script does not run and report "not running": it cannot be
+# compiled at all.
+#
+# For thirteen milestones that was merely expensive, because the script was
+# compiled inside a fresh `osascript` process, where it failed with a
+# syntax error in 182ms and nobody saw anything: "141:146: syntax error:
+# Expected “,” but found identifier. (-2741)". Compiled in THIS process it
+# is not expensive, it is a modal dialogue: macOS puts up its "Where is
+# Spotify?" application chooser, in front of the user, and blocks the
+# thread that asked until somebody dismisses it. Measured, by compiling
+# against an application name that is not installed: still blocked after
+# five minutes, with a file panel on screen owned by this process.
+#
+# And it is not a property of the `tell` block. The dictionary-free probe
+# this module used to keep for exactly this case — `if application "X" is
+# not running` and nothing else, which compiles anywhere — puts up the
+# SAME dialogue, because what cannot be resolved is the application, not
+# its vocabulary. So there is no AppleScript that is safe to ask about an
+# application that might not be there.
+#
+# Hence the rule this module now holds itself to: **AppleScript is never
+# compiled or sent unless Spotify is already running**, and whether it is
+# running is answered by AppKit rather than by AppleScript (see
+# ``spotify_running``). An application that is running is an application
+# whose bundle is on disk, so the chooser has nothing to ask about.
 
-_SNAPSHOT_SCRIPT = '''
+# How long any one question to Spotify may take before it is a failure.
+#
+# It has to be said in the script. The subprocess this module used to run
+# was bounded by subprocess.run's own timeout, and an in-process
+# NSAppleScript has no equivalent: it sends with the Apple Event Manager's
+# default, which is about a minute. A minute is not a bound — it is one
+# wedged Spotify away from a monitor thread that outlives shutdown's
+# three-second wait, and a QThread destroyed while running is a qFatal.
+#
+# `with timeout of N seconds` is AppleScript's own, needs no application
+# dictionary, and is the same two seconds subprocess.run was given.
+_QUERY_TIMEOUT_SECONDS = 2
+
+_SNAPSHOT_SCRIPT = f'''
 if application "Spotify" is not running then return "not_running"
-tell application "Spotify"
-	set output to (player state as string)
-	try
-		set output to output & linefeed & (spotify url of current track) \
+with timeout of {_QUERY_TIMEOUT_SECONDS} seconds
+	tell application "Spotify"
+		set output to (player state as string)
+		try
+			set output to output & linefeed & (spotify url of current track) \
 & linefeed & (name of current track) & linefeed & (artist of current track) \
 & linefeed & (album of current track) & linefeed & (duration of current track) \
 & linefeed & (player position)
-		try
-			set output to output & linefeed & (artwork url of current track)
+			try
+				set output to output & linefeed & (artwork url of current track)
+			end try
 		end try
-	end try
-	return output
-end tell
+		return output
+	end tell
+end timeout
 '''
 
 
+def _command(body: str) -> str:
+    """One instruction to Spotify, bounded like every other question.
+
+    The commands were one-liners and are now three, so the timeout is
+    written once here rather than three times beside them.
+    """
+    return (
+        f"with timeout of {_QUERY_TIMEOUT_SECONDS} seconds\n"
+        f'\ttell application "Spotify" to {body}\n'
+        "end timeout"
+    )
+
+
 class SpotifyQueryError(RuntimeError):
-    """An osascript query failed or returned something unparseable."""
+    """A query to Spotify failed or returned something unparseable."""
 
 
 class PlaybackState(Enum):
@@ -138,20 +219,101 @@ class PlayerSnapshot:
         return None
 
 
-def _osascript(expression: str) -> str:
+def _cocoa():
+    """``NSAppleScript`` and ``NSRunningApplication``, or None where there
+    are not any.
+
+    The single door, the same shape as ``hotkey._carbon()``,
+    ``frontmost._workspace()`` and the rest. Returns None off macOS and
+    without pyobjc, so every caller has one branch to handle and the suite
+    has one seam to shut, and it needs shutting: without it a test would
+    send Apple events to the developer's own Spotify, and would answer
+    differently depending on whether they happened to have it open.
+
+    Two classes and one door because they are one capability here: the
+    question "is Spotify running" exists only to decide whether the other
+    one may be used at all (see the snapshot script's comment on the
+    application chooser), and a door that shut one without the other would
+    shut neither.
+    """
+    if sys.platform != "darwin":
+        return None
     try:
-        proc = subprocess.run(
-            ["osascript", "-e", expression],
-            capture_output=True,
-            text=True,
-            timeout=_OSASCRIPT_TIMEOUT,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SpotifyQueryError(f"osascript failed: {exc}") from exc
-    if proc.returncode != 0:
-        message = proc.stderr.strip() or f"osascript exited {proc.returncode}"
-        raise SpotifyQueryError(message)
-    return proc.stdout.strip()
+        from AppKit import NSRunningApplication
+        from Foundation import NSAppleScript
+    except Exception:  # pragma: no cover - pyobjc missing
+        logger.warning("Cocoa unavailable: Spotify cannot be asked anything")
+        return None
+    return NSAppleScript, NSRunningApplication
+
+
+# Compiled scripts, by source. Compiling is 19ms of the 24ms an
+# uncompiled execution costs, and the two scripts here are constants, so
+# the whole of that is paid twice per process rather than 200,000 times a
+# day.
+_compiled: dict[str, object] = {}
+
+# One execution at a time. Not defensive: measured, three threads sharing
+# one compiled script took 6.8s per execution against 0.13s serialised.
+# The monitor's thread and the worker pool's seek/pause/resume are the two
+# callers, and they do collide.
+_ask_lock = threading.Lock()
+
+
+def _compile(script, source: str):
+    compiled = script.alloc().initWithSource_(source)
+    ok, error = compiled.compileAndReturnError_(None)
+    if not ok:
+        # The failure a Mac with no Spotify on it produces, every time,
+        # for a reason that will not clear. read_snapshot tells that case
+        # apart from a transient one; here it is just a failure.
+        raise SpotifyQueryError(f"could not compile: {_message(error)}")
+    return compiled
+
+
+def _message(error) -> str:
+    """What went wrong, out of NSAppleScript's error dictionary.
+
+    Its own message, not a socket's or a subprocess's: the string is shown
+    nowhere, but it is logged, and a log line that says "None" is a log
+    line that cost somebody an evening.
+    """
+    if error is None:
+        return "no reason given"
+    try:
+        return str(error.get("NSAppleScriptErrorMessage") or dict(error))
+    except Exception:  # pragma: no cover - defensive
+        return str(error)
+
+
+def _ask(expression: str) -> str:
+    """Send one AppleScript expression to Spotify and return its answer.
+
+    A blocking round trip to another process — never call this on a UI
+    thread. Raises SpotifyQueryError for every failure, which is the one
+    thing every caller of this module has always been able to rely on.
+
+    Nothing is sent, and nothing is even compiled, unless Spotify is
+    running. The gate lives here rather than in each caller because
+    forgetting it is not a wrong answer, it is a modal chooser on the
+    user's screen and a thread blocked behind it (see the snapshot script
+    above). One choke point, so a command added later cannot miss it.
+    """
+    door = _cocoa()
+    if door is None:
+        raise SpotifyQueryError("no AppleScript on this machine")
+    if not spotify_running():
+        raise SpotifyQueryError("Spotify is not running")
+    script, _ = door
+    with _ask_lock:
+        compiled = _compiled.get(expression)
+        if compiled is None:
+            compiled = _compile(script, expression)
+            _compiled[expression] = compiled
+        result, error = compiled.executeAndReturnError_(None)
+    if result is None:
+        raise SpotifyQueryError(_message(error))
+    return (result.stringValue() or "").strip()
 
 
 def _parse_state(raw: str) -> PlaybackState:
@@ -184,47 +346,126 @@ def _parse_track_kind(url: str) -> str:
     return parts[-2] if len(parts) >= 2 and parts[-2] else "track"
 
 
+# -- being told to ask again ------------------------------------------------
+#
+# The loop no longer asks Spotify on every tick, so something has to say
+# when what it last said has stopped being true. Two things do, and both
+# come through here:
+#
+# - Spotify's own announcement, via player_events.py, which covers every
+#   track change, every play and pause, and Spotify quitting and starting.
+# - this app changing what the player is doing, which is the one kind of
+#   seek the loop must never wait to notice: the loop's wrap, tap-to-sync
+#   and echo practice all move the position, several times a song.
+#
+# Module level rather than a method on the monitor, because the commands
+# below are module functions and the alternative is threading a monitor
+# reference through every QRunnable that sends one. That makes it
+# impossible to add a command that forgets, which is the property worth
+# having.
+_wake = threading.Event()
+_rings = 0
+_observing = False
+_rings_lock = threading.Lock()
+
+
+def announce() -> None:
+    """Spotify says something changed. Ask it what, now.
+
+    Counted as well as signalled, because the monitor also has to notice
+    an announcement it did NOT get (see ``PlayerMonitor.interval``).
+    """
+    global _rings
+    with _rings_lock:
+        _rings += 1
+    _wake.set()
+
+
+def announcements() -> int:
+    with _rings_lock:
+        return _rings
+
+
+def observing(listening: Optional[bool] = None) -> bool:
+    """Whether anything is listening for Spotify's announcements.
+
+    Set by whoever registered the observer, read by the monitor to decide
+    how often it has to ask. It starts optimistic rather than earning the
+    slower rate from the first announcement, because announcements only
+    arrive when something CHANGES: a user who starts the app in the middle
+    of a song and lets it play would have earned nothing for four minutes,
+    which is most of the saving thrown away for a case that then corrects
+    itself in one tick. The pessimistic direction is covered instead, by
+    the monitor noticing a change nobody announced.
+    """
+    global _observing
+    if listening is not None:
+        _observing = bool(listening)
+    return _observing
+
+
+def disturb() -> None:
+    """This app has just moved the player. What it last said is stale."""
+    _wake.set()
+
+
 def set_position(seconds: float) -> None:
-    """Seek Spotify to ``seconds``. A subprocess call — never invoke on a
-    UI thread. Raises SpotifyQueryError on failure."""
-    _osascript(
-        f'tell application "Spotify" to set player position to {seconds:.3f}'
-    )
+    """Seek Spotify to ``seconds``. A blocking round trip to another
+    process — never invoke on a UI thread. Raises SpotifyQueryError on
+    failure."""
+    try:
+        _ask(_command(f"set player position to {seconds:.3f}"))
+    finally:
+        # In the finally, because a command that failed is exactly as much
+        # of a reason to go and look as one that worked: the failure might
+        # have been the reply, not the seek.
+        disturb()
 
 
 def pause_playback() -> None:
-    """Pause Spotify. Subprocess call — worker threads only."""
-    _osascript('tell application "Spotify" to pause')
+    """Pause Spotify. Blocking round trip — worker threads only."""
+    try:
+        _ask(_command("pause"))
+    finally:
+        disturb()
 
 
 def resume_playback() -> None:
-    """Resume Spotify. Subprocess call — worker threads only."""
-    _osascript('tell application "Spotify" to play')
-
-
-# Whether the snapshot script was last found to be uncompilable, which on
-# a fixed script can only mean Spotify's terminology could not be resolved,
-# which can only mean Spotify is not installed.
-#
-# Remembered rather than rediscovered every 300ms because the two questions
-# cost very different amounts, measured on a Mac: asking for a snapshot
-# takes 184ms where Spotify exists, and the dictionary-free probe takes
-# 37ms there but 182ms where the application is absent (LaunchServices
-# searching for something that is not there). Without this, a Mac with no
-# Spotify would spend a doomed compile AND a probe on every poll; with it,
-# it settles into the probe alone — which is also what notices Spotify
-# being installed later, because it is asked again every time.
-_no_spotify_installed = False
+    """Resume Spotify. Blocking round trip — worker threads only."""
+    try:
+        _ask(_command("play"))
+    finally:
+        disturb()
 
 
 def spotify_running() -> bool:
-    """Whether Spotify is running, asked in a way that needs no dictionary.
+    """Whether Spotify is running, asked without AppleScript.
+
+    This is the gate, not a convenience. AppleScript cannot be asked about
+    an application that might not be installed without risking a modal
+    chooser (see the snapshot script above), so what decides whether to
+    ask has to be something else, and AppKit answers from the list of
+    running processes: no Apple event, no LaunchServices search, no
+    permission, and measured at 0.017ms of CPU against 25.7ms for the
+    dictionary-free AppleScript probe this replaces.
 
     False both for "installed and not running" and for "not installed at
     all", and the difference does not matter to any caller: from the
-    window's point of view they are the same silence.
+    window's point of view they are the same silence. It is also what
+    notices Spotify starting later, since it is asked every time.
     """
-    return _osascript(_RUNNING_SCRIPT) != "not_running"
+    door = _cocoa()
+    if door is None:
+        return False
+    _, running_application = door
+    try:
+        apps = running_application.runningApplicationsWithBundleIdentifier_(
+            SPOTIFY_BUNDLE_ID
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("could not ask which applications are running", exc_info=True)
+        return False
+    return bool(apps)
 
 
 def _not_running(polled_at: float) -> PlayerSnapshot:
@@ -235,40 +476,23 @@ def read_snapshot() -> PlayerSnapshot:
     """Query Spotify once. Raises SpotifyQueryError only if the state itself
     is unreadable; a missing track degrades to a track-less snapshot, and a
     Mac with no Spotify on it degrades to "not running" — which is the
-    truth, and is what it was always meant to report."""
-    global _no_spotify_installed
-    if _no_spotify_installed:
-        # Nothing here to ask a snapshot of. Keep asking the cheap
-        # question, which is also the one that notices Spotify arriving.
-        polled_at = time.monotonic()
-        if not spotify_running():
-            return _not_running(polled_at)
-        logger.info("Spotify is installed now: asking for snapshots again")
-        _no_spotify_installed = False
-    try:
-        output = _osascript(_SNAPSHOT_SCRIPT)
-    except SpotifyQueryError:
-        # A snapshot that could not be taken is normally transient and is
-        # re-raised. But it is also what a Mac with no Spotify produces,
-        # every single poll, for a reason that will not clear: the script
-        # cannot be compiled without Spotify's dictionary. One question
-        # that needs no dictionary tells the two apart.
-        if spotify_running():
-            raise
-        _no_spotify_installed = True
-        logger.warning(
-            "Spotify does not answer and is not running: reporting it as "
-            "not running. If it is not installed, this is the whole app: "
-            "the lyrics window follows the Spotify desktop app and there is "
-            "nothing else to follow."
-        )
+    truth, and is what it was always meant to report.
+
+    The running check comes FIRST now, and it is the whole of the "Mac
+    with no Spotify" answer. It used to come second, asked only when the
+    snapshot had already failed, because it was the expensive one; asked
+    in-process it costs a fraction of a microsecond, and asking the
+    snapshot first is no longer merely wasteful but unsafe.
+    """
+    if not spotify_running():
         return _not_running(time.monotonic())
+    output = _ask(_SNAPSHOT_SCRIPT)
     # Stamped the instant the query returns: this is how fresh the position
     # below is, and callers extrapolate from it.
     polled_at = time.monotonic()
     lines = output.splitlines()
     if not lines:
-        raise SpotifyQueryError("empty osascript output")
+        raise SpotifyQueryError("empty answer from Spotify")
     if lines[0] == "not_running":
         return _not_running(polled_at)
 
@@ -308,25 +532,61 @@ def read_snapshot() -> PlayerSnapshot:
 
 SnapshotCallback = Callable[[PlayerSnapshot], None]
 
-# How often the player is asked where it is. Named rather than left as a
-# default argument because the window reasons about it too: its predicted
-# line swap is allowed to run ahead of the player by the choreography plus
-# one of these, since the position that proves the prediction right cannot
-# arrive any sooner than the next poll.
+# How often the window hears where the player is. Named rather than left
+# as a default argument because the window reasons about it too: its
+# predicted line swap is allowed to run ahead of the player by the
+# choreography plus one of these, since the position that proves the
+# prediction right cannot arrive any sooner than the next update.
+#
+# This is the rate the window is TOLD at, and it has not changed. What
+# changed is that most of those updates no longer cost an Apple event:
+# between queries the position is worked out from the monotonic clock.
 POLL_INTERVAL_SECONDS = 0.3
+
+# How long the monitor will go without asking Spotify anything, once
+# Spotify's announcements have proved they arrive.
+#
+# This is the seek window and nothing else. Everything else that can
+# happen to a player rings the doorbell (player_events.py lists them, each
+# one driven and timed), and the app's own seeks call disturb() the
+# instant they land. What is left is the user dragging Spotify's own
+# scrubber, which is measured to announce nothing at all, and which this
+# is the whole latency of.
+#
+# The value is a trade and is stated as one. A query costs 4.3ms of CPU,
+# so the cost of the loop is 4.3ms/T:
+#
+#   T = 0.3s (what it used to be, always)   1.43% of one core
+#   T = 0.52s (one line change)             0.83%
+#   T = 1.0s (this)                         0.43%
+#   T = 2.0s                                0.21%
+#
+# against 19.6% for the subprocess this replaced. 1.0s buys most of what
+# there is to buy and leaves a seek corrected inside about two line
+# changes, which is the unit the window already moves in. Below 0.5s the
+# curve is steep and the thing being bought is latency on the one action
+# the user is already watching the player redraw.
+RECONCILE_SECONDS = 1.0
 
 
 class PlayerMonitor:
-    """Polls Spotify and fires callbacks when things change.
+    """Follows Spotify and fires callbacks when things change.
 
     Callbacks all receive the current ``PlayerSnapshot``:
 
     - ``on_state_change``: playing/paused/stopped/not_running transitions
     - ``on_track_change``: the current track changed (including to none)
-    - ``on_position_update``: every poll while a track is loaded
+    - ``on_position_update``: every tick while a track is loaded
 
-    On the first poll, state/track callbacks fire once to report the
+    On the first tick, state/track callbacks fire once to report the
     initial situation.
+
+    A tick is not a query. ``tick()`` asks Spotify when there is a reason
+    to — the doorbell rang, this app moved the player, or the last answer
+    is older than ``interval()`` — and otherwise carries the last answer
+    forward on the monotonic clock. Every callback fires from the same
+    rules whichever it was, so nothing downstream can tell the difference
+    and nothing downstream has to.
     """
 
     def __init__(
@@ -335,13 +595,26 @@ class PlayerMonitor:
         on_track_change: Optional[SnapshotCallback] = None,
         on_position_update: Optional[SnapshotCallback] = None,
         on_state_change: Optional[SnapshotCallback] = None,
+        reconcile_interval: float = RECONCILE_SECONDS,
     ) -> None:
         self.poll_interval = poll_interval
+        self.reconcile_interval = reconcile_interval
         self.on_track_change = on_track_change
         self.on_position_update = on_position_update
         self.on_state_change = on_state_change
         self._last: Optional[PlayerSnapshot] = None
         self._track_loss_pending = False
+        # The last time Spotify itself was asked, as opposed to the last
+        # time the window was told something.
+        self._asked_at: Optional[float] = None
+        # Whether an announcement has actually arrived, and whether one
+        # has ever been missed. The second is what there is no version of
+        # Spotify to sniff for: a track or state change discovered by
+        # asking, with nothing having rung for it, is the doorbell caught
+        # missing something, and the monitor goes back to asking.
+        self._rung = False
+        self._missed = False
+        self._rings_seen = announcements()
         # Set by stop() and never cleared. A monitor is run once, and the
         # flag this replaces was raised at the top of run() — so a stop()
         # that landed in the gap between starting the thread and the thread
@@ -351,9 +624,101 @@ class PlayerMonitor:
         # QThread that is still running.
         self._stop = threading.Event()
 
+    # -- how often to actually ask -----------------------------------------
+
+    def interval(self) -> float:
+        """How long the monitor may go without asking Spotify anything.
+
+        The reconciliation interval while there is a doorbell to rely on,
+        and the old poll interval otherwise — so a Mac where the observer
+        would not install, or a Spotify that does not announce, behaves
+        exactly as this app did before any of this existed. There is
+        nothing to configure and nothing to detect: it is lost by a change
+        arriving unannounced and given back by the next one that is
+        announced properly.
+        """
+        if self._missed:
+            return self.poll_interval
+        if self._rung or observing():
+            return self.reconcile_interval
+        return self.poll_interval
+
+    def _due(self, now: float) -> bool:
+        """Whether this tick has to be a real query.
+
+        Due when waiting for the NEXT tick would leave the answer older
+        than ``interval()``, rather than when it already is. Two reasons,
+        and the second is why it is written this way round:
+
+        - the interval is a ceiling on how stale an answer may be, and
+          "ask once it is too old" would mean it always is, by a tick.
+        - the two are equal until the doorbell has earned the slower rate,
+          and `elapsed >= interval` on floating-point ticks that are
+          nominally exactly one interval apart is a coin toss. That would
+          have halved the rate in the very case that exists to be
+          identical to the old behaviour.
+        """
+        if _wake.is_set() or self._asked_at is None or self._last is None:
+            return True
+        return now - self._asked_at > self.interval() - self.poll_interval
+
+    def _carried_forward(self, now: float) -> Optional[PlayerSnapshot]:
+        """Where the player must be, given where it was and how long ago.
+
+        Exact rather than approximate, and that is measured: checked
+        against Spotify's own answer every five seconds for 92 seconds of
+        one track, the largest disagreement was 1.4ms and there was no
+        trend. Spotify's player position and this machine's monotonic
+        clock are the same clock.
+
+        None when there is nothing to carry forward, which makes the tick
+        a query instead: no answer yet, no position in the last one (a
+        debounced blip), or a position that would now be past the end of
+        the track — that last one is a song that has finished, and the
+        announcement for the next one is either already on its way or
+        never coming, and either way the answer is to go and ask.
+        """
+        last = self._last
+        if last is None or last.polled_at is None or last.position_seconds is None:
+            return None
+        elapsed = now - last.polled_at
+        if last.state is not PlaybackState.PLAYING:
+            # Paused, stopped, gone: the position is not moving, but the
+            # stamp is, and the stamp is what anything interpolating from
+            # this snapshot extrapolates from.
+            return replace(last, polled_at=now)
+        position = last.position_seconds + elapsed
+        if last.duration_ms is not None and position * 1000 >= last.duration_ms:
+            return None
+        return replace(last, position_seconds=position, polled_at=now)
+
+    def tick(self) -> Optional[PlayerSnapshot]:
+        """One turn of the loop. A query when there is a reason for one,
+        and otherwise the last answer carried forward.
+
+        Returns whatever the window was told, or None if a query was tried
+        and transiently failed.
+        """
+        now = time.monotonic()
+        if self._due(now):
+            return self.poll_once()
+        snapshot = self._carried_forward(now)
+        if snapshot is None:
+            return self.poll_once()
+        if snapshot.position_seconds is not None:
+            self._fire(self.on_position_update, snapshot)
+        return snapshot
+
     def poll_once(self) -> Optional[PlayerSnapshot]:
-        """One poll cycle. Returns the snapshot, or None if the query
-        transiently failed (the previous state is kept)."""
+        """One real query, and the callbacks it earns. Returns the
+        snapshot, or None if the query transiently failed (the previous
+        state is kept)."""
+        # Cleared BEFORE the query: an announcement arriving while it is in
+        # flight describes something this answer may not include, and
+        # clearing afterwards would throw that away. At worst one redundant
+        # query, which is the direction to be wrong in.
+        _wake.clear()
+        self._asked_at = time.monotonic()
         try:
             snapshot = read_snapshot()
         except SpotifyQueryError as exc:
@@ -365,6 +730,16 @@ class PlayerMonitor:
             # diagnostic, it is a stream.
             logger.debug("poll failed: %s", exc)
             return None
+
+        # Counted AFTER the query, and against the last poll's reading, so
+        # a ring that landed mid-query still counts for the change this
+        # answer is about to report. Counted before, a track change and
+        # its announcement racing the same 133ms round trip would read as
+        # a change nobody announced, and the doorbell would be blamed for
+        # arriving on time.
+        rings = announcements()
+        rang = rings != self._rings_seen
+        self._rings_seen = rings
 
         previous = self._last
 
@@ -385,10 +760,25 @@ class PlayerMonitor:
             snapshot = replace(previous, state=snapshot.state, position_seconds=None)
         self._last = snapshot
 
-        if previous is None or snapshot.state != previous.state:
-            self._fire(self.on_state_change, snapshot)
+        state_changed = previous is None or snapshot.state != previous.state
         previous_key = previous.track_key if previous is not None else None
-        if previous is None or snapshot.track_key != previous_key:
+        track_changed = previous is None or snapshot.track_key != previous_key
+        # Who found out first. On the very first query there is no
+        # previous to have missed anything, so it says nothing either way.
+        if rang:
+            self._rung = True
+            self._missed = False
+        elif previous is not None and (state_changed or track_changed):
+            if not self._missed:
+                logger.info(
+                    "a change arrived without being announced: asking Spotify "
+                    "on a timer again"
+                )
+            self._missed = True
+
+        if state_changed:
+            self._fire(self.on_state_change, snapshot)
+        if track_changed:
             self._fire(self.on_track_change, snapshot)
         if snapshot.position_seconds is not None:
             self._fire(self.on_position_update, snapshot)
@@ -400,20 +790,28 @@ class PlayerMonitor:
             callback(snapshot)
 
     def run(self) -> None:
-        """Block and poll until ``stop()`` is called (or KeyboardInterrupt).
+        """Block and tick until ``stop()`` is called (or KeyboardInterrupt).
 
         Returns immediately if ``stop()`` already happened: the request is
         never overwritten from in here, which is the whole point of the
         event.
+
+        The wait is on ``_wake`` rather than on ``_stop``, so a doorbell
+        or one of this app's own seeks interrupts it and is acted on
+        within the round trip rather than at the end of the tick it landed
+        in. ``stop()`` sets both, so quitting still does not sit out a
+        wait — and ``_stop`` is still the only thing this loop's condition
+        reads, so a stop can no more be lost now than it could before.
         """
         while not self._stop.is_set():
             started = time.monotonic()
-            self.poll_once()
+            self.tick()
             remaining = self.poll_interval - (time.monotonic() - started)
             if remaining > 0:
-                # Waited on rather than slept through, so stopping does not
-                # first sit out the rest of a poll interval.
-                self._stop.wait(remaining)
+                _wake.wait(remaining)
 
     def stop(self) -> None:
         self._stop.set()
+        # Second, and only ever as a nudge: the loop's condition is _stop
+        # and nothing else, so this can only make the wait end sooner.
+        _wake.set()

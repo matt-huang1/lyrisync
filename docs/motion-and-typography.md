@@ -105,10 +105,51 @@ leaves a line parked off its mark.
 
 ## What it costs
 
-Measured per line change: 1.7 ms for the text swap, 57.8 ms for the fade,
-92.7 ms with the rise — against 34.1 ms at the old 100 ms pacing. At a
-line every four seconds that is **2.3% of one core**, and 0.16% between
-lines.
+Measured per line change when the choreography was set: 1.7 ms for the
+text swap, 57.8 ms for the fade, 92.7 ms with the rise — against 34.1 ms
+at the old 100 ms pacing. At a line every four seconds that is **2.3% of
+one core**, and 0.16% between lines.
+
+### Where 92 ms was going, and what is left
+
+Milestone 19 went looking, with the sampler rather than with a stopwatch.
+Of the main thread's paint work, **61% was `sourcePixmap`** — Qt
+re-rendering the source widget, which is two labels, so two full text
+layouts and two runs of glyph rasterisation — and inside that,
+`QPainter::drawText` alone was a third of every frame. Thirty-seven times
+per line change, for a fade and a ten-pixel rise.
+
+Nothing about the source moves during a phase. The sung line's words are
+set once, at the swap, *between* the two phases; the only thing changing
+frame to frame is `progress`, a number the effect multiplies an offset and
+an opacity by. So the pixmap is kept and reused, and **37.5 renders per
+change became 2.2**.
+
+Qt does not help with the invalidation and that was checked rather than
+assumed: `setText`, `setFont`, `setStyleSheet`, a resize and hiding a row
+each produced exactly one extra `draw()` and **zero** `sourceChanged`
+calls. There is no hook, so the rule is the window's own — four funnels it
+already had, plus a repaint arriving without `progress` having moved
+re-rendering anyway, which is the state the window is in almost all the
+time and is the net under a fifth funnel somebody forgets.
+
+With the text no longer re-rasterised, the window's **own `paintEvent`**
+became the largest single thing in a line change: two antialiased rounded
+rectangles over the whole window, clipped to a 460×45 band, 37 times.
+Between the corner radii the shape is not rounded — it is a rectangle with
+a vertical line down each side — so a damaged band inside that zone is
+drawn with three axis-aligned fills instead. That the pixels are the
+*same* is asserted rather than reasoned about: a test compares the two
+routes byte for byte over every band the window has, at 1x and at 2x, and
+at three glow widths.
+
+Together: **102 ms per line change to 80 ms** by median over three
+alternating pairs on the same machine, best observed 60 ms. What remains
+is not the app's to move — Qt's backing store, CoreAnimation committing
+the damaged band (about a tenth of the main thread inside
+`CGColorSpaceCreateWithICCData`, which is macOS's), and PySide crossing
+into Python three times a frame. All of it is area times frames, and
+neither can change without changing how it looks.
 
 ## Verifying motion
 
@@ -126,7 +167,21 @@ Two things this project learned the hard way:
   photographed.
 
 `grab()` *is* the right readback for `paintEvent` output, which is how the
-tinted hairline is checked from real pixels.
+tinted hairline is checked from real pixels. It is the wrong one for the
+**band** fast path above, and for the opposite reason: `grab()` hands the
+whole rectangle over, which is never a band. That one is checked twice
+over — against the rounded path on a plain image, and by screen-capturing
+a real window mid-change.
+
+And two things a harness can get wrong, both of which this one did:
+
+- **a `processEvents` spin loop reads 100% of a core in every
+  condition.** A `QEventLoop` sleeps when there is nothing to do; what is
+  left on the clock is then the window's own work.
+- **an instrumented copy of `draw()` measures the copy.** The second
+  version of the profiler replaced `LineFade.draw` with its own and went
+  on reporting the pre-cache numbers after the cache had landed. Wrap the
+  calls, do not reimplement the caller.
 
 ## The type scale
 

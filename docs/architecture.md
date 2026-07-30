@@ -3,7 +3,8 @@
 ## Three components that do not know about each other
 
 ```
-player_monitor.py   polls Spotify, emits events        — knows nothing about the UI
+player_monitor.py   follows Spotify, emits events       — knows nothing about the UI
+player_events.py    Spotify's own "something changed"  — knows nothing about the UI
 lyrics_provider.py  user syncs, cache, LRCLIB          — knows nothing about the UI
 window.py           PySide6 widget, wiring, natives    — knows about both
 ```
@@ -32,6 +33,7 @@ Everything that can be logic rather than widget is:
 | `flight.py` | the journey to and from the menu bar item |
 | `app_positions.py` | the per-app position map, the settling rule, the gates |
 | `notifications.py` | the overlap and opacity rules for yielding — plus one native door |
+| `player_events.py` | observing Spotify's own announcement that something changed — plus one native door |
 | `typography.py` | the type scale — imported by `geometry.py` |
 | `appearance.py` | both palettes, the album tint maths, the high-contrast overrides |
 | `gestures.py` | scroll and wheel routing |
@@ -63,12 +65,15 @@ app runs, and one door could not be blocked without blocking the other.
 
 ## Threads
 
-- **UI thread** — Qt, and only Qt. It never runs a subprocess, and never
-  blocks on one.
-- **Monitor thread** (`QThread`) — polls Spotify every ~300 ms and emits
-  signals delivered by queued connection.
+- **UI thread** — Qt, and only Qt. It never blocks on Spotify. Spotify's
+  announcement is delivered here, and all it does is set a flag the
+  monitor's thread reads.
+- **Monitor thread** (`QThread`) — ticks every ~300 ms, emitting a
+  position each time by queued connection, and actually asks Spotify
+  about once a second or whenever it is told to.
 - **Worker pool** (`QThreadPool`) — one-shot tasks: lyrics fetch, artwork
-  fetch, `say`, seek, pause/resume.
+  fetch, `say`, seek, pause/resume. The last three send Apple events,
+  serialised against the monitor's behind one lock.
 
 Shutdown drains them in a fixed order — hotkey, then monitor thread, then
 pool — with bounded waits. See

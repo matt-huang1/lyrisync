@@ -11,8 +11,8 @@ is that the suite is allowed nowhere near anything real.
 
 This is not politeness. Running the suite used to restart whatever the
 developer was listening to, because entering a tap-to-sync pass dispatches
-a seek-to-0 and a resume, and `osascript` will happily launch Spotify to
-do it.
+a seek-to-0 and a resume, and an Apple event will happily start Spotify to
+carry one out.
 
 ## Seams first, guards second
 
@@ -25,12 +25,14 @@ than by the suite: real `QSettings` writes, real player commands, a tray
 test that never actually ran, and a live LRCLIB fetch that aborted CI
 mid-handshake.
 
-Ten doors are shut for the whole session:
+Twelve doors are shut for the whole session:
 
 | guard | catches |
 |---|---|
 | outbound sockets (at `socket`, not `urllib`) | any lyrics or artwork fetch, however it is made |
-| `subprocess.run` / `Popen` | `osascript` to Spotify, `say` to the speakers |
+| `subprocess.run` / `Popen` | `say` to the speakers |
+| `player_monitor._cocoa()` | every question and every command to the developer's Spotify, and whether they have it open |
+| `player_events._distributed_center()` | an observer left sitting on the distributed notification centre, waking on every track they play |
 | a `LyricsProvider` on its default directories | anything that would read or write the real caches — `.user_syncs/` included |
 | an `ArtworkProvider` on its default directory | the real `.artwork_cache/`, and the CDN a miss would reach for |
 | `QSettings("sottovoce", "sottovoce")` | the real `~/Library/Preferences` plist |
@@ -41,8 +43,15 @@ Ten doors are shut for the whole session:
 | `accessibility._workspace()` | how the developer's Mac is set up, and an observer left sitting on it |
 | `settings._legacy_settings()` | the plist the LyriSync name left behind |
 
-The last six are the same shape and each module has exactly **one** native
-door for that reason. Three of them would outlive the test that started
+The subprocess guard used to cover Spotify too, and that is worth writing
+down rather than editing out: the app asked by launching `osascript`, so
+one guard caught the network's neighbour and the player's commands
+together. Milestone 19 moved the capability into this process, and the
+alarm had to move with it — a guard that goes on passing after the thing
+it guards has moved is worse than no guard, because it reads as coverage.
+
+The last eight are the same shape and each module has exactly **one**
+native door for that reason. Three of them would outlive the test that started
 them and keep calling into a window that has since been destroyed; the
 window list reads which apps are running and where their windows are,
 which is both none of the suite's business and a result that would depend
