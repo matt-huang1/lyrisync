@@ -22,9 +22,66 @@ class LoopPhase(Enum):
 ENTRY_GRACE = 0.5
 EXIT_GRACE = 1.0
 
-# Dispatch the wrap seek this early: the osascript write takes ~150-200ms,
-# so firing at the end bound exactly would bleed the next line through.
-SEEK_LEAD_SECONDS = 0.46
+# -- how early to dispatch the wrap seek ------------------------------------
+#
+# The wrap is dispatched before the line's end bound so that the seek
+# LANDS on it, which makes the lead one thing and one thing only: how long
+# a command to Spotify takes. It was a constant, 0.46s, inherited from the
+# osascript era when the write was measured at 150-200ms; in-process the
+# same command was measured between 133ms and a full second in one
+# session, because it queues on the one lock behind whatever the monitor
+# happens to be asking. A constant against that fires early nearly always
+# and late the rest of the time, and the error is the whole difference
+# between the lead and the round trip: at a real 133ms a 0.46s lead cuts
+# 327ms off the end of every line.
+#
+# So the lead is the recent round trips, and the app measures its own.
+
+# The first wrap of a session has nothing to go on. 0.20s: the in-process
+# round trip is measured at 133ms and a command can wait a whole query
+# behind the lock, so a first guess of one and a half round trips errs
+# early rather than late — early truncates the tail of the line, late
+# bleeds the next line through, and the next wrap has a measurement.
+SEEK_LEAD_START = 0.20
+
+# A lead below this is not worth having: the dispatch itself has to reach
+# a worker thread. Above the ceiling the lead is eating the line rather
+# than protecting it, and a round trip that slow is one `still_valid`
+# is about to cancel the loop over anyway (EXIT_GRACE).
+SEEK_LEAD_FLOOR = 0.05
+SEEK_LEAD_CEILING = EXIT_GRACE
+
+# How many recent round trips the lead is taken over. The statistic is the
+# MEDIAN, which is the whole of the outlier handling and needs no
+# threshold to argue about: one command that queued behind a slow query
+# moves the middle of eight samples by nothing at all, and it takes five
+# of them agreeing before the lead follows. Eight is about three wraps of
+# a ten second line, so the lead tracks a machine that has genuinely got
+# slower within a verse and ignores a single hiccup entirely.
+SEEK_LEAD_SAMPLES = 8
+
+
+def seek_lead(round_trips: tuple = ()) -> float:
+    """How early to dispatch the wrap seek, given what recent commands to
+    the player actually cost.
+
+    Pure, and given the numbers rather than going to look for them: the
+    measuring belongs to whoever owns the channel (`player_monitor`), and
+    the policy belongs here.
+    """
+    usable = [
+        seconds for seconds in round_trips[-SEEK_LEAD_SAMPLES:] if seconds >= 0
+    ]
+    if not usable:
+        return SEEK_LEAD_START
+    ordered = sorted(usable)
+    middle = len(ordered) // 2
+    median = (
+        ordered[middle]
+        if len(ordered) % 2
+        else (ordered[middle - 1] + ordered[middle]) / 2
+    )
+    return min(SEEK_LEAD_CEILING, max(SEEK_LEAD_FLOOR, median))
 
 
 class LineLoop:
@@ -41,6 +98,21 @@ class LineLoop:
         # observe_position.
         self._wrap_pending = False
         self._wrap_from = 0.0
+        # The last position seen while the line was simply playing. What
+        # the wrap landing is measured against.
+        self._seen: Optional[float] = None
+        # What recent commands to the player cost, newest last. Handed in
+        # rather than fetched, so this stays pure.
+        self._round_trips: tuple = ()
+
+    def observe_round_trips(self, round_trips) -> None:
+        """Feed how long this app's recent player commands took."""
+        self._round_trips = tuple(round_trips)
+
+    @property
+    def lead(self) -> float:
+        """How early the wrap seek goes out, at the moment it is asked."""
+        return seek_lead(self._round_trips)
 
     @property
     def engaged(self) -> bool:
@@ -77,6 +149,7 @@ class LineLoop:
         self._phase = LoopPhase.LISTEN
         self._pause_confirmed = False
         self._wrap_pending = False
+        self._seen = None
         return True
 
     def release(self) -> None:
@@ -84,6 +157,7 @@ class LineLoop:
         self._phase = LoopPhase.LISTEN
         self._pause_confirmed = False
         self._wrap_pending = False
+        self._seen = None
 
     @property
     def phase(self) -> LoopPhase:
@@ -101,11 +175,22 @@ class LineLoop:
             self._phase = LoopPhase.ATTEMPT
             self._pause_confirmed = False
             return "attempt"
-        # The scheduler runs this timer for exactly `end - position - lead`
-        # seconds, so the position it fires at is the end bound less the
-        # lead, whatever the position that armed it was.
+        # The threshold a position has to fall below to count as the wrap
+        # landing, and it is the last position actually SEEN rather than
+        # `end - lead`, which is only where the scheduler meant to fire.
+        # The two came apart the moment the lead stopped being a constant:
+        # a lead measured shorter between arming the timer and it going
+        # off puts `end - lead` LATER than the position the wrap really
+        # went out at, so the very next poll reads ordinary playback as
+        # the seek landing and dispatches a second one. Measured, at a
+        # 0.10s round trip: two extra seeks in five wraps. Playback only
+        # ever moves forward, so nothing playing on can fall below where
+        # the line already was, and the seek to the start bound is far
+        # below it.
         self._wrap_pending = True
-        self._wrap_from = self._end - SEEK_LEAD_SECONDS
+        self._wrap_from = (
+            self._seen if self._seen is not None else self._end - self.lead
+        )
         return "seek"
 
     def observe_position(self, position_seconds: Optional[float]) -> None:
@@ -129,10 +214,16 @@ class LineLoop:
         the position runs on past the end bound and ``still_valid``
         cancels the loop, which is what a failed seek has always done.
         """
-        if not self._wrap_pending or position_seconds is None:
+        if position_seconds is None:
             return
-        if position_seconds < self._wrap_from:
+        if self._wrap_pending and position_seconds < self._wrap_from:
             self._wrap_pending = False
+        if not self._wrap_pending:
+            # Only while the line is playing on: a position that arrives
+            # with a wrap still out is one the wrap has not answered yet,
+            # and moving the threshold up to meet it would be the loop
+            # agreeing with itself.
+            self._seen = position_seconds
 
     def finish_attempt(self) -> None:
         """User-paced: the attempt ends only when the user says so (the 🎤
@@ -180,4 +271,4 @@ class LineLoop:
             return None
         if self._phase is LoopPhase.ATTEMPT or self._wrap_pending:
             return None
-        return max(0.0, self._end - position_seconds - SEEK_LEAD_SECONDS)
+        return max(0.0, self._end - position_seconds - self.lead)

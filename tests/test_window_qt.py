@@ -5666,14 +5666,14 @@ def test_the_song_takes_the_width_and_leaves_the_type_alone(make_window):
     """
     window = make_window()
     go_compact(window)
-    users_width = window._compact_width
+    users_width = window._shapes.recall(True).width
     scale = window._scale
 
     load(window, FITTED)
     finish_fit(window)
     assert window.width() == expected_width(window, widest_sung(window, FITTED))
     assert window._scale == scale
-    assert window._compact_width == users_width  # the user's own, untouched
+    assert window._shapes.recall(True).width == users_width  # the user's own, untouched
 
 
 def test_the_strips_height_does_not_move_when_its_width_does(make_window):
@@ -6829,6 +6829,7 @@ class FakeSpotify:
 
     def __init__(self, clock, position=0.0):
         self.clock = clock
+        self.commands = None      # set by the fixture; see answer()
         self.position = position
         self.stamped_at = clock.now
         self.playing = True
@@ -6856,6 +6857,17 @@ class FakeSpotify:
         self.resumes += 1
 
     def answer(self, script):
+        """The fake _ask. A COMMAND is charged the round trip it took: the
+        clock goes back to when it was sent and forward to now, so what
+        the app times around this call is what the harness is simulating.
+        The effect lands after the clock is put back, so the player is
+        moved at the moment the command returned and not at the moment it
+        was sent."""
+        if script != pmon._SNAPSHOT_SCRIPT and self.commands.landing_at is not None:
+            # The command returns NOW. The caller set the clock back to
+            # when it was sent, so player_monitor's own timing around this
+            # call comes out as the round trip the harness is simulating.
+            self.clock.now = self.commands.landing_at
         if script == pmon._SNAPSHOT_SCRIPT:
             return "\n".join([
                 "playing" if self.playing else "paused",
@@ -6887,6 +6899,13 @@ class Commands:
         self.clock, self.spotify = clock, spotify
         self.round_trip = round_trip
         self.pending = []
+        # When the command now executing LANDS. player_monitor times
+        # itself around _ask, so the harness puts the clock back to the
+        # moment the command left and the fake _ask puts it forward again
+        # to the moment it returned. Without that the app measures a round
+        # trip of zero, and the loop's lead IS that round trip: it would
+        # be measured against a harness that never charged for it.
+        self.landing_at = None
 
     def dispatch(self, seek_to=None, pause=False, resume=False):
         self.pending.append((self.clock.now + self.round_trip,
@@ -6895,13 +6914,19 @@ class Commands:
     def land_due(self):
         due = [c for c in self.pending if c[0] <= self.clock.now]
         self.pending = [c for c in self.pending if c[0] > self.clock.now]
-        for _, seek_to, pause, resume in due:
-            if seek_to is not None:
-                pmon.set_position(seek_to)
-            if pause:
-                pmon.pause_playback()
-            if resume:
-                pmon.resume_playback()
+        for lands_at, seek_to, pause, resume in due:
+            self.landing_at = lands_at
+            self.clock.now = lands_at - self.round_trip   # when it was sent
+            try:
+                if seek_to is not None:
+                    pmon.set_position(seek_to)
+                if pause:
+                    pmon.pause_playback()
+                if resume:
+                    pmon.resume_playback()
+            finally:
+                self.landing_at = None
+                self.clock.now = lands_at
 
 
 @pytest.fixture
@@ -6911,11 +6936,16 @@ def player(monkeypatch):
     clock = FakeClock(time.monotonic())
     spotify = FakeSpotify(clock)
     commands = Commands(clock, spotify)
+    spotify.commands = commands
 
     monkeypatch.setattr(pmon, "time", clock)
     monkeypatch.setattr(pmon, "_ask", spotify.answer)
     monkeypatch.setattr(pmon, "spotify_running", lambda: True)
     monkeypatch.setattr(pmon, "_moved", None, raising=False)
+    # Module state, like _moved and _wake: the round trips one test leaves
+    # behind are the lead a later one's first wrap is dispatched with, so
+    # a fresh window would open already knowing how fast this machine is.
+    pmon._round_trips.clear()
 
     class RecordingSeek(w.SeekTask):
         def __init__(self, seconds):
@@ -6935,6 +6965,7 @@ def player(monkeypatch):
     pmon.observing(was)
     pmon._wake.clear()
     pmon._moved = None
+    pmon._round_trips.clear()
 
 
 class FakeTimer:
@@ -7156,3 +7187,261 @@ def test_the_window_is_told_where_this_apps_own_seek_put_the_player(
     monitor.tick()          # and one carried forward from it
 
     assert window._last_position == pytest.approx(15.3, abs=0.01)
+
+
+# -- a press that missed is not a placement --------------------------------
+#
+# Reported as the loop and mic buttons intermittently doing nothing, with
+# the press reaching the window's drag handler and producing the learn
+# glow. REPRODUCED, by posting real clicks at the controls' own centres
+# with the app backgrounded: in the compact strip a press 0ms or 30ms
+# after the pointer arrived reached the window, one 60ms after it reached
+# the control. The gap is the pointer poll — there is no hover event for a
+# window that never activates, so the controls come out when the poll
+# notices, up to _POINTER_POLL_MS later, and until they do there is
+# nothing under the hand to press.
+#
+# Two things were wrong with that and they are separate. The controls
+# arriving late is one. The other is what the app did INSTEAD, which was
+# to record a position and say so.
+
+
+@pytest.fixture
+def learning(make_window):
+    """A window with the position layer on, some other app in front, and
+    a record of every position it decides to remember."""
+    window = make_window()
+    load(window, SYNCED)
+    window._remember_position = True
+    window._frontmost = VSCODE
+    window._own_bundle_id = "com.sottovoce.sottovoce"
+    window.move(300, 200)
+    APP.processEvents()
+    recorded = []
+    real = window._positions.remember
+
+    def recording(bundle_id, x, y, name=None):
+        recorded.append((x, y))
+        return real(bundle_id, x, y, name)
+
+    window._positions.remember = recording
+    return window, recorded
+
+
+def press_and_release(window, at=None, to=None):
+    """A press and a release on the window, with the window moved between
+    them if `to` is given — which is what a drag IS."""
+    point = at if at is not None else QPoint(window.width() // 2, 8)
+    window.mousePressEvent(press_at(window, window.mapToGlobal(point)))
+    if to is not None:
+        window.move(to)
+    window.mouseReleaseEvent(release())
+    APP.processEvents()
+
+
+def test_a_press_that_moved_nothing_records_nothing(make_window, learning):
+    """The learn glow in the report. A click that missed a control is not
+    somebody saying where they want the window."""
+    window, positions = learning
+    press_and_release(window)
+    assert positions == []
+
+
+def test_a_drag_that_moved_the_window_still_records(make_window, learning):
+    """The other half, and it has to be asserted here or the fix above is
+    indistinguishable from turning the layer off."""
+    window, positions = learning
+    press_and_release(window, to=QPoint(320, 240))
+    assert positions == [(320, 240)]
+
+
+def test_a_resize_that_changed_nothing_records_nothing(make_window, learning):
+    """A press on an edge that never moved is the same click by another
+    name: the resize path sets no drag offset, so it needs the rule too."""
+    window, positions = learning
+    window.mousePressEvent(
+        press_at(window, window.mapToGlobal(QPoint(window.width() - 2,
+                                                   window.height() // 2)))
+    )
+    window.mouseReleaseEvent(release())
+    APP.processEvents()
+    assert positions == []
+
+
+def test_a_press_on_the_window_says_where_the_pointer_is(make_window):
+    """A press ON this window IS a pointer on this window, and it is a
+    better answer than the poll: exact, and now. Without it the strip's
+    controls come out when the next poll runs, which is what a hand that
+    knows where the button is beats."""
+    window = make_window()
+    load(window, SYNCED)
+    go_compact(window)
+    hover(window, inside=False)
+    assert window._reveal == 0.0
+    assert window._loop_button.isVisibleTo(window) is False
+
+    window.mousePressEvent(
+        press_at(window, window.mapToGlobal(QPoint(window.width() // 2, 8)))
+    )
+
+    assert window._hovered is True
+    assert window._reveal_to == 1.0
+    finish_reveal(window)
+    assert window._loop_button.isVisibleTo(window) is True
+
+
+def test_it_does_not_claim_a_pointer_nothing_is_watching(make_window):
+    """Whoever stops the poll also clears the hover, so a hover set with
+    nothing left to clear it would hold the controls out for ever."""
+    window = make_window()
+    load(window, SYNCED)  # full layout, no proximity layer: no poll
+    assert window._pointer_timer.isActive() is False
+
+    window.mousePressEvent(
+        press_at(window, window.mapToGlobal(QPoint(window.width() // 2, 8)))
+    )
+
+    assert window._hovered is False
+
+
+# -- each layout keeps its own place and size ------------------------------
+#
+# The size half has been kept since milestone 20 and works; the POSITION
+# half was queued and missing, and they are one fact. A strip is a quarter
+# the height of the full layout and usually a different width, so coming
+# back from it handed the full layout its old size at wherever the strip
+# happened to be standing — which, after a song had fitted the strip's
+# width, is not a place the full layout had ever been.
+
+
+def test_each_layout_comes_back_to_its_own_place_and_size(make_window):
+    window = make_window()
+    load(window, SYNCED)
+    window.resize(520, 340)
+    window.move(300, 200)
+    APP.processEvents()
+
+    window._set_compact(True)
+    window.move(120, 60)
+    APP.processEvents()
+    strip_height = window.height()
+
+    window._set_compact(False)
+    assert (window.width(), window.height()) == (520, 340)
+    assert window.pos() == QPoint(300, 200)
+
+    window._set_compact(True)
+    assert window.pos() == QPoint(120, 60)
+    assert window.height() == strip_height
+
+
+def test_a_sync_pass_hands_the_strip_back_where_it_found_it(make_window):
+    """The pass borrows the full layout without being asked to, so it is
+    the one layout change the user did not make — and it may not teach
+    either layout a new place."""
+    window = make_window()
+    load(window, SYNCED)
+    window.resize(520, 340)
+    window.move(300, 200)
+    APP.processEvents()
+    window._set_compact(True)
+    window.move(120, 60)
+    APP.processEvents()
+
+    window._begin_sync()
+    APP.processEvents()
+    assert window.pos() == QPoint(300, 200)  # the full layout's own place
+    window._cancel_sync()
+    APP.processEvents()
+
+    assert window.pos() == QPoint(120, 60)
+
+
+def test_a_layout_never_worn_is_left_where_the_resize_put_it(make_window):
+    """The same answer _width_for gives about a width nobody has chosen:
+    nothing to give back, so nothing is given. What decides the place is
+    then the rule that already did — a width change is anchored on the
+    window's centre — and this must not quietly become a second answer to
+    where the window goes."""
+    window = make_window()
+    load(window, SYNCED)
+    window.move(240, 160)
+    APP.processEvents()
+    centre = window.frameGeometry().center().x()
+
+    window._set_compact(True)
+
+    assert window.frameGeometry().center().x() == centre
+    assert window.pos().y() == 160
+
+
+def test_a_remembered_place_is_clamped_to_the_screen(make_window):
+    """A position is a preference expressed on a display that may be gone
+    by the time it is given back."""
+    window = make_window()
+    load(window, SYNCED)
+    window._set_compact(True)
+    APP.processEvents()
+    window._shapes.remember(True, x=99_000, y=99_000)
+
+    window._set_compact(False)
+    window._set_compact(True)
+
+    assert window._available_geometry().contains(window.frameGeometry())
+
+
+def test_the_place_kept_is_where_the_window_belongs(make_window):
+    """Not where a dodge has it standing. Four bugs in this project have
+    been a temporary position written down as a permanent one."""
+    window = with_mode(make_window(), proximity.DODGE)
+    load(window, SYNCED)
+    home = window.pos()
+    arrive(window)
+    assert window.pos() != home
+
+    window._set_compact(True)
+
+    assert window._shapes.recall(False).x == home.x()
+    assert window._shapes.recall(False).y == home.y()
+
+
+def test_a_song_choosing_the_width_does_not_choose_the_place(make_window):
+    """_remember_shape declines the fitted width and keeps the position:
+    the song has an opinion about how wide the strip is and none at all
+    about where it sits."""
+    window = make_window()
+    load(window, SYNCED)
+    window._set_compact(True)
+    APP.processEvents()
+    users_width = window._shapes.recall(True).width
+    window.move(140, 90)
+    window._fit_width(animate=False)
+    finish_fit(window)
+
+    window._set_compact(False)
+
+    assert window._shapes.recall(True).width == users_width
+    assert (window._shapes.recall(True).x, window._shapes.recall(True).y) == (140, 90)
+
+
+def test_both_layouts_survive_a_restart(make_window):
+    """The window is restored into whichever layout it was quit in, and
+    the OTHER one has to come back with it — its shape is not in
+    window/size, which holds only the layout that was on screen."""
+    window = make_window()
+    load(window, SYNCED)
+    window.resize(520, 340)
+    window.move(300, 200)
+    APP.processEvents()
+    window._set_compact(True)
+    window.move(120, 60)
+    APP.processEvents()
+    window._save_settings()
+
+    second = make_window()
+    second._restore_settings()  # the factory resizes after construction
+    APP.processEvents()
+    second._set_compact(False)
+
+    assert (second.width(), second.height()) == (520, 340)
+    assert second.pos() == QPoint(300, 200)

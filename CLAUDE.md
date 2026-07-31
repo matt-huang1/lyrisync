@@ -21,7 +21,8 @@ can be logic rather than widget is a **Qt-free pure module** —
 `geometry.py`, `typography.py`, `appearance.py`, `transition.py`,
 `flight.py`, `app_positions.py`, `gestures.py`, `romanize.py`,
 `menubar.py`, `http_client.py`, `settings.py`, `notifications.py`,
-`proximity.py`, `failure.py`, `player_events.py`. That is
+`proximity.py`, `failure.py`, `player_events.py`, `hit_test.py`,
+`placement.py`. That is
 why the contrast floor is a test rather than a judgement, and why the
 whole suite runs headless on Linux.
 
@@ -203,6 +204,16 @@ Rules that come with them:
   Docstrings and the history files are exempt; a test scans the syntax of
   every module, because a text scan could only be satisfied by deleting
   the explanations.
+- **Each layout keeps its own place AND its own size**, in one record
+  (`placement.LayoutShapes`), because they are one fact: a strip is a
+  quarter the height of the full layout and usually a different width, so
+  the place that suits one does not suit the other. Coming back from the
+  strip used to hand the full layout its old size at wherever the strip
+  happened to be standing. The position kept is **where the window
+  belongs** and never where a dodge has it standing; it is given back
+  AFTER the fit, because fitting anchors a width change on the centre; it
+  is clamped, because a display can go; and a layout never worn is left
+  where the resize put it rather than moved to a place nobody chose.
 - The compact layout is **one setting and one applied state**
   (`_compact`, `_compact_applied`), because a sync pass borrows the full
   layout back and that is not the user changing their mind. The FULL
@@ -364,6 +375,33 @@ Rules that come with them:
   bounds. Asked of the **last** answer and never of a fresh one — one
   lock means a query cannot run while a seek is executing, so a fresh
   answer is always stamped after any seek that has finished.
+- **The seek lead is measured, not assumed.** The wrap goes out a lead
+  before the line's end so that the seek LANDS on it, which makes the
+  lead one thing: how long a command to the player takes. A constant
+  cannot be right — the same command measures 133ms to a full second,
+  because it queues on the one `_ask_lock` behind whatever the monitor is
+  asking. Measured on a 10 second line: the old fixed 0.46s cut 0.36s off
+  the end of every line at a 0.10s round trip and let 0.24s of the next
+  line through at 0.70s, which is "early most of the time and late
+  occasionally" exactly. `player_monitor` times every command at the one
+  point they all go through (on **success** only: a command that failed
+  did not do the thing whose duration this is, and a timeout would push
+  the lead to its ceiling on the strength of a command that never
+  happened); `loop.seek_lead` is the policy and takes the **median** of
+  the last eight, which is the whole of the outlier handling and needs no
+  threshold — one slow command moves the middle of eight by nothing, and
+  it takes five agreeing before the lead follows. Result: within 1ms of
+  the boundary at every round trip from 0.10s to 0.70s, from the second
+  wrap on.
+- **A wrap's landing is measured against where it actually WENT OUT**,
+  never against `end - lead`, which is only where the scheduler meant to
+  fire. The two came apart the moment the lead stopped being a constant:
+  a lead measured shorter between arming the timer and it going off puts
+  `end - lead` LATER than the position the wrap really went out at, and
+  the next poll then reads ordinary playback as the seek landing and
+  dispatches a second one (measured: two extra seeks in five wraps at a
+  0.10s round trip). The last position actually seen is the threshold,
+  because playback only moves forward.
 - **A command in flight is not a command that has happened.** The loop's
   wrap seek is dispatched a seek lead before the end bound and the round
   trip takes most of a poll interval, so every position that arrives in
@@ -444,6 +482,34 @@ Rules that come with them:
   app backgrounded. **Two layers read that one poll and they read it
   once between them** — the pointer may move between two calls, and two
   readings would be two answers to one question.
+- **A press that moved nothing is not a placement.** Learning is
+  implicit, which is exactly why it may only follow an act that meant it:
+  every press that misses a control lands on the window, every one of
+  those ends a "drag" of zero pixels, and every one of those recorded a
+  position and lit the glow that says so — so the app answered a press
+  meant for a control by announcing it had learned something.
+  `learn_refusal` names it (`the window was not moved`).
+- **A press ON this window IS a pointer on this window**, and the event
+  brings the answer with it: no region test, no second reading. The
+  strip's controls come out when the POLL notices the pointer, up to
+  `_POINTER_POLL_MS` after it arrived, and until they do there is nothing
+  under the hand to press — MEASURED by posting real clicks at the
+  control's own centre with the app backgrounded: a press 0ms or 30ms
+  after the pointer arrived reached the window, one 60ms after it reached
+  the control. It does not rescue that press and may not pretend to (Qt
+  chose the receiver first, and a control that is not on the window is
+  not one a press may be re-aimed at); it starts the reveal when the hand
+  arrived rather than when the next poll runs.
+- **Paint and hit testing are two questions.** The flight scales the view
+  through a CALayer transform Qt knows nothing about, so while one is
+  applied a press lands somewhere other than where the user aimed it.
+  `hit_test.py` is pure and names the gap; `_layer_transform` reads the
+  layer back rather than reconstructing it from `_flight_progress`,
+  because a press going to the wrong place is precisely the case where
+  what was asked for and what is applied have come apart. Every press is
+  traced at DEBUG through one method, whichever object received it: two
+  records of one event written in two places is how they come to
+  disagree about it.
 - Per-app position memory: **our own activation is dropped** rather than
   becoming the frontmost app — dragging the window activates us. The
   debounce rule is authoritative and the timer is only a prompt, because

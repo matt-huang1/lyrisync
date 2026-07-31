@@ -325,7 +325,11 @@ class ActivationDebounce:
 
 
 def learn_refusal(
-    *, enabled: bool, frontmost: Optional[str], own_bundle_id: Optional[str]
+    *,
+    enabled: bool,
+    frontmost: Optional[str],
+    own_bundle_id: Optional[str],
+    moved: bool = True,
 ) -> Optional[str]:
     """Why finishing a drag should NOT record a position, or None if it
     should.
@@ -340,9 +344,20 @@ def learn_refusal(
     recorded against ourselves would be an entry that can never be
     recalled, quietly evicting a real one. ``own_bundle_id`` is None for a
     source run, which has no bundle and therefore nothing to collide with.
+
+    ``moved`` is what separates a placement from a CLICK, and it is here
+    because the two were the same thing and one of them is not a
+    preference. Every press that misses a control lands on the window,
+    every one of those ended a "drag" of zero pixels, and every one of
+    those recorded a position and lit the glow that says so — so the app
+    answered a press the user meant for a control by telling them it had
+    learned something. Learning is implicit, which is precisely why it
+    may only follow an act that meant it.
     """
     if not enabled:
         return "the layer is off"
+    if not moved:
+        return "the window was not moved"
     if not frontmost:
         return "no frontmost app is known"
     if own_bundle_id is not None and frontmost == own_bundle_id:
@@ -351,13 +366,20 @@ def learn_refusal(
 
 
 def may_learn(
-    *, enabled: bool, frontmost: Optional[str], own_bundle_id: Optional[str]
+    *,
+    enabled: bool,
+    frontmost: Optional[str],
+    own_bundle_id: Optional[str],
+    moved: bool = True,
 ) -> bool:
     """Whether finishing a drag should record a position. The refusal
     without its reason, for callers that only need the answer."""
     return (
         learn_refusal(
-            enabled=enabled, frontmost=frontmost, own_bundle_id=own_bundle_id
+            enabled=enabled,
+            frontmost=frontmost,
+            own_bundle_id=own_bundle_id,
+            moved=moved,
         )
         is None
     )

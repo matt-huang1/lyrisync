@@ -42,9 +42,36 @@ The ↻ button repeats the current line until released. The loop bounds are
 [this line's timestamp, the next line's), or the track duration for the
 last line.
 
-The wrap seek is dispatched 0.46 s early, because the write to Spotify
-takes a round trip and firing exactly at the end bound would bleed the
-next line through.
+The wrap seek is dispatched early, because the write to Spotify takes a
+round trip and firing exactly at the end bound would bleed the next line
+through. **How early is measured, not assumed.** The lead exists so that
+the seek *lands* on the end bound, which makes it one thing and one thing
+only: how long a command to the player takes. That was a constant, 0.46 s,
+inherited from the days of launching `osascript`; in-process the same
+command measures anywhere from 133 ms to a full second, because it queues
+on the one lock behind whatever the monitor happens to be asking.
+
+The error is exactly `round trip - lead`. Simulated on a 10 second line:
+
+| round trip | fixed 0.46 s | measured |
+|---|---|---|
+| 0.100 s | line cut short by 0.36 s | within 1 ms |
+| 0.133 s | cut short by 0.33 s | within 1 ms |
+| 0.250 s | cut short by 0.21 s | within 1 ms |
+| 0.400 s | cut short by 0.06 s | within 1 ms |
+| 0.700 s | next line bleeds in 0.24 s | within 1 ms |
+
+Early nearly always, late occasionally. So `player_monitor` times every
+command at the one point they all go through, and `loop.seek_lead` takes
+the **median of the last eight** — the whole of the outlier handling, and
+it needs no threshold: one command that queued behind a slow query moves
+the middle of eight by nothing, and it takes five of them agreeing before
+the lead follows. A command that FAILED is not timed, because a timeout
+waited two seconds for nothing and would put the lead on its ceiling.
+
+The first wrap of a session has nothing to go on and starts at 0.20 s (the
+measured round trip plus most of another, so it errs early rather than
+late). One sample is the median, so it converges on the second wrap.
 
 **Only one wrap is outstanding at a time.** That lead is also a gap: for
 the whole round trip the player is still where it was, so every position

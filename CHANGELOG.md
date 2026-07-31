@@ -6,6 +6,51 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Fix 22.3 — a measured lead, a traced press, two shapes
+
+**The wrap fired early most of the time and late occasionally**, which is
+what a fixed lead does against a variable latency. The lead exists so the
+seek *lands* on the line's end, so it is one thing — how long a command to
+Spotify takes — and that is 133ms to a full second depending on what the
+monitor is asking at the time. Measured on a 10 second line: the old fixed
+0.46s cut **0.36s** off the end of every line at a fast round trip and let
+**0.24s** of the next line through at a slow one.
+
+**So the app measures its own.** Every command is timed at the one point
+they all go through, and the lead is the **median** of the last eight —
+which is the whole of the outlier handling: one command that queued behind
+a slow query moves the middle of eight by nothing, and it takes five
+agreeing before the lead follows. The wrap now lands **within 1ms** of the
+line boundary at every round trip from 0.10s to 0.70s, from the second
+wrap on; the first wrap of a session has nothing to go on and converges in
+one.
+
+**A press on the loop or mic button sometimes did nothing** and lit the
+learn glow instead. Every press is now traced at DEBUG — where it was,
+what Qt resolved it to, where every control actually was, the window's
+frame, the pixel ratio, the layer transform, and which animations were
+running — and that trace reproduced it: in the compact strip, a press
+**0-30ms** after the pointer arrives reaches the window, one 45ms later
+reaches the control.
+
+It is not hit testing. The layer transform is the identity after a flight,
+and presses during resizes, moves and flights all land. There is simply no
+control there yet: this app never activates, so macOS sends it no hover
+events and the strip's controls come out when the pointer *poll* notices,
+up to 100ms later. A press is now itself a pointer reading, so the reveal
+starts when the hand arrives.
+
+**And a press that moved nothing is no longer recorded as a placement.**
+Every missed press ended a "drag" of zero pixels, and every one of those
+learned a position and said so — the app answering a press meant for a
+control by announcing it had learned something.
+
+**Each layout now keeps its own place as well as its own size.** They are
+one fact: a strip is a quarter the height of the full layout and usually a
+different width, so coming back from it handed the full layout its old
+size at wherever the strip happened to be standing — and with the strip
+fitted to the song, the window drifted a hundred pixels per switch.
+
 ## Fix 22.2 — the loop's wrap seek, sent twice
 
 **An audible artefact at every wrap, and a loop that cancelled itself**

@@ -2,6 +2,8 @@ import time
 
 import pytest
 
+_QUERY_TIMEOUT = 2.0
+
 from sottovoce import player_monitor as pm
 
 
@@ -83,10 +85,12 @@ def _no_signals_left_lying_around():
     """
     pm._wake.clear()
     pm._moved = None
+    pm._round_trips.clear()
     pm.observing(False)
     yield
     pm._wake.clear()
     pm._moved = None
+    pm._round_trips.clear()
     pm.observing(False)
 
 
@@ -999,6 +1003,94 @@ def test_a_trackless_poll_is_not_given_a_position_by_a_seek(monkeypatch, clock):
     clock.advance(0.3)
     monitor.tick()
     assert [name for name, _ in recorder.events].count("position") == 1
+
+
+# -- how long this app's own commands take --------------------------------
+#
+# The loop's wrap seek is dispatched a lead before the line's end so that
+# it LANDS on it, so the lead is this round trip and nothing else. It was
+# a constant and could not be right: the same command was measured between
+# 133ms and a full second in one session, because it queues on the one
+# lock behind whatever the monitor is asking.
+
+
+def timed_ask(monkeypatch, clock, seconds):
+    """An _ask that costs `seconds` of this test's own clock."""
+    def ask(script):
+        clock.advance(seconds)
+        return ""
+    monkeypatch.setattr(pm, "_ask", ask)
+    return ask
+
+
+def test_a_command_records_what_it_cost(monkeypatch, clock):
+    timed_ask(monkeypatch, clock, 0.31)
+    pm.set_position(61.0)
+    assert pm.command_round_trips() == pytest.approx((0.31,))
+
+
+@pytest.mark.parametrize("command", ["set_position", "pause_playback",
+                                     "resume_playback"])
+def test_every_command_is_timed(monkeypatch, clock, command):
+    """Module level, at the one point they all go through, so a command
+    added later cannot be added untimed."""
+    timed_ask(monkeypatch, clock, 0.2)
+    getattr(pm, command)(0.0) if command == "set_position" else getattr(
+        pm, command)()
+    assert pm.command_round_trips() == pytest.approx((0.2,))
+
+
+def test_the_wait_for_the_lock_is_part_of_the_round_trip(monkeypatch, clock):
+    """Timed around the whole of _ask, not around the execution inside it.
+    A command queued behind the monitor's own query took that long to
+    reach Spotify, and the lead has to cover all of it — that queueing is
+    the whole reason the round trip varies at all."""
+    def ask(script):
+        clock.advance(0.13)   # waiting for the lock
+        clock.advance(0.13)   # and then the round trip itself
+        return ""
+    monkeypatch.setattr(pm, "_ask", ask)
+    pm.set_position(61.0)
+    assert pm.command_round_trips() == pytest.approx((0.26,))
+
+
+def test_a_command_that_failed_records_nothing(monkeypatch, clock):
+    """The same asymmetry as moved(), and the sharper half of it: a
+    command that failed did not do the thing whose duration this is, and
+    a failure that timed out waited two seconds for nothing. Written down,
+    that would push the lead to its ceiling on the strength of a command
+    that never happened."""
+    def ask(script):
+        clock.advance(_QUERY_TIMEOUT)
+        raise pm.SpotifyQueryError("wedged")
+    monkeypatch.setattr(pm, "_ask", ask)
+    with pytest.raises(pm.SpotifyQueryError):
+        pm.set_position(61.0)
+    assert pm.command_round_trips() == ()
+    assert pm._wake.is_set()   # and it is still a reason to go and look
+
+
+def test_only_the_recent_ones_are_kept(monkeypatch, clock):
+    """Unbounded, this would be a list that grows for as long as the app
+    runs and whose oldest entry is a machine that no longer exists."""
+    timed_ask(monkeypatch, clock, 0.1)
+    for _ in range(pm._ROUND_TRIP_SAMPLES + 5):
+        pm.set_position(1.0)
+    assert len(pm.command_round_trips()) == pm._ROUND_TRIP_SAMPLES
+
+
+def test_they_come_back_oldest_first(monkeypatch, clock):
+    """The lead takes the LAST few, so the order is load-bearing."""
+    costs = iter([0.1, 0.2, 0.3])
+
+    def ask(script):
+        clock.advance(next(costs))
+        return ""
+
+    monkeypatch.setattr(pm, "_ask", ask)
+    for _ in range(3):
+        pm.set_position(1.0)
+    assert pm.command_round_trips() == pytest.approx((0.1, 0.2, 0.3))
 
 
 # -- the slower rate is earned, and can be lost ----------------------------

@@ -477,6 +477,33 @@ def test_every_refusal_to_learn_names_itself():
     assert learn_refusal(enabled=True, frontmost=VSCODE, own_bundle_id=OURS) is None
 
 
+def test_a_press_that_moved_nothing_is_not_a_placement():
+    """The learn glow, in the report's own words. Every press that misses
+    a control lands on the window, every one of those ends a "drag" of
+    zero pixels, and every one of those recorded a position and lit the
+    glow that says so — so the app answered a press meant for a control by
+    announcing that it had learned something. Learning is implicit, which
+    is exactly why it may only follow an act that meant it."""
+    assert learn_refusal(
+        enabled=True, frontmost=VSCODE, own_bundle_id=OURS, moved=False
+    ) == "the window was not moved"
+    assert learn_refusal(
+        enabled=True, frontmost=VSCODE, own_bundle_id=OURS, moved=True
+    ) is None
+    assert not may_learn(
+        enabled=True, frontmost=VSCODE, own_bundle_id=OURS, moved=False
+    )
+
+
+def test_a_drag_still_learns_by_default():
+    """The parameter defaults to True so that the callers that already
+    know the window went somewhere — docking, a settled travel — say
+    nothing extra, and only the one caller that cannot know has to."""
+    assert learn_refusal(
+        enabled=True, frontmost=VSCODE, own_bundle_id=OURS
+    ) is None
+
+
 def test_the_reasons_to_refuse_learning_are_told_apart():
     """Each names its own cause. A single "cannot" would leave the user
     with the same silence the reasons exist to break."""
@@ -484,8 +511,11 @@ def test_the_reasons_to_refuse_learning_are_told_apart():
         learn_refusal(enabled=False, frontmost=VSCODE, own_bundle_id=OURS),
         learn_refusal(enabled=True, frontmost=None, own_bundle_id=OURS),
         learn_refusal(enabled=True, frontmost=OURS, own_bundle_id=OURS),
+        learn_refusal(
+            enabled=True, frontmost=VSCODE, own_bundle_id=OURS, moved=False
+        ),
     }
-    assert len(reasons) == 3
+    assert len(reasons) == 4
 
 
 def test_may_learn_is_the_refusal_without_its_reason():

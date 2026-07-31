@@ -107,6 +107,7 @@ from sottovoce.failure import UNKNOWN, FetchFailure
 from sottovoce.gestures import opacity_step, scroll_step, wheel_action
 from sottovoce import flight
 from sottovoce import frontmost
+from sottovoce import hit_test
 from sottovoce import hotkey
 from sottovoce.loop import LineLoop, LoopPhase
 from sottovoce.lyrics_provider import LyricsError, LyricsProvider, close_connections
@@ -118,6 +119,7 @@ from sottovoce.macspaces import (
 from sottovoce import login_item
 from sottovoce import menubar
 from sottovoce import nsmenu
+from sottovoce import placement
 from sottovoce import settings as preferences
 from sottovoce.menu import (
     ALBUM_COLOUR,
@@ -155,6 +157,7 @@ from sottovoce.player_monitor import (
     PlayerSnapshot,
     SpotifyQueryError,
     announce,
+    command_round_trips,
     observing,
     pause_playback,
     resume_playback,
@@ -407,6 +410,16 @@ _EXIT_CONFIRM_TEXT = "discard this sync? tap ✕ again"
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
 
+
+def _widget_name(widget) -> str:
+    """How a widget is named in a press trace: its object name if it has
+    one, its class otherwise, and "none" for nothing at all — which is
+    what ``childAt`` answers when a press landed on bare chrome, and is
+    the single most useful thing in the whole trace."""
+    if widget is None:
+        return "none"
+    name = widget.objectName() if hasattr(widget, "objectName") else ""
+    return name or type(widget).__name__
 
 
 def _style_for(
@@ -893,14 +906,18 @@ class LyricsWindow(QWidget):
         # only thing that decides its shape. Derived from the position on
         # every move, never set by the dock command: see _update_docked.
         self._docked = False
-        self._full_height = 0
-        # Sizing the strip to the song. `_compact_width` is the width the
-        # USER chose for it, kept even while the song is choosing the
-        # window's actual width, so turning the fit off has something to
-        # give back. `_full_width` keeps the other layout out of it.
+        # What each layout was last left at: where it was AND how big.
+        # One record, because they are one fact — a strip is a quarter the
+        # height of the full layout and usually a different width, so the
+        # place that suits one is not the place that suits the other, and
+        # coming back from the strip used to hand the full layout its old
+        # size at wherever the strip was standing. The strip's own width
+        # is the width the USER chose, kept even while the song is
+        # choosing the window's actual one, so turning the fit off has
+        # something to give back; the strip has no remembered height at
+        # all, because it follows the type size.
+        self._shapes = placement.LayoutShapes()
         self._fit_to_song = True  # restored from settings below
-        self._compact_width = 0
-        self._full_width = 0
         self._fit_anim: Optional[QPropertyAnimation] = None
         # How much of the overlay controls is showing, and where it is
         # heading. Full in the full layout and never touched there;
@@ -1329,6 +1346,10 @@ class LyricsWindow(QWidget):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setToolTip(tip)
         button.setVisible(False)
+        # So a press that DID land on a control is traced by the same code
+        # that traces one that did not. Two records of the same event
+        # written in two places is how they come to disagree about it.
+        button.installEventFilter(self)
         return button
 
     # -- monitor slots (UI thread, queued from MonitorThread) --------------
@@ -1391,6 +1412,12 @@ class LyricsWindow(QWidget):
             self._render()
 
         playing = snapshot.state is PlaybackState.PLAYING
+        # What this app's own commands have been costing. The wrap seek is
+        # dispatched a lead before the line's end so that it LANDS on it,
+        # so the lead is that round trip and nothing else; fed on every
+        # update rather than after each seek, because the loop asks for it
+        # at the moment it arms and there is no cursor to keep.
+        self._loop.observe_round_trips(command_round_trips())
         if self._loop.engaged:
             if not self._loop.still_valid(position):
                 self._release_loop()  # user seeked outside the line
@@ -2745,7 +2772,7 @@ class LyricsWindow(QWidget):
             # never left.
             self._set_dodged(False, animate=False)
             self._proximity.stand_down()
-            self._remember_size(self._compact_applied)
+            self._remember_shape(self._compact_applied)
             self._compact_applied = wanted
             self._hovered = wanted and self._pointer_inside()
         for row in (self._previous, self._upcoming):
@@ -2770,11 +2797,11 @@ class LyricsWindow(QWidget):
                 )
             )
             self.resize(width, self._height_for(wanted))
-            if wanted and not self._compact_width:
+            if wanted and not self._shapes.recall(True).width:
                 # The first strip. The width it opened at is the user's
                 # own, and is what turning the fit off gives back, so it
                 # has to be written down BEFORE anything fits.
-                self._compact_width = self.width()
+                self._shapes.remember(True, width=self.width())
         # After the resize: in the full layout the scale is the width's,
         # and a hidden widget defers its resize event until it is shown, so
         # nothing else would recompute it. The margins follow unconditionally
@@ -2786,13 +2813,54 @@ class LyricsWindow(QWidget):
             # Instant: the layout has just changed shape anyway, and a
             # strip that arrived and then grew would read as two events.
             self._fit_width(animate=False)
+            # And AFTER the fit, because fitting anchors a width change on
+            # the window's centre: put the layout back where it was left
+            # and the song's opinion about the width has already been
+            # taken. Instant, for the same reason the fit is — one change
+            # of shape, not a change and then a journey.
+            self._restore_layout_position()
         self._reelide()
         self._apply_reveal_effects()
         self._update_pointer_watch()
         self._place_buttons()
 
-    def _remember_size(self, compact: bool) -> None:
-        """Write down the shape this layout is being left at.
+    def _restore_layout_position(self) -> None:
+        """Put the layout now in force back where it was last left.
+
+        A layout that has never been worn has nowhere to go back to and
+        the window stays where it is, which is the same answer
+        ``_width_for`` gives about a width nobody has chosen.
+
+        Clamped to the screen, because a remembered position is only a
+        preference and the display it was expressed on may be gone.
+
+        A plain move, with no branch for a window standing aside from the
+        pointer, and that is not an omission: the only caller changes the
+        layout, and changing the layout gives the dodge back first
+        (``_set_dodged(False)`` and ``stand_down()``) precisely so the
+        window is not reshaped where it is only standing. A branch here
+        could never run, and a branch that cannot run is a claim nothing
+        can check.
+        """
+        shape = self._shapes.recall(self._compact_applied)
+        if not shape.has_position:
+            return
+        target = _clamped_point(
+            QRect(QPoint(shape.x, shape.y), self.size()),
+            self._available_geometry(),
+        )
+        self.move(target)
+        # Whether the window is docked is asked of the position, never
+        # held as a flag, so a move is the moment to ask again.
+        self._update_docked()
+
+    def _remember_shape(self, compact: bool) -> None:
+        """Write down where this layout is being left, and how big.
+
+        The POSITION is ``_home_pos()`` and never ``pos()``: a dodge, a
+        flight and a notification yield all stand the window somewhere it
+        does not live, and a temporary position written down as a
+        permanent one is the bug this app has now met four times.
 
         The strip's HEIGHT is not written down at all: it follows the type
         size, so there is one right answer for it and remembering another
@@ -2802,14 +2870,19 @@ class LyricsWindow(QWidget):
         holds the width the user picked for the strip, which is what
         turning the fit off gives back, and overwriting it with a fitted
         one would let it drift a song at a time towards whatever the
-        longest line happened to be.
+        longest line happened to be. The position is still recorded: the
+        song has an opinion about the width and none at all about where
+        the window is.
         """
-        if compact:
-            if not self._fitting:
-                self._compact_width = self.width()
-        else:
-            self._full_width = self.width()
-            self._full_height = self.height()
+        home = self._home_pos()
+        self._shapes.remember(
+            compact,
+            x=home.x(),
+            y=home.y(),
+            width=self.width(),
+            height=None if compact else self.height(),
+            keep_width=compact and self._fitting,
+        )
 
     def _strip_height(self) -> int:
         """The height of a strip at the type size in force. Not a floor
@@ -2840,9 +2913,10 @@ class LyricsWindow(QWidget):
         floor = min_window_height(
             self._type_scale_at(self._width_for(False), False), compact=False
         )
-        if not self._full_height:
+        remembered = self._shapes.recall(False).height
+        if not remembered:
             return max(_DEFAULT_HEIGHT, floor)
-        return max(floor, self._full_height)
+        return max(floor, remembered)
 
     def _width_for(self, compact: bool) -> int:
         """The width to give this layout back.
@@ -2852,7 +2926,7 @@ class LyricsWindow(QWidget):
         whole of "the full layout is unaffected". A layout that has never
         been worn keeps whatever the window is at.
         """
-        remembered = self._compact_width if compact else self._full_width
+        remembered = self._shapes.recall(compact).width
         return max(_MIN_WIDTH, remembered or self.width())
 
     def _set_compact_text_size(self, size_px: int) -> None:
@@ -3659,7 +3733,124 @@ class LyricsWindow(QWidget):
             edges |= Qt.Edge.BottomEdge
         return edges
 
+    def _control_rects(self) -> list:
+        """Every overlay control, in the window's own coordinates.
+
+        All of them and not only the visible ones: "the control was not on
+        the window" is an answer to why a press missed it, and a list that
+        had already dropped it could not give that answer.
+        """
+        named = (
+            ("loop", self._loop_button),
+            ("speak", self._speak_button),
+            ("attempt", self._attempt_button),
+            ("tap", self._tap_button),
+            ("undo", self._undo_button),
+            ("sync_exit", self._sync_exit_button),
+            ("why", self._why_button),
+        )
+        rects = []
+        for name, button in named:
+            top_left = button.mapTo(self, QPoint(0, 0))
+            rects.append(
+                hit_test.Control(
+                    name=name,
+                    rect=(top_left.x(), top_left.y(),
+                          button.width(), button.height()),
+                    visible=button.isVisibleTo(self),
+                    enabled=button.isEnabled(),
+                )
+            )
+        return rects
+
+    def _animations_in_flight(self) -> str:
+        """Which of the window's animations are running, for the trace.
+
+        Asked of the animation objects rather than of a flag, because a
+        flag is a second answer to the question and this exists to settle
+        disagreements rather than to add one.
+        """
+        running = [
+            name
+            for name, animation in (
+                ("fit", self._fit_anim),
+                ("move", self._move_anim),
+                ("flight", self._flight_anim),
+                ("reveal", self._reveal_anim),
+                ("line", self._fade_anim),
+            )
+            if animation is not None
+        ]
+        return ",".join(running) or "none"
+
+    def _trace_press(self, watched, event) -> None:
+        """Everything known about one press, at DEBUG.
+
+        A report that a control is dead is a report about hit testing, and
+        hit testing is the one thing a test that calls a slot cannot check
+        (Fix 22.1). What settles it is what the press knew at the moment
+        it arrived: where it was, what Qt resolved it to, where every
+        control actually was in the same coordinate space, and what the
+        compositor was doing to the view in between.
+
+        Guarded on the level rather than left to the logging call, because
+        this walks seven widgets and reads back a CALayer, and a press is
+        not a rare event.
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        try:
+            global_point = event.globalPosition().toPoint()
+            local = self.mapFromGlobal(global_point)
+            point = (local.x(), local.y())
+            controls = self._control_rects()
+            transform = self._layer_transform()
+            verdict = hit_test.diagnose(point, controls, transform)
+            child = self.childAt(local)
+            handle = self.windowHandle()
+            logger.debug(
+                "press: to=%s global=(%d,%d) window=(%d,%d) childAt=%s "
+                "resolved=%s aimed=%s offset=(%.1f,%.1f) %s",
+                _widget_name(watched), global_point.x(), global_point.y(),
+                point[0], point[1], _widget_name(child),
+                verdict.hit, verdict.aimed,
+                verdict.offset[0], verdict.offset[1],
+                "landed" if verdict.landed else f"MISSED: {verdict.refusal}",
+            )
+            logger.debug(
+                "press:   frame=(%d,%d %dx%d) geometry=(%d,%d %dx%d) dpr=%.2f "
+                "layer=(a=%.4f d=%.4f tx=%.2f ty=%.2f) anims=%s",
+                self.frameGeometry().x(), self.frameGeometry().y(),
+                self.frameGeometry().width(), self.frameGeometry().height(),
+                self.geometry().x(), self.geometry().y(),
+                self.geometry().width(), self.geometry().height(),
+                handle.devicePixelRatio() if handle is not None
+                else self.devicePixelRatioF(),
+                transform.a, transform.d, transform.tx, transform.ty,
+                self._animations_in_flight(),
+            )
+            logger.debug(
+                "press:   compact=%s reveal=%.2f->%.2f dodged=%s ghost=%s "
+                "attempt=%s scale=%.3f",
+                self._compact_applied, self._reveal, self._reveal_to,
+                self._proximity_home is not None, self._ghosting,
+                self._awaiting_attempt(), self._scale,
+            )
+            for control in controls:
+                x, y, width, height = control.rect
+                logger.debug(
+                    "press:   control %-9s window=(%d,%d %dx%d) "
+                    "screen=(%d,%d) visible=%s enabled=%s hit=%s",
+                    control.name, x, y, width, height,
+                    self.mapToGlobal(QPoint(x, y)).x(),
+                    self.mapToGlobal(QPoint(x, y)).y(),
+                    control.visible, control.enabled, control.contains(point),
+                )
+        except Exception:  # pragma: no cover - a trace may never break a press
+            logger.debug("could not trace the press", exc_info=True)
+
     def mousePressEvent(self, event) -> None:
+        self._trace_press(self, event)
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._flight_anim is not None:
@@ -3672,6 +3863,27 @@ class LyricsWindow(QWidget):
         # A press can only reach a window that stepped aside if the user
         # followed it there, which is the gesture for taking it back.
         self._adopt_dodged_position()
+        # A press ON this window IS a pointer on this window, and that is
+        # the whole of the test — no region, no second reading of where
+        # the pointer is, because the event brought the answer with it.
+        #
+        # It is here because the strip's controls come out when the POLL
+        # notices the pointer, up to _POINTER_POLL_MS after it arrived,
+        # and until they do there is nothing under the hand to press.
+        # MEASURED, by posting real clicks at the control's own centre
+        # with the app backgrounded: a press 0ms or 30ms after the pointer
+        # arrived reached the window, one 60ms after it reached the
+        # control. A hand that knows where the button is beats the poll.
+        #
+        # It does not rescue THIS press and does not pretend to: Qt chose
+        # the receiver before this ran, and a control that is not on the
+        # window is not one a press may be re-aimed at. What it does is
+        # start the reveal when the hand arrived rather than when the next
+        # poll happens to run. Guarded on the timer because whoever stops
+        # the poll also clears the hover, and a hover set with nothing
+        # left to clear it would hold the controls out for ever.
+        if self._pointer_timer.isActive():
+            self._set_hovered(True)
         self._press_global = event.globalPosition().toPoint()
         self._press_geometry = self.geometry()
         self._resize_edges = self._hit_edges(event.position().toPoint())
@@ -3748,6 +3960,10 @@ class LyricsWindow(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         was_interacting = self._drag_offset is not None or bool(self._resize_edges)
+        # Whether the window is anywhere other than where it was picked up.
+        # A press that missed a control lands here having moved nothing,
+        # and that is not somebody placing a window.
+        moved = self.geometry() != self._press_geometry
         self._drag_offset = None
         self._resize_edges = Qt.Edges()
         if was_interacting:
@@ -3760,7 +3976,7 @@ class LyricsWindow(QWidget):
             # has just said where they want the window while working in
             # some app. Deferred by the same tick as the nudge, so what is
             # recorded is where the window actually ended up.
-            QTimer.singleShot(0, self._learn_position)
+            QTimer.singleShot(0, lambda: self._learn_position(moved=moved))
 
     def _nudge_onscreen(self) -> None:
         target = _clamped_point(self.frameGeometry(), self._available_geometry())
@@ -4111,7 +4327,9 @@ class LyricsWindow(QWidget):
             self._move_anim.stop()
             self._move_anim = None
 
-    def _learn_position(self, position: Optional[QPoint] = None) -> None:
+    def _learn_position(
+        self, position: Optional[QPoint] = None, moved: bool = True
+    ) -> None:
         """Record where the window now sits for whichever app is in front.
 
         Called when a drag or resize ends, and when the window is docked to
@@ -4131,6 +4349,7 @@ class LyricsWindow(QWidget):
             enabled=self._remember_position,
             frontmost=self._frontmost,
             own_bundle_id=self._own_bundle_id,
+            moved=moved,
         )
         if refusal is not None:
             logger.debug("learn: nothing recorded, %s", refusal)
@@ -4220,6 +4439,12 @@ class LyricsWindow(QWidget):
             )
 
     def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.MouseButtonPress:
+            # Every press, whoever it reached. The window's own handler
+            # cannot answer "did this one land where the user aimed it",
+            # because a press that reached the window is precisely the
+            # case where it did not reach a control.
+            self._trace_press(watched, event)
         if (
             watched is self._plain_scroll.viewport()
             and event.type() == QEvent.Type.Wheel
@@ -5227,6 +5452,30 @@ class LyricsWindow(QWidget):
         view = self._nsview()
         return view.window() if view is not None else None
 
+    def _layer_transform(self) -> hit_test.Transform:
+        """The affine transform the compositor is drawing this view
+        through, as a fact rather than as a belief.
+
+        Read back rather than reconstructed from ``_flight_progress``,
+        which is the same rule the all-desktops toggle is held to: what
+        the app last asked for and what the layer is actually carrying are
+        two different things, and a press that goes to the wrong place is
+        the case where they have come apart. The identity off cocoa,
+        which is the truth there — no layer, no transform.
+        """
+        view = self._nsview()
+        if view is None:
+            return hit_test.IDENTITY
+        try:
+            layer = view.layer()
+            if layer is None:
+                return hit_test.IDENTITY
+            a, _b, _c, d, tx, ty = layer.affineTransform()
+            return hit_test.Transform(a=a, d=d, tx=tx, ty=ty)
+        except Exception:
+            logger.debug("could not read the window's layer transform", exc_info=True)
+            return hit_test.IDENTITY
+
     def _set_content_scale(self, scale: float) -> None:
         """Scale what is already drawn, without Qt re-laying it out.
 
@@ -5489,9 +5738,25 @@ class LyricsWindow(QWidget):
         )
         if self._compact_text_size not in COMPACT_TEXT_SIZES:
             self._compact_text_size = DEFAULT_COMPACT_TEXT_SIZE
-        self._full_height = self._settings.value("window/full_height", 0, type=int)
-        self._compact_width = self._settings.value("window/compact_width", 0, type=int)
-        self._full_width = self._settings.value("window/full_width", 0, type=int)
+        # Each layout's own shape, position included. Read per key rather
+        # than as one blob: the size keys predate the position ones, so a
+        # preferences file written before this session has half of each
+        # record and has to keep the half it has.
+        for compact, group in ((False, "full"), (True, "compact")):
+            x = self._settings.value(f"window/{group}_x", None)
+            y = self._settings.value(f"window/{group}_y", None)
+            self._shapes.remember(
+                compact,
+                x=int(x) if x is not None else None,
+                y=int(y) if y is not None else None,
+                width=self._settings.value(
+                    f"window/{group}_width", 0, type=int
+                ) or None,
+                height=(
+                    self._settings.value("window/full_height", 0, type=int)
+                    or None
+                ) if not compact else None,
+            )
         # The one setting in this app that defaults ON, and it can, because
         # it acts only inside a layout that is itself opt-in and default
         # off. With compact off there is nothing here to have an opinion
@@ -5615,20 +5880,27 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/compact", self._compact)
         self._settings.setValue("window/compact_text_size", self._compact_text_size)
         self._settings.setValue("window/fit_to_song", self._fit_to_song)
-        # The shape the OTHER layout was last left at. The live one is in
-        # window/size already; recording it twice is how the two would come
-        # to disagree. Refreshed here so a quit mid-layout keeps both, and
-        # _remember_size is what declines to overwrite a width the song is
-        # currently choosing.
-        self._remember_size(self._compact_applied)
+        # The shape the OTHER layout was last left at, and the live one
+        # too: what window/pos and window/size hold is where the window is
+        # STANDING, which after a sync pass has borrowed the full layout is
+        # not the same question. Refreshed here so a quit mid-layout keeps
+        # both, and _remember_shape is what declines to overwrite a width
+        # the song is currently choosing.
+        self._remember_shape(self._compact_applied)
         # The strip's height is derived from its type size now, so the key
         # that used to hold it is removed rather than left behind: a stored
         # number nothing reads is a second answer waiting for somebody to
         # believe it.
         self._settings.remove("window/compact_height")
-        self._settings.setValue("window/full_height", self._full_height)
-        self._settings.setValue("window/compact_width", self._compact_width)
-        self._settings.setValue("window/full_width", self._full_width)
+        for compact, group in ((False, "full"), (True, "compact")):
+            shape = self._shapes.recall(compact)
+            self._settings.setValue(f"window/{group}_width", shape.width or 0)
+            if shape.has_position:
+                self._settings.setValue(f"window/{group}_x", shape.x)
+                self._settings.setValue(f"window/{group}_y", shape.y)
+        self._settings.setValue(
+            "window/full_height", self._shapes.recall(False).height or 0
+        )
         self._settings.setValue("window/all_desktops", self._all_desktops)
         self._settings.setValue("window/album_colour", self._album_colour)
         self._settings.setValue("window/visible", self._lyrics_visible)

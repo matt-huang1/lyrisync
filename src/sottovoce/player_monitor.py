@@ -56,6 +56,7 @@ import logging
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Optional
@@ -391,6 +392,25 @@ _rings_lock = threading.Lock()
 _moved: Optional[tuple[float, float]] = None
 _moved_lock = threading.Lock()
 
+# How long this app's recent commands to Spotify actually took, newest
+# last, in seconds.
+#
+# The line loop dispatches its wrap seek a lead before the line's end so
+# that the seek LANDS on it, and that lead is this round trip and nothing
+# else. It was a constant, and a constant cannot be right: the same
+# command was measured between 133ms and a full second in one session,
+# because it queues on the one `_ask_lock` behind whatever the monitor is
+# asking. A fixed lead against a variable latency fires early most of the
+# time and late the rest, which is exactly what it was reported doing.
+#
+# Kept HERE because this is the one place every command goes through, so
+# a command added later cannot forget to be timed. What to do with the
+# numbers is `loop.seek_lead`, which is pure and has no idea what an Apple
+# event is.
+_ROUND_TRIP_SAMPLES = 16
+_round_trips: deque = deque(maxlen=_ROUND_TRIP_SAMPLES)
+_round_trips_lock = threading.Lock()
+
 
 def announce() -> None:
     """Spotify says something changed. Ask it what, now.
@@ -451,12 +471,37 @@ def last_move() -> Optional[tuple[float, float]]:
         return _moved
 
 
+def command_round_trips() -> tuple:
+    """How long this app's recent commands took, oldest first."""
+    with _round_trips_lock:
+        return tuple(_round_trips)
+
+
+def _send(body: str) -> None:
+    """One command to Spotify, timed.
+
+    Timed around the whole of ``_ask``, which includes the wait for the
+    lock, because that wait is part of how long the command took to reach
+    Spotify and the loop's lead has to cover all of it.
+
+    Recorded on SUCCESS only, and for the same two reasons ``moved()`` is:
+    a command that failed did not do the thing whose duration this is, and
+    a failure that timed out waited ``_QUERY_TIMEOUT_SECONDS`` for nothing
+    — writing that down as how long a seek takes would push the lead to
+    its ceiling on the strength of a command that never happened.
+    """
+    started = time.monotonic()
+    _ask(_command(body))
+    with _round_trips_lock:
+        _round_trips.append(time.monotonic() - started)
+
+
 def set_position(seconds: float) -> None:
     """Seek Spotify to ``seconds``. A blocking round trip to another
     process — never invoke on a UI thread. Raises SpotifyQueryError on
     failure."""
     try:
-        _ask(_command(f"set player position to {seconds:.3f}"))
+        _send(f"set player position to {seconds:.3f}")
         # After the command has come back, and so NOT in the finally: a
         # seek that failed moved nothing, and saying it did would be a
         # wrong answer where the stale estimate is merely an old one. A
@@ -474,7 +519,7 @@ def set_position(seconds: float) -> None:
 def pause_playback() -> None:
     """Pause Spotify. Blocking round trip — worker threads only."""
     try:
-        _ask(_command("pause"))
+        _send("pause")
     finally:
         disturb()
 
@@ -482,7 +527,7 @@ def pause_playback() -> None:
 def resume_playback() -> None:
     """Resume Spotify. Blocking round trip — worker threads only."""
     try:
-        _ask(_command("play"))
+        _send("play")
     finally:
         disturb()
 

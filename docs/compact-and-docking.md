@@ -438,3 +438,58 @@ because the scale it comes from does.
 | `tests/test_typography.py` | the presets, the default, and the ladder |
 | `tests/test_geometry.py` | the floors, the gutters, the cap, the dock position and `is_docked`, notched screen included |
 | `tests/test_window_qt.py` | the rows, the height, the reveal, the sync fallback, the type size, the dock and its corners |
+
+## Each layout keeps its own place and its own size
+
+Position and size are one fact here, and until Fix 22.3 only half of one
+of them was remembered. A strip is a quarter the height of the full layout
+and usually a different width, so the place that suits one does not suit
+the other: coming back from the strip handed the full layout its old SIZE
+at wherever the strip happened to be standing, and with the strip fitted to
+the song — a width change anchored on the window's centre — the window
+drifted about a hundred pixels per switch.
+
+`placement.LayoutShapes` keeps one record per layout. What is *not* in it
+is as much of the design as what is:
+
+- the strip's **height**, because it follows the type size. There is one
+  right answer and remembering another would only be a way to disagree
+  with the setting.
+- the strip's **width while the song is choosing it**. That slot holds the
+  width the user picked, which is what turning the fit off gives back. The
+  position is still recorded, though: the song has an opinion about how
+  wide the strip is and none at all about where it sits.
+- any position the window is only **standing at** — a dodge, a flight, a
+  notification yield. What is written down is `_home_pos()`, which is the
+  temporary-position rule this project has now met five times.
+
+The place is given back *after* the fit, because fitting anchors on the
+centre and restoring first would let the song move it again, and it is
+clamped, because a remembered position is a preference expressed on a
+display that may be gone. A layout that has never been worn is left where
+the resize put it rather than moved somewhere nobody chose, which is the
+same answer `_width_for` already gives about a width nobody has picked.
+
+## A press that arrives before the controls do
+
+The strip's controls come out when the pointer POLL notices the pointer,
+because macOS delivers hover events only to the active app and this one
+never activates. That is up to `_POINTER_POLL_MS` (100 ms) of latency, and
+until it elapses there is genuinely nothing under the hand to press.
+MEASURED, by posting real clicks at each control's live centre with the
+app backgrounded: a press 0 ms, 15 ms or 30 ms after the pointer arrived
+reached the WINDOW; one 45 ms or later reached the control. A hand with
+muscle memory beats the poll.
+
+A press ON this window IS a pointer on this window, so the press now
+answers the question itself — no region test, no second reading, the event
+brought the answer with it. It does not rescue that press and does not
+pretend to: Qt chose the receiver before any of the window's code ran, and
+a control that is not on the window is not one a press may be re-aimed at.
+What it does is start the reveal when the hand arrived rather than when
+the next poll happens to run.
+
+What the press must NOT do is what it used to: every one that missed ended
+a "drag" of zero pixels, and every one of those recorded a per-app
+position and lit the glow that says so. Learning is implicit, which is
+exactly why it may only follow an act that meant it.

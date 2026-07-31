@@ -3,9 +3,13 @@ import pytest
 from sottovoce.loop import (
     ENTRY_GRACE,
     EXIT_GRACE,
-    SEEK_LEAD_SECONDS,
+    SEEK_LEAD_CEILING,
+    SEEK_LEAD_FLOOR,
+    SEEK_LEAD_SAMPLES,
+    SEEK_LEAD_START,
     LineLoop,
     LoopPhase,
+    seek_lead,
 )
 
 LINES = [(10.0, "one"), (20.0, "two"), (30.0, "three")]
@@ -66,7 +70,7 @@ def test_release_disengages():
 def test_wrap_eta_counts_down_to_end_bound():
     loop = engaged_loop(1)  # [20, 30)
     assert loop.wrap_eta(27.0, playing=True) == pytest.approx(
-        3.0 - SEEK_LEAD_SECONDS
+        3.0 - seek_lead()
     )
 
 
@@ -246,11 +250,14 @@ def dispatched(loop):
 
 
 def test_a_wrap_already_on_its_way_is_not_dispatched_again():
-    loop = engaged_loop(1)  # [20, 30), so the wrap goes out at 29.54
+    loop = engaged_loop(1)  # [20, 30)
+    dispatch_point = 30.0 - loop.lead   # where the scheduler fires it
     assert dispatched(loop) == "seek"
     # The seek is in flight: the positions that arrive are the ones that
-    # armed it in the first place, and they must arm nothing.
-    for position in (29.54, 29.7, 29.9, 30.1):
+    # armed it in the first place, and they must arm nothing. Taken from
+    # the lead rather than written out, because the lead is measured now
+    # and a number here would be a second answer to what it is.
+    for position in (dispatch_point, dispatch_point + 0.2, 30.0, 30.1):
         loop.observe_position(position)
         assert loop.wrap_eta(position, playing=True) is None
         assert dispatched(loop) == "none"
@@ -261,7 +268,7 @@ def test_the_wrap_landing_frees_the_next_one():
     assert dispatched(loop) == "seek"
     loop.observe_position(20.0)  # it landed
     assert loop.wrap_eta(20.0, playing=True) == pytest.approx(
-        10.0 - SEEK_LEAD_SECONDS
+        10.0 - seek_lead()
     )
     assert dispatched(loop) == "seek"
 
@@ -271,11 +278,12 @@ def test_only_a_position_before_the_dispatch_point_counts_as_landing():
     is what the wrap landing looks like. The line simply playing on does
     not, however many polls it takes."""
     loop = engaged_loop(1)
+    dispatch_point = 30.0 - loop.lead
     dispatched(loop)
-    for position in (29.6, 29.8, 30.0, 30.4):  # still running forward
-        loop.observe_position(position)
+    for step in (0.05, 0.2, 0.5, 0.9):          # still running forward
+        loop.observe_position(dispatch_point + step)
     assert dispatched(loop) == "none"
-    loop.observe_position(29.53)  # one hundredth before the dispatch point
+    loop.observe_position(dispatch_point - 0.01)  # a hundredth before it
     assert dispatched(loop) == "seek"
 
 
@@ -285,7 +293,7 @@ def test_a_wrap_that_never_lands_dispatches_nothing_more():
     poll, for ever."""
     loop = engaged_loop(1)
     assert dispatched(loop) == "seek"
-    for position in (29.8, 30.3, 30.8, 31.1):
+    for position in (30.0 - loop.lead + 0.1, 30.3, 30.8, 31.1):
         loop.observe_position(position)
         assert dispatched(loop) == "none"
     assert loop.still_valid(31.1) is False  # and this is what ends it
@@ -318,3 +326,123 @@ def test_echo_never_has_a_wrap_in_flight():
     loop.finish_attempt()
     assert loop.wrap_eta(20.0, playing=True) is not None
     assert loop.on_end_reached() == "attempt"
+
+
+# -- the lead is measured, not assumed -----------------------------------
+#
+# The wrap goes out a lead before the line's end so that the seek LANDS on
+# it, which makes the lead one thing: how long a command to the player
+# takes. It was 0.46s, inherited from the osascript era; in-process the
+# same command was measured between 133ms and a full second in one
+# session, because it queues on the one lock behind whatever the monitor
+# is asking. Simulated against a 10 second line: a fixed 0.46s lead cut
+# 0.36s off the end of the line at a 0.10s round trip and let 0.24s of the
+# next line through at 0.70s. The measured lead lands within 1ms of the
+# boundary at every round trip from 0.10s to 0.70s, from the second wrap
+# on; the first wrap of a session has nothing to go on and is out by
+# whatever the round trip differs from SEEK_LEAD_START.
+
+
+def test_the_first_wrap_of_a_session_has_a_starting_value():
+    assert seek_lead(()) == SEEK_LEAD_START
+    assert LineLoop().lead == SEEK_LEAD_START
+
+
+def test_one_observation_is_enough():
+    """A single sample IS the median, so the lead is right from the second
+    wrap rather than converging over a verse."""
+    assert seek_lead((0.31,)) == pytest.approx(0.31)
+
+
+def test_the_lead_follows_the_round_trip():
+    assert seek_lead((0.12, 0.13, 0.14)) == pytest.approx(0.13)
+    assert seek_lead((0.60, 0.62, 0.61)) == pytest.approx(0.61)
+
+
+def test_one_slow_command_does_not_move_the_lead():
+    """The whole of the outlier handling, and it needs no threshold to
+    argue about: a command that queued behind a slow query is one sample,
+    and the middle of the others is where it was already."""
+    steady = (0.13, 0.14, 0.13, 0.12, 0.14)
+    assert seek_lead(steady + (2.0,)) == pytest.approx(
+        seek_lead(steady), abs=0.01
+    )
+
+
+def test_a_machine_that_has_genuinely_got_slower_is_followed():
+    """The other half of the same rule: it takes a majority, not a
+    threshold, and then the lead does move."""
+    assert seek_lead((0.13, 0.13, 0.6, 0.6, 0.6, 0.6, 0.6)) == pytest.approx(0.6)
+
+
+def test_only_the_recent_ones_count():
+    """A minute of a wedged Spotify must not still be setting the lead
+    once it has come back."""
+    old = (5.0,) * SEEK_LEAD_SAMPLES
+    assert seek_lead(old + (0.13,) * SEEK_LEAD_SAMPLES) == pytest.approx(0.13)
+
+
+def test_an_even_number_of_samples_takes_the_middle_pair():
+    assert seek_lead((0.10, 0.20)) == pytest.approx(0.15)
+
+
+def test_the_lead_is_clamped_at_both_ends():
+    assert seek_lead((0.0, 0.0, 0.0)) == SEEK_LEAD_FLOOR
+    assert seek_lead((9.0, 9.0, 9.0)) == SEEK_LEAD_CEILING
+
+
+def test_the_ceiling_is_where_the_loop_would_cancel_anyway():
+    """A round trip past this is one still_valid is about to let the loop
+    go over, so a lead that chased it would be eating the line to protect
+    against something that is not survivable."""
+    assert SEEK_LEAD_CEILING == EXIT_GRACE
+
+
+def test_the_scheduler_uses_the_measured_lead():
+    loop = engaged_loop(1)  # [20, 30)
+    loop.observe_round_trips((0.30, 0.30, 0.30))
+    assert loop.wrap_eta(25.0, playing=True) == pytest.approx(5.0 - 0.30)
+    loop.observe_round_trips((0.10, 0.10, 0.10))
+    assert loop.wrap_eta(25.0, playing=True) == pytest.approx(5.0 - 0.10)
+
+
+def test_the_landing_is_measured_against_where_the_wrap_actually_WENT_OUT():
+    """Not against `end - lead`, which is only where the scheduler MEANT
+    to fire. The two came apart the moment the lead stopped being a
+    constant: a lead measured shorter between arming the timer and it
+    going off puts `end - lead` LATER than the position the wrap really
+    went out at, and the very next poll then reads ordinary playback as
+    the seek landing and dispatches a second one. Measured before this
+    was fixed, at a 0.10s round trip: two extra seeks in five wraps.
+    """
+    loop = engaged_loop(1)  # [20, 30)
+    loop.observe_round_trips((0.30,))
+    loop.observe_position(29.70)          # the last poll before the wrap
+    loop.observe_round_trips((0.10,))     # and the lead shortens under it
+    assert loop.on_end_reached() == "seek"
+
+    # 29.75 is past where the wrap went out and short of `end - lead`
+    # (29.90). It is the line playing on, and it must arm nothing.
+    loop.observe_position(29.75)
+    assert loop.on_end_reached() == "none"
+    loop.observe_position(20.0)           # the seek, which really did land
+    assert loop.on_end_reached() == "seek"
+
+
+def test_with_no_position_seen_yet_the_lead_still_answers():
+    """Engaging mid-line and reaching the end before a single poll has
+    arrived. Rare, and it may not crash."""
+    loop = engaged_loop(1)
+    assert loop.on_end_reached() == "seek"
+    loop.observe_position(20.0)
+    assert loop.on_end_reached() == "seek"
+
+
+def test_round_trips_survive_a_release_and_a_fresh_engage():
+    """They are a property of the machine, not of this loop: forgetting
+    them would put every engage back on the starting value."""
+    loop = engaged_loop(1)
+    loop.observe_round_trips((0.30, 0.30, 0.30))
+    loop.release()
+    assert loop.engage(LINES, 1, DURATION)
+    assert loop.lead == pytest.approx(0.30)
