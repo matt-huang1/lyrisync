@@ -73,11 +73,20 @@ def _no_signals_left_lying_around():
     alternative is threading a monitor reference through every QRunnable
     that sends a command — and that is exactly how one gets added that
     forgets. Module state is state one test can leave lying around for the
-    next, so it is cleared around each of them."""
+    next, so it is cleared around each of them.
+
+    ``_moved`` is stamped with the real monotonic clock and read against a
+    snapshot's, so a seek left behind by one test is a move from the far
+    future for every test that runs on a fake clock afterwards. That is
+    not hypothetical: adding it to the module and not to here turned the
+    carried-forward position from 10.3 into -599689.0.
+    """
     pm._wake.clear()
+    pm._moved = None
     pm.observing(False)
     yield
     pm._wake.clear()
+    pm._moved = None
     pm.observing(False)
 
 
@@ -860,6 +869,136 @@ def test_every_command_says_so(monkeypatch, command):
         getattr(pm, command)(0.0) if command == "set_position" else getattr(
             pm, command)()
     assert pm._wake.is_set()
+
+
+# -- a seek this app made is an ANSWER, not a question ---------------------
+#
+# disturb() says "go and ask". That is enough on its own almost all of the
+# time: the answer comes back within a round trip and, because every
+# question and every command goes through one lock, an answer that arrives
+# after a seek is an answer that was read after it. What it is not enough
+# for is the poll it wakes FAILING — poll_once clears the wake before the
+# query and returns None when it raises, so the disturb is spent and the
+# next answer is a whole reconciliation interval away. Measured, with one
+# failed poll after a loop's wrap seek: the window was told a position
+# 9.673 seconds from where Spotify was.
+
+
+def test_a_seek_this_app_made_is_recorded_as_well_as_signalled(monkeypatch):
+    monkeypatch.setattr(pm, "_ask", lambda script: "")
+    pm.set_position(61.0)
+    position, at = pm.last_move()
+    assert position == 61.0
+    assert at <= time.monotonic()
+
+
+def test_a_seek_that_failed_is_not_recorded(monkeypatch):
+    """The one asymmetry with disturb(), and it is deliberate. A command
+    that failed is still a reason to go and LOOK, so disturb stays in the
+    finally; it is not a reason to claim the player moved, because it may
+    well not have. A failed seek surfaces as the position drifting out of
+    the loop's bounds, which cancels it — the documented behaviour, and
+    the one thing that must not be papered over."""
+    monkeypatch.setattr(pm, "_ask", lambda script: (_ for _ in ()).throw(
+        pm.SpotifyQueryError("nope")))
+    with pytest.raises(pm.SpotifyQueryError):
+        pm.set_position(61.0)
+    assert pm.last_move() is None
+    assert pm._wake.is_set()
+
+
+@pytest.mark.parametrize("command", ["pause_playback", "resume_playback"])
+def test_only_a_seek_claims_a_position(monkeypatch, command):
+    """Pause and resume change how the position MOVES, not where it is,
+    and the monitor's play state is not this app's to assert: a state
+    change it did not hear announced is what takes the slower rate away,
+    so a state written in from here would be a change nobody rang for."""
+    monkeypatch.setattr(pm, "_ask", lambda script: "")
+    getattr(pm, command)()
+    assert pm.last_move() is None
+
+
+def test_the_carried_position_is_rebased_on_this_apps_own_seek(
+    monkeypatch, clock
+):
+    """The window is told where the seek put the player, not where the
+    player was heading before it."""
+    use_output(monkeypatch, batched_output(position="10.0"))
+    recorder = Recorder()
+    monitor = announced_monitor(recorder, reconcile_interval=1_000_000)
+    monitor.tick()
+
+    clock.advance(0.3)
+    pm.moved(61.0)          # the loop's wrap seek comes back
+    clock.advance(0.3)
+    assert monitor.tick().position_seconds == pytest.approx(61.3)
+
+
+def test_a_fresh_answer_is_never_the_one_that_needs_rebasing(monkeypatch, clock):
+    """Which is why the rule is asked of the LAST answer and not of a new
+    one. A query cannot run while a seek is executing — one lock — so an
+    answer that has just come back is always stamped after any seek that
+    has already finished, and there is no second place for this to live.
+    """
+    fake = use_output(monkeypatch, batched_output(position="10.0"))
+    monitor = announced_monitor(Recorder(), reconcile_interval=1_000_000)
+    monitor.tick()
+
+    pm.moved(61.0)                                  # the seek finished
+    clock.advance(0.1)
+    fake.output = batched_output(position="61.1")   # and the query saw it
+    assert monitor.poll_once().position_seconds == pytest.approx(61.1)
+
+
+def test_an_answer_read_after_the_seek_wins(monkeypatch, clock):
+    """And it keeps winning, for ever, which is why nothing has to clear
+    the move: the user dragging Spotify's own scrubber after ours is an
+    answer stamped later, and it is the answer."""
+    fake = use_output(monkeypatch, batched_output(position="10.0"))
+    monitor = announced_monitor(Recorder(), reconcile_interval=1_000_000)
+    monitor.tick()
+
+    pm.moved(61.0)
+    clock.advance(0.1)
+    fake.output = batched_output(position="120.0")  # they dragged it here
+    pm.announce()
+    assert monitor.tick().position_seconds == pytest.approx(120.0)
+    clock.advance(0.5)
+    assert monitor.tick().position_seconds == pytest.approx(120.5)
+
+
+def test_a_failed_poll_no_longer_spends_the_seek(monkeypatch, clock):
+    """The hole the recording exists for. poll_once clears the wake before
+    the query, so a query that raises has consumed the disturb and the
+    next answer is a reconciliation interval away — 9.673 seconds of
+    disagreement, measured, after a loop wrap."""
+    fake = use_output(monkeypatch, batched_output(position="19.5"))
+    monitor = announced_monitor(Recorder())
+    monitor.tick()
+
+    fake.output = pm.SpotifyQueryError("transient")
+    pm.moved(10.0)                       # the wrap seek landed, and
+    pm.disturb()                         # rang, exactly as set_position does
+    clock.advance(0.05)
+    assert monitor.tick() is None        # the poll it woke, and it failed
+    clock.advance(0.3)
+    assert monitor.tick().position_seconds == pytest.approx(10.35)
+
+
+def test_a_trackless_poll_is_not_given_a_position_by_a_seek(monkeypatch, clock):
+    """The debounce substitute reports no position on purpose, so that no
+    position event fires from it. A move must not turn it into one."""
+    fake = use_output(monkeypatch, batched_output(position="10.0"))
+    recorder = Recorder()
+    monitor = announced_monitor(recorder, reconcile_interval=1_000_000)
+    monitor.tick()
+
+    fake.output = "playing"              # a track dropout mid item-switch
+    monitor.poll_once()
+    pm.moved(61.0)
+    clock.advance(0.3)
+    monitor.tick()
+    assert [name for name, _ in recorder.events].count("position") == 1
 
 
 # -- the slower rate is earned, and can be lost ----------------------------

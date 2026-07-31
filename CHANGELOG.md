@@ -6,6 +6,39 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Fix 22.2 — the loop's wrap seek, sent twice
+
+**An audible artefact at every wrap, and a loop that cancelled itself**
+after one or two of them. The hypothesis was a stale position: Spotify
+announces nothing on a seek, so the monitor would carry the estimate past
+the loop's end bound and read the app's own wrap as the user seeking away.
+
+**That is not what was happening.** Every player command already rings the
+monitor's bell in a `finally`, the run loop waits on that bell rather than
+on the clock, and one lock means a query cannot execute while a seek is.
+Traced over a 10 second line looped for 45 seconds, at round trips from
+133ms to a full second: the worst disagreement between the position the
+window was told and where Spotify actually was is **0.000s**.
+
+**The bug was the loop's own scheduling.** The wrap is dispatched 0.46s
+before the line's end and the round trip takes most of a poll interval, so
+every position that arrived in between was still inside that lead — and
+the scheduler dispatched the wrap again, and again on the next poll. Seven
+to eight seeks where four were wanted, the second landing a round trip
+after the first and restarting a line that had already restarted. Those
+extra seeks queue on the single lock ahead of the query that would have
+told the loop it had already wrapped, so at a slower round trip the player
+really did run past the end bound and the loop really was right to let go.
+
+**One wrap is outstanding at a time now**, and a position earlier than the
+one it was dispatched from is what says it landed. A wrap that never lands
+still cancels the loop, which is what a failed seek has always done.
+
+**And a seek this app made is an answer, not only a question.** The
+monitor records where the app put the player, so a poll that fails no
+longer spends the notification the seek rang: measured at 9.673s of
+disagreement before, 0.000s after.
+
 ## Fix 22.1 — the press nobody was sending
 
 **A report that every control on the window was dead**: the loop button,

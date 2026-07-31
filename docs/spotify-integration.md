@@ -166,6 +166,25 @@ a command that failed is exactly as much of a reason to go and look as one
 that worked. The loop's wrap, tap-to-sync and echo practice move the
 position several times a song and none of them waits.
 
+A seek is also an **answer**, not only a question, and `set_position`
+records one: `moved()` says where this app put the player, and the
+position is carried forward from there rather than from the last query.
+Saying "go and ask" is enough almost all of the time — but `poll_once`
+clears the wake *before* the query and gives up when it raises, so a
+transient failure spends the notification and the next answer is a whole
+reconciliation interval away. Measured, with one failed poll after a
+loop's wrap seek: the window was told a position **9.673 s** from where
+Spotify was. With the recording, 0.000 s.
+
+It is recorded on **success only**, while `disturb()` stays in the
+`finally`. A seek that failed moved nothing, and its whole signal is the
+position drifting out of the loop's bounds — the one thing that must not
+be papered over. And it is applied to the **last** answer rather than to a
+fresh one: one lock means a query cannot execute while a seek is
+executing, so an answer that has just come back is always stamped after
+any seek that has already finished. Both stamps are read the instant that
+call's own round trip came back, which is what makes them comparable.
+
 ### The slower rate is lost, not earned
 
 The first version earned it from the first announcement that arrived, and

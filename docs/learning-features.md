@@ -42,9 +42,21 @@ The ↻ button repeats the current line until released. The loop bounds are
 [this line's timestamp, the next line's), or the track duration for the
 last line.
 
-The wrap seek is dispatched 0.46 s early, because the `osascript` write
-takes ~150–200 ms and firing exactly at the end bound would bleed the next
-line through.
+The wrap seek is dispatched 0.46 s early, because the write to Spotify
+takes a round trip and firing exactly at the end bound would bleed the
+next line through.
+
+**Only one wrap is outstanding at a time.** That lead is also a gap: for
+the whole round trip the player is still where it was, so every position
+that arrives in between is inside the lead, the eta clamps to zero and the
+scheduler would dispatch the wrap again — measured at 7 to 8 seeks where 4
+were wanted, the second landing a round trip after the first and
+restarting a line that had already restarted. A position *earlier* than
+the one the wrap was dispatched from is what says it landed, because a
+seek is the only thing that moves a position backwards. A wrap that never
+lands dispatches nothing more, and the position running on past the end
+bound is what cancels the loop — which is what a failed seek has always
+done.
 
 While a loop is engaged the line never advances, so the anticipatory line
 scheduler is suppressed and the wrap is armed from the line's known end

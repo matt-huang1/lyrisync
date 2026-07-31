@@ -111,6 +111,20 @@ Rules that come with them:
 - **`QSettings` is injected, never configured globally.**
   `setDefaultFormat`/`setPath` are process-wide and silently do nothing on
   macOS.
+- **A test that supplies its own positions cannot see the loop.** Every
+  loop test handed `LineLoop` a position and asked what it decided, and
+  every window test handed `_on_position_update` a snapshot built by
+  hand: both are the caller answering its own question, and 1487 of them
+  passed against a loop that seeked twice at every wrap. What the wrap
+  disagrees with is the PLAYER, so the suite has one — a fake Spotify and
+  a fake clock under the real `PlayerMonitor`, wired to the real window's
+  slots, where the only things that move the position are playback and
+  this app's own seeks. Its driver advances to whichever event is next
+  (tick, wrap timer, command landing) and never by a fixed step: a poll
+  interval at a time puts every landing after the tick that follows it,
+  so the window between a seek being sent and it landing never contains a
+  poll, and the first version of the harness passed against the unfixed
+  loop.
 - **A control is proved by a press, and the press goes to the WINDOW.**
   Calling a slot, calling `click()`, and asking `isVisibleTo` all name the
   receiver, which is the one thing a hit-testing bug gets wrong: 1483
@@ -338,7 +352,35 @@ Rules that come with them:
   changed is what that costs.
 - **A seek this app made is never waited for**: the player commands call
   `disturb()` in a `finally`, so a failed command counts too. Module
-  level, so a command cannot be added that forgets.
+  level, so a command cannot be added that forgets. A seek is also an
+  **answer** and not only a question — `moved()` records where this app
+  put the player and the monitor carries the position forward from
+  there, because `poll_once` clears the wake BEFORE the query and returns
+  None when it raises, so a transient failure spends the disturb and the
+  next answer is a reconciliation interval away (measured: the window
+  told a position 9.673s from the player's). Recorded on **success
+  only**, while `disturb()` stays in the `finally`: a seek that failed
+  moved nothing, and its whole signal is the position drifting out of
+  bounds. Asked of the **last** answer and never of a fresh one — one
+  lock means a query cannot run while a seek is executing, so a fresh
+  answer is always stamped after any seek that has finished.
+- **A command in flight is not a command that has happened.** The loop's
+  wrap seek is dispatched a seek lead before the end bound and the round
+  trip takes most of a poll interval, so every position that arrives in
+  between is still inside the lead: `wrap_eta` clamped to zero and the
+  wrap went out again, and again on the next poll. Measured, on a 10
+  second line looped for 45 seconds: 7 to 8 seeks where 4 were wanted,
+  the second landing a round trip after the first and restarting a line
+  that had already restarted. The extra seeks queue on the one
+  `_ask_lock` ahead of the reconciliation query, so at a 0.7s round trip
+  the player really did run past the end bound and the loop cancelled
+  itself in 10 runs out of 10. **One wrap is outstanding at a time**, and
+  a position EARLIER than the one it was dispatched from is what says it
+  landed — a seek is the only thing that moves a position backwards. A
+  wrap that never lands dispatches nothing more and `still_valid`
+  cancels, which is what a failed seek has always done. The anticipatory
+  line change already had this rule (`may_arm`/`begin`); the loop did
+  not.
 - **The slower rate is lost, not earned.** It starts the moment the
   observer registers, because announcements only arrive when something
   changes and waiting for one means asking three times a second through

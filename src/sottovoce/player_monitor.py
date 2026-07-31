@@ -368,6 +368,29 @@ _rings = 0
 _observing = False
 _rings_lock = threading.Lock()
 
+# Where this app itself put the player, and when: ``(seconds, monotonic)``.
+#
+# ``disturb()`` says "go and ask". This says what the answer IS, and the
+# case it exists for is the one where asking does not work: ``poll_once``
+# clears the wake BEFORE the query and returns None when the query raises,
+# so a transient failure has spent the disturb the seek rang and the next
+# answer is a whole reconciliation interval away. Everything in between is
+# carried forward from before the seek. Measured, with one failed poll
+# after a line loop's wrap seek: the window was told a position 9.673s
+# from where Spotify was. With this, 0.000s.
+#
+# It is worth being clear about what this did NOT fix, because it was
+# written to. The loop's own bug — a wrap dispatched twice, audible at
+# every wrap — is not staleness at all: the position the window is told
+# agrees with Spotify to 0.000s across every round trip measured, because
+# disturb() lands inside one and because a query cannot execute while a
+# seek is (one lock). See ``loop.observe_position``.
+#
+# A position this app set is not an observation waiting to be made. It is
+# an answer, and it is available the moment the command comes back.
+_moved: Optional[tuple[float, float]] = None
+_moved_lock = threading.Lock()
+
 
 def announce() -> None:
     """Spotify says something changed. Ask it what, now.
@@ -409,12 +432,38 @@ def disturb() -> None:
     _wake.set()
 
 
+def moved(seconds: float) -> None:
+    """This app has just put the player AT ``seconds``. Stamped now.
+
+    The companion to ``disturb()`` and not a replacement for it: one says
+    the last answer is stale, this one says what replaces it in the
+    meantime. Both, because a seek is a reason to go and look as well as a
+    fact about where the player is.
+    """
+    global _moved
+    with _moved_lock:
+        _moved = (seconds, time.monotonic())
+
+
+def last_move() -> Optional[tuple[float, float]]:
+    """The last position this app set, and when — or None."""
+    with _moved_lock:
+        return _moved
+
+
 def set_position(seconds: float) -> None:
     """Seek Spotify to ``seconds``. A blocking round trip to another
     process — never invoke on a UI thread. Raises SpotifyQueryError on
     failure."""
     try:
         _ask(_command(f"set player position to {seconds:.3f}"))
+        # After the command has come back, and so NOT in the finally: a
+        # seek that failed moved nothing, and saying it did would be a
+        # wrong answer where the stale estimate is merely an old one. A
+        # failed seek surfaces as the position drifting out of the loop's
+        # bounds, which is what cancels the loop — the documented
+        # behaviour, and the one thing that must not be papered over.
+        moved(seconds)
     finally:
         # In the finally, because a command that failed is exactly as much
         # of a reason to go and look as one that worked: the failure might
@@ -662,6 +711,44 @@ class PlayerMonitor:
             return True
         return now - self._asked_at > self.interval() - self.poll_interval
 
+    def _rebased(
+        self, snapshot: Optional[PlayerSnapshot]
+    ) -> Optional[PlayerSnapshot]:
+        """``snapshot``, with a seek this app made applied to it.
+
+        Applied to exactly the answers that cannot already include it —
+        the ones taken before it. The comparison is between two stamps
+        that mean the same thing, which is why it can be trusted: both are
+        read the instant that call's own round trip came back, and every
+        question and every command goes through one lock, so a query whose
+        round trip ended before the seek's ran entirely before it.
+
+        That is also why this is asked of the LAST answer and not of a
+        fresh one. A query cannot run while a seek is executing, so an
+        answer that has just come back is always stamped after any seek
+        that has already finished, and rebasing it could never do
+        anything. What goes stale is the answer being carried forward.
+
+        Once a query comes back from after the seek, its stamp is the
+        later one and this becomes a no-op for ever, which is why nothing
+        has to clear the move: an answer that has seen it wins, including
+        the user dragging Spotify's own scrubber afterwards.
+
+        A snapshot with no position is left alone. That is the one-poll
+        track dropout, whose whole point is that it reports no position;
+        giving it one would fire a position event from a substitute
+        snapshot that exists to avoid exactly that.
+        """
+        if snapshot is None or snapshot.position_seconds is None:
+            return snapshot
+        move = last_move()
+        if move is None or snapshot.polled_at is None:
+            return snapshot
+        position, at = move
+        if at < snapshot.polled_at:
+            return snapshot
+        return replace(snapshot, position_seconds=position, polled_at=at)
+
     def _carried_forward(self, now: float) -> Optional[PlayerSnapshot]:
         """Where the player must be, given where it was and how long ago.
 
@@ -700,6 +787,12 @@ class PlayerMonitor:
         and transiently failed.
         """
         now = time.monotonic()
+        # Before anything reads it. `_last` is only ever written by a
+        # query, so rebasing it here is idempotent — the carried-forward
+        # snapshot below is derived from it and never replaces it — and it
+        # is what makes the answer between two queries as fresh as the
+        # seek that caused it.
+        self._last = self._rebased(self._last)
         if self._due(now):
             return self.poll_once()
         snapshot = self._carried_forward(now)

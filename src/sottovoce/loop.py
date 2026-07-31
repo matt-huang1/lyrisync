@@ -36,6 +36,11 @@ class LineLoop:
         self.echo = False
         self._phase = LoopPhase.LISTEN
         self._pause_confirmed = False
+        # A wrap seek that has been dispatched and has not been seen to
+        # land, and the position it was dispatched from. See
+        # observe_position.
+        self._wrap_pending = False
+        self._wrap_from = 0.0
 
     @property
     def engaged(self) -> bool:
@@ -71,12 +76,14 @@ class LineLoop:
         self._start, self._end = start, end
         self._phase = LoopPhase.LISTEN
         self._pause_confirmed = False
+        self._wrap_pending = False
         return True
 
     def release(self) -> None:
         self._start = self._end = None
         self._phase = LoopPhase.LISTEN
         self._pause_confirmed = False
+        self._wrap_pending = False
 
     @property
     def phase(self) -> LoopPhase:
@@ -85,14 +92,47 @@ class LineLoop:
     def on_end_reached(self) -> str:
         """Decision when playback reaches the end bound. Returns "seek"
         (plain loop: jump back to the start), "attempt" (echo mode: the
-        caller pauses playback and waits for the user), or "none"."""
-        if not self.engaged:
+        caller pauses playback and waits for the user), or "none" —
+        including when the wrap this one would dispatch is already on its
+        way (see ``observe_position``)."""
+        if not self.engaged or self._wrap_pending:
             return "none"
         if self.echo:
             self._phase = LoopPhase.ATTEMPT
             self._pause_confirmed = False
             return "attempt"
+        # The scheduler runs this timer for exactly `end - position - lead`
+        # seconds, so the position it fires at is the end bound less the
+        # lead, whatever the position that armed it was.
+        self._wrap_pending = True
+        self._wrap_from = self._end - SEEK_LEAD_SECONDS
         return "seek"
+
+    def observe_position(self, position_seconds: Optional[float]) -> None:
+        """Feed each poll's position, so the controller can tell the wrap
+        seek IT dispatched from the line simply playing on.
+
+        The counterpart to ``observe_state``, and it exists because the
+        wrap is dispatched a seek lead BEFORE the end bound while the
+        round trip that carries it takes most of a poll interval. Every
+        position that arrives in between is still inside the lead, so
+        ``wrap_eta`` clamps to zero and the wrap is dispatched again at
+        once — and again on the next poll. Measured against a 10 second
+        line looped for 45 seconds: 7 to 8 seeks where 4 were wanted, the
+        extra one landing a round trip after the first and restarting a
+        line that had already restarted. That is what the wrap sounded
+        like.
+
+        A seek is the only thing that moves a position backwards, so a
+        position earlier than the one the wrap was dispatched from IS the
+        wrap landing. A wrap that never lands is never replaced either:
+        the position runs on past the end bound and ``still_valid``
+        cancels the loop, which is what a failed seek has always done.
+        """
+        if not self._wrap_pending or position_seconds is None:
+            return
+        if position_seconds < self._wrap_from:
+            self._wrap_pending = False
 
     def finish_attempt(self) -> None:
         """User-paced: the attempt ends only when the user says so (the 🎤
@@ -134,9 +174,10 @@ class LineLoop:
         """Seconds from now until the wrap seek should be DISPATCHED (the
         seek lead is already subtracted). None when nothing should be
         scheduled: not engaged, paused (dormant — resumes with playback),
-        or mid-ATTEMPT (the attempt timer owns the phase)."""
+        mid-ATTEMPT (the attempt timer owns the phase), or with a wrap
+        already on its way (``observe_position``)."""
         if not self.engaged or not playing:
             return None
-        if self._phase is LoopPhase.ATTEMPT:
+        if self._phase is LoopPhase.ATTEMPT or self._wrap_pending:
             return None
         return max(0.0, self._end - position_seconds - SEEK_LEAD_SECONDS)

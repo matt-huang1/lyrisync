@@ -1396,6 +1396,9 @@ class LyricsWindow(QWidget):
                 self._release_loop()  # user seeked outside the line
                 self._render()
                 return
+            # Before the scheduler below: a wrap already on its way is a
+            # wrap this poll must not arm a second one behind.
+            self._loop.observe_position(position)
             # The looped line never advances: suppress the fade scheduler
             # so no swap fires at the end bound, and arm the wrap seek from
             # the known end timestamp instead (dormant while paused).

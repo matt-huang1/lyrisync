@@ -227,3 +227,94 @@ def test_auto_cancel_rules_unchanged_in_echo_mode():
     loop = echo_loop(1)
     assert loop.still_valid(30.0 + EXIT_GRACE + 0.5) is False
     assert loop.still_valid(20.0 - ENTRY_GRACE - 0.5) is False
+
+
+# -- one wrap at a time --------------------------------------------------
+#
+# The wrap is dispatched a seek lead BEFORE the end bound, and the round
+# trip that carries it takes most of a poll interval. Every position that
+# arrives in between is still inside the lead, so wrap_eta clamps to zero
+# and the wrap goes out again — and again on the next poll. Measured
+# against a 10 second line looped for 45 seconds: 7 to 8 seeks where 4
+# were wanted. What that sounds like is the line restarting, playing for a
+# round trip, and restarting again.
+
+
+def dispatched(loop):
+    """One turn of the scheduler at the end bound: what the caller does."""
+    return loop.on_end_reached()
+
+
+def test_a_wrap_already_on_its_way_is_not_dispatched_again():
+    loop = engaged_loop(1)  # [20, 30), so the wrap goes out at 29.54
+    assert dispatched(loop) == "seek"
+    # The seek is in flight: the positions that arrive are the ones that
+    # armed it in the first place, and they must arm nothing.
+    for position in (29.54, 29.7, 29.9, 30.1):
+        loop.observe_position(position)
+        assert loop.wrap_eta(position, playing=True) is None
+        assert dispatched(loop) == "none"
+
+
+def test_the_wrap_landing_frees_the_next_one():
+    loop = engaged_loop(1)
+    assert dispatched(loop) == "seek"
+    loop.observe_position(20.0)  # it landed
+    assert loop.wrap_eta(20.0, playing=True) == pytest.approx(
+        10.0 - SEEK_LEAD_SECONDS
+    )
+    assert dispatched(loop) == "seek"
+
+
+def test_only_a_position_before_the_dispatch_point_counts_as_landing():
+    """A seek is the only thing that moves a position backwards, so that
+    is what the wrap landing looks like. The line simply playing on does
+    not, however many polls it takes."""
+    loop = engaged_loop(1)
+    dispatched(loop)
+    for position in (29.6, 29.8, 30.0, 30.4):  # still running forward
+        loop.observe_position(position)
+    assert dispatched(loop) == "none"
+    loop.observe_position(29.53)  # one hundredth before the dispatch point
+    assert dispatched(loop) == "seek"
+
+
+def test_a_wrap_that_never_lands_dispatches_nothing_more():
+    """A failed seek has always surfaced as the position drifting out of
+    the bounds, which cancels the loop. It must not surface as a seek a
+    poll, for ever."""
+    loop = engaged_loop(1)
+    assert dispatched(loop) == "seek"
+    for position in (29.8, 30.3, 30.8, 31.1):
+        loop.observe_position(position)
+        assert dispatched(loop) == "none"
+    assert loop.still_valid(31.1) is False  # and this is what ends it
+
+
+def test_observe_position_ignores_an_unknown_position():
+    loop = engaged_loop(1)
+    dispatched(loop)
+    loop.observe_position(None)  # a debounced blip poll
+    assert dispatched(loop) == "none"
+
+
+def test_a_pending_wrap_does_not_survive_release_or_a_fresh_engage():
+    loop = engaged_loop(1)
+    dispatched(loop)
+    loop.release()
+    assert loop.engage(LINES, 1, DURATION)
+    assert loop.wrap_eta(20.0, playing=True) is not None
+    assert dispatched(loop) == "seek"
+
+
+def test_echo_never_has_a_wrap_in_flight():
+    """The attempt phase already suppresses the scheduler from the first
+    wrap onward, and the caller pauses rather than seeking, so echo was
+    never exposed to this. Proved rather than assumed: the pending flag
+    must not leak into a phase that has its own rule."""
+    loop = echo_loop(1)
+    assert loop.on_end_reached() == "attempt"
+    assert loop.wrap_eta(29.9, playing=True) is None  # the ATTEMPT rule
+    loop.finish_attempt()
+    assert loop.wrap_eta(20.0, playing=True) is not None
+    assert loop.on_end_reached() == "attempt"
