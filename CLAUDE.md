@@ -111,9 +111,15 @@ Rules that come with them:
 - **Non-music items never touch the cache or the network** — DJ narration
   reuses the next song's ID, so even a cache *read* is wrong.
 - **Prefer no lyrics to mismatched-duration lyrics.**
-- The fallback attempts run **concurrently but resolve in priority
-  order**. An error on an attempt that outranks an answer is still a retry
-  state — using the looser answer would write a wrong one down forever.
+- The fallback attempts **resolve in priority order**, and an error on an
+  attempt that outranks an answer is still a retry state — using the looser
+  answer would write a wrong one down forever.
+- **An attempt below the one in hand is asked only when it is needed.**
+  Measured: the album match answered 30 of 30 lookups, in 61ms by median.
+  So the rest go out on a **hedge** (250ms, clear of the 170ms slowest
+  observed) when an attempt is slow, at once when it 404s, and never when
+  it answers or errors. LRCLIB is free and under load; the concurrency is
+  kept for the day it is slow and not spent on the day it is not.
 - Connections to LRCLIB are pooled. A request on a **reused** connection
   that fails is retried once, because a server may close an idle
   connection at any time; a brand new one that fails is **not**, or an
@@ -160,10 +166,10 @@ Rules that come with them:
   the explanations.
 - The compact layout is **one setting and one applied state**
   (`_compact`, `_compact_applied`), because a sync pass borrows the full
-  layout back and that is not the user changing their mind. Each layout
-  **keeps the height it was last left at**: Qt does not shrink a window
-  when a minimum drops, so without that every pass would leave the strip
-  permanently taller.
+  layout back and that is not the user changing their mind. The FULL
+  layout **keeps the height it was last left at**; the strip's height is
+  **derived from its type size** and is not remembered, so it offers no
+  vertical resize either.
 - **A strip is one row tall, so its rows do not wrap.** What will not fit
   is elided, measured against the window and its gutters rather than a
   label width that does not exist yet, and the unelided line is kept so a
@@ -171,18 +177,28 @@ Rules that come with them:
 - Compact's gutter reserves **two controls a side, symmetrically**. Only
   the right side carries two, but the sung line is centred and an
   asymmetric gutter would centre it in what is left of the window.
-- **The type scale follows the width, so "widen the window until the line
-  fits" has no answer**: the room and the line grow at the same rate and
-  the width cancels, leaving `(460 - 144) / T`. A line past 316pt at scale
-  1.0 fits at no width, and 13 of 14 real songs are past it. While the
-  strip sizes itself the scale is **held** at the width the user chose,
-  which is also why the strip's height does not move when its width does.
+- **In the full layout the type scale follows the width; in the strip it
+  is a setting.** The proof is why: the room and the line grow at the same
+  rate and the width cancels, leaving `(460 - 144) / T`, so a line past
+  316pt at scale 1.0 fits at no width and 13 of 14 real songs are past it.
+  A strip whose type followed its width could be widened all afternoon
+  without showing one more character. Naming the sung line's size directly
+  (five presets, default `base_size(CURRENT)`) is what gives the width a
+  job, and the strip's height comes off the same size.
+- **Anything that changes the window's shape takes the scale it is about
+  to land on, never the one it is leaving** (`_type_scale_at`). `_scale`
+  is what has been applied and lags a layout change by exactly the moment
+  it is asked in; Qt will not let a resize through its own minimum, so a
+  floor at the old scale clamps a strip up to the height it is trying to
+  stop being.
 - The fitted width is measured **once per song, never per line** — a
   window that re-sized itself line by line would twitch through a verse —
-  and it is **capped at half the screen**. The user's own width is kept
-  separately, is what the scale is pinned to, and is never overwritten by
-  a fitted one. A drag on an edge turns fitting off at the **start** of
-  the drag, so the scale follows the edge live.
+  and it is **capped at the screen**, not half of it: half was the only
+  control over width while the type size was the width's, and the control
+  now is the size. Measured: the old cap bound nothing at 20pt and under,
+  and would have elided 4 of 14 songs at 24pt. The user's own width is
+  kept separately and is never overwritten by a fitted one. A drag on an
+  edge turns fitting off at the **start** of the drag.
 - A width change is **anchored on the window's centre**, and a window that
   is exactly where docking put it is **re-docked** instead. Recognised by
   position, not by a flag: the two rules differ by a pixel of parity, and
@@ -345,6 +361,17 @@ Rules that come with them:
   A dock is **learned like the end of a drag**, or the position layer
   undoes it at the next app switch, and is written from the target
   because the travel would otherwise record a waypoint.
+- A docked window is drawn **square across the top and rounded
+  underneath**, so it reads as the menu bar's band continuing rather than
+  a panel with desktop showing through two corners. Whether it is docked
+  is `geometry.is_docked`, asked of the POSITION on every move (8.9us) and
+  never held as a flag: a flag has to be cleared by every drag, clamp,
+  nudge and screen change. Asked from `_relayout` and `showEvent` too,
+  because a hidden widget defers both its move and its resize events.
+  **One path builds both shapes** and the rounded one is byte for byte
+  what `drawRoundedRect` drew. The material is a separate native view and
+  is told the same corners (`CACornerMask`), or the blur keeps the shape
+  the paint has left.
 - The flight puts the window's **position back before it is hidden**, and
   one method gives back everything it borrowed. Startup does not fly.
 - Every native login-item, hotkey, workspace and window-list call goes
@@ -401,6 +428,10 @@ Fitting the width to the song is the **one setting that defaults on**, and
 it may only because it is reachable solely from inside the compact layout,
 which is itself opt-in and default off. A default-on setting has to be
 unreachable from the plain window, not merely quiet in it.
+
+The strip's text size is offered on the same terms and for a sharper
+reason: in the full layout the type size **is** the width, so a control for
+it there would be a second answer to one question.
 
 ## Where the rest is
 

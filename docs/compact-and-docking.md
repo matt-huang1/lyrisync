@@ -20,6 +20,65 @@ notification yield. None of them knows this layout exists, which is the
 point — it changes which rows are on screen and how tall the window may
 be, and nothing else.
 
+## The strip names its own type size
+
+**This is the one thing about the strip that is not like the rest of the
+window, and it is the whole reason the layout is usable.**
+
+Everywhere else, the type scale follows the window's width: that is what
+makes dragging an edge a size control. In a strip it made the width
+useless. Milestone 18 proved why, and then only used half of the proof:
+the room for a line and the line itself grow at exactly the same rate, so
+
+```
+available / text  =  (w - 2·gutter(w/460)) / (T·w/460)  =  (460 - 144) / T
+```
+
+The width cancels. A line wider than 316pt at scale 1.0 fits at **no
+width**, and 13 of 14 real songs are past that. So a long line ended in an
+ellipsis, and widening the window made the text bigger and showed exactly
+the same words.
+
+So the sung line's size is named directly, in the menu, from five presets:
+
+| | 14pt | 17pt | **20pt** | 24pt | 28pt |
+|---|---|---|---|---|---|
+| strip height | 55 | 69 | **79** | 96 | 111 |
+
+Steps of about 20%, which is an ordinary type-scale interval. The default
+is the app's own sung-line size, taken from `typography.base_size(CURRENT)`
+rather than written down again. It is a scale rather than a size, because
+the gutters, the buttons, the margins and the height floor are already
+proportional to one, and a strip whose text changed size while its controls
+did not would be the type scale with a hole in it.
+
+With the type standing still, **the width is how much of the line is on
+screen**. On the widest line in the 14-song corpus, at 28pt type:
+
+| window | what is on screen |
+|---|---|
+| 320pt | `She's ju…` |
+| 560pt | `She's just a girl who claim…` |
+| 900pt | `She's just a girl who claims that I am the one (you kn…` |
+| 1400pt | the whole line |
+
+The full layout is untouched, and that is the layers rule rather than an
+oversight: there the type size *is* the width, so a second control for it
+would be a second answer to one question. Both this and the fit below are
+therefore shown in the menu only while the strip is on.
+
+### Its height is derived, not remembered
+
+A strip is one row of type, so how tall that row is, is the whole of the
+question. The height follows the size and nothing else can move it: there
+is no `window/compact_height`, and the strip offers **no vertical resize**
+at all. An edge that showed a resize cursor and then refused would be worse
+than one that never claimed to; those edges move the window instead.
+
+The full layout still keeps the height it was last left at, and the user's
+own strip **width** is still kept, because that is a free number and is
+what turning the fit off gives back.
+
 ## The height floor
 
 `geometry.min_window_height(scale, compact=True)` is the same arithmetic
@@ -52,7 +111,7 @@ and `window/compact_height`. Switching gives that height back rather than
 one derived from the other layout, so going compact and returning is not a
 way to lose the window's shape.
 
-## A strip is one row tall, so a long line ends in an ellipsis
+## A strip is one row tall, so a line that will not fit is elided
 
 **Found by screenshot.** The full layout wraps a long line onto a second
 row and its floor leaves room for one. A strip has no such room by
@@ -122,57 +181,57 @@ The romanisation is measured too when that layer is on. Not measured: the
 title card, which is the song's name for two seconds, and the ↻ marker,
 which prefixes one line at a time while a loop is engaged.
 
-### Why the type scale has to be held
+### What it measures against
 
-The obvious implementation does not work, and the reason is a property of
-this app rather than a bug in it.
+The chosen type size, which is the thing that made this feature possible
+at all. Because the type stands still, there *is* a width that shows a
+line whole, and the fit is the arithmetic that finds it. While the scale
+followed the width there was no answer to find.
 
-The type scale follows the window's width. So the room for a line and the
-line itself grow at exactly the same rate, and the ratio between them is a
-constant:
-
-```
-available / text  =  (w - 2·gutter(w/460)) / (T·w/460)  =  (460 - 144) / T
-```
-
-The window's width cancels. **A line wider than 316pt at scale 1.0 fits at
-no width at all**, and one narrower than that fits at every width.
-Measured over 14 real songs at every width from 260 to 3000: 13 of them
-never fit. "Make the window wide enough" has no answer.
-
-So while the strip is sizing itself, the type scale is **held** instead of
-following the width. The width the user chose for the strip stops being a
-width and becomes a type size: it still sets the scale, the song sets the
-width, and dragging an edge hands both back at once.
-
-That is also what keeps the strip's **height** still while its width moves,
-since the height floor comes off the same scale. Height adaptation needs no
+It is also what keeps the strip's **height** still while its width moves,
+since the height floor comes off the same size. Height adaptation needs no
 code because there is none to do.
 
 ### What the fit produces
 
-Measured against the same 14 songs, with the scale held at 1.0:
+Measured against 14 real songs, at each size the menu offers. The widest
+window any song in the corpus needs:
 
-| | widest line | fitted window |
-|---|---|---|
-| narrowest song | 267pt | 411 |
-| median | 466pt | 610 |
-| widest song | 695pt | 839 |
+| | 14pt | 17pt | 20pt | 24pt | 28pt |
+|---|---|---|---|---|---|
+| narrowest song | 301 | 349 | 413 | 496 | 578 |
+| median | 441 | 521 | 617 | 743 | 868 |
+| widest song | 600 | 717 | 848 | 1023 | 1196 |
 
-Three shot on the real window, at each song's widest line: **412, 561 and
-839 points**, each showing that line whole with the gutters either side.
+Shot on the real window at the corpus's widest line: 645pt wide at 14pt,
+839 at 20pt and 1243 at 28pt, each showing that line whole with the
+gutters either side.
 
 ### The cap
 
-Half the screen, because past that a floating strip stops reading as an
-overlay on somebody's work and starts reading as a window over it.
+The screen, and no fraction of it.
 
-Checked against 776 lines from those 14 songs. The widest needs 839pt; on
-the 1710pt screen this was measured on the cap is 855, so nothing in the
-corpus is clipped by it. On a 1440pt screen the cap is 720 and 4 of the 14
-are, which is the cap working: a smaller screen gets a proportionally
-smaller strip rather than the same strip taking more of it. Past the cap a
-line elides as it always did.
+It used to be half, on the argument that past that a floating strip stops
+reading as an overlay on somebody's work and starts reading as a window
+over it. That argument was made when the type size was the width's to
+decide, and it could not have been anything else then: a line that did not
+fit was a line that fit at no width, so the cap was the only thing standing
+between the user and a strip the width of the screen.
+
+With the sung line's size named directly, the cap changed jobs. What it
+bounds now is the consequence of a size the user picked, and the control
+for "this strip is too wide" is the size.
+
+The numbers say the same thing. On the 1710pt screen the corpus was
+measured on, the old cap of 855 never bound anything at 20pt or below —
+**14 of 14 songs fit in half the screen**. It began binding only at the
+sizes that did not exist yet: 10 of 14 at 24pt, 6 of 14 at 28pt. Keeping it
+would have made an ellipsis the routine price of choosing larger type,
+which is the bug this milestone fixed, one level along.
+
+Against the whole screen, every song fits at every size. **Elision is now
+what happens when a line will not fit the screen**, not what happens
+because the window is not allowed to be wide enough.
 
 ### Where the window ends up
 
@@ -207,9 +266,9 @@ left at a waypoint would stay there, because nothing would ask again.
 
 **Dragging an edge turns the fitting off**, at the start of the drag rather
 than at the end, so the drag behaves exactly as it does with the feature
-off: the type scale follows the edge live instead of being pinned for the
-length of the gesture and jumping when it is let go. Dragging the window
-itself is not resizing and changes nothing.
+off, and so the song cannot re-fit the window out from under a gesture
+still in progress. Dragging the window itself is not resizing and changes
+nothing.
 
 The user's own width is kept while the song is choosing the window's, which
 is what the scale is pinned to and what turning the feature off gives back.
@@ -274,6 +333,74 @@ thing a drag says. The position is written from the target rather than
 from the window, because the travel takes a phase length and neither the
 save nor the learn may record a waypoint.
 
+## A docked window is a different shape
+
+Square across the top, rounded underneath, flush against the underside of
+the menu bar.
+
+Two corners, and it is the whole effect. With them rounded, a strip sitting
+under the menu bar reads as a panel that happens to be up there, with a
+sliver of desktop showing through each corner. Squared off, it reads as the
+bar's own band continuing downwards, which on a notched Mac is the notch
+and on an unnotched one is the bar. It works on both because it is the same
+shape either way, and because the position it is flush against is the one
+macOS gives for that screen.
+
+**Nothing about the position changed.** `docked_position` already put the
+top edge at the first row macOS reports as available, which is by
+definition the first row under the menu bar. The strip never reaches into
+the bar, and the menu titles and status items are exactly where they were.
+
+### Recognised by position, never by a flag
+
+`geometry.is_docked` is the one place that decides, and it decides by
+asking whether the window is exactly where docking would put it. This was
+already the rule inside `resized_position`; the paint needs the same answer
+and two copies of it would be a window drawn as docked while being moved as
+floating.
+
+A flag would have to be cleared by every drag, every clamp, every nudge and
+every screen change, and the first one that forgot would leave a window
+claiming to be docked from the middle of somebody's screen. Instead, a
+window that is dragged one pixel is round again immediately.
+
+It is asked **in full on every move**, because it is cheap enough to be:
+measured at **8.9us** for the whole question, of which 6.8us is the
+screen's safe area and 1.4us the two Qt rects. A drag delivering 60 moves a
+second spends 0.05% of one core on it, which is less than a cache costs in
+ways to be wrong.
+
+It is asked from `moveEvent`, from `_relayout`, and from `showEvent`. The
+last one is not belt and braces: a hidden widget defers its move and resize
+events until it is shown, and plenty happens to a hidden window — the
+flight puts the position back *before* hiding it, a remembered position
+moves it, and the saved geometry is restored before anything is on screen.
+
+### One path builds both shapes
+
+`window._panel_path(rect, radius, square_top)` is byte for byte what
+`drawRoundedRect(rect, radius, radius)` produced when `square_top` is
+false, at 1x and at 2x, and a test pins that. Otherwise "square top corners
+when docked" would have quietly restyled every other window in the app.
+
+The straight-band fast path needed no change: between the corner radii the
+panel is a rectangle with a line down each side in *both* shapes. That it
+is the same pixels is asserted for the docked shape too, rather than
+reasoned about.
+
+**The material had to be told the same thing.** The blur is a separate
+`NSVisualEffectView` under the painted scrim, with its own corner radius,
+so it gets `CALayer.maskedCorners` set to the same two or four. Its layer
+is unflipped, so MinY is the pair under the window and MaxY the pair
+against the menu bar. A blur still rounded at the top under a scrim that is
+not would show the desktop through two small notches at exactly the corners
+the shape exists to remove. Verified by readback, like every other native
+state this window sets.
+
+Nothing else changes: the material, the album tint, the contrast floors and
+the Reduce Transparency behaviour are all the shape's business only
+inasmuch as they are drawn into it.
+
 A window that is away at the menu bar is docked by moving where the flight
 will put it back, not by moving the window: the flight is holding the real
 position and would hand the old one straight back on landing.
@@ -293,8 +420,11 @@ because the scale it comes from does.
 
 | | |
 |---|---|
-| `geometry.py` | `scale_for`, `min_window_height(compact=)`, `compact_text_gutter`, `control_gap`, `docked_position`, `fitted_window_width`, `width_cap`, `resized_position` |
-| `menu.py` | `COMPACT`, `FIT_TO_SONG`, `DOCK_TOP` |
-| `window.py` | `_apply_compact`, `_set_line_text`, `_reveal_target`, `_check_pointer`, `_dock_to_top`, `_top_inset`, `_type_scale`, `_widest_line`, `_fit_width` |
-| `tests/test_geometry.py` | the floors, the gutters and the dock position, notched screen included |
-| `tests/test_window_qt.py` | the rows, the height swap, the reveal, the sync fallback, the dock |
+| `typography.py` | `COMPACT_TEXT_SIZES`, `DEFAULT_COMPACT_TEXT_SIZE`, `compact_scale` |
+| `geometry.py` | `scale_for`, `min_window_height(compact=)`, `compact_text_gutter`, `control_gap`, `docked_position`, `is_docked`, `fitted_window_width`, `width_cap`, `resized_position` |
+| `menu.py` | `COMPACT`, `COMPACT_SIZE`, `FIT_TO_SONG`, `DOCK_TOP` |
+| `window.py` | `_apply_compact`, `_set_line_text`, `_reveal_target`, `_check_pointer`, `_dock_to_top`, `_top_inset`, `_type_scale`, `_type_scale_at`, `_set_compact_text_size`, `_apply_compact_type`, `_strip_height`, `_widest_line`, `_fitted_width`, `_fit_width`, `_update_docked`, `_panel_path`, `_apply_material_corners` |
+| `vibrancy.py` | `masked_corners` and the `CACornerMask` values |
+| `tests/test_typography.py` | the presets, the default, and the ladder |
+| `tests/test_geometry.py` | the floors, the gutters, the cap, the dock position and `is_docked`, notched screen included |
+| `tests/test_window_qt.py` | the rows, the height, the reveal, the sync fallback, the type size, the dock and its corners |

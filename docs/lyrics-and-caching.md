@@ -21,30 +21,79 @@ Your own syncs are consulted first, always. They are the one source the
 app knows to be about *this* recording, because you timed it against this
 recording.
 
-### The three attempts go out at once
+### The attempts are read in priority order, and asked only when needed
 
 The fallback is a **preference between answers**, and it never depended on
-asking one question only after another had failed. So all three attempts
-are made together and read back in the order above: the most precise
-answer wins, whichever arrives first, and a lookup whose exact match hits
-costs one attempt's time rather than three.
+asking one question only after another had failed. So the results are read
+back in the order above: the most precise answer wins, whichever arrives
+first.
 
 Two things that behaviour has to keep, and does:
 
 - An error on an attempt that **outranks** an answer is still a retry
   state. Sequentially, an exact match that failed ended the chain and
-  `search` was never asked; concurrently it *is* asked, and its looser
-  answer must still be refused — caching it because the precise attempt
-  happened to fail would write a wrong answer down permanently.
+  `search` was never asked; once the attempts overlap it *is* asked, and
+  its looser answer must still be refused — caching it because the precise
+  attempt happened to fail would write a wrong answer down permanently.
 - An attempt that never comes back has an **unknown** outcome, not a
   negative one. Falling through to a looser answer would be treating "we
   could not ask" as "the answer was no".
 
-The cost, stated rather than buried: an uncached track now asks LRCLIB up
-to three questions where it used to ask between one and three. LRCLIB is a
-free service, so this is a real cost — the mitigation is the one that was
-always there, that a lookup happens once per track ever and the answer is
-cached. A track with no album reported asks two questions, not three,
+For a while all three went out together. They no longer do, and the reason
+is a measurement.
+
+### The hit rate, measured
+
+15 real tracks, taken from the local cache so they are songs actually
+played, with **Spotify's own metadata** rather than a transcription of it:
+each track was made the current one so the album string and duration it
+reports could be read back. The chain was then asked in order, spaced 20
+seconds apart, twice, two minutes between rounds.
+
+| which attempt answered | |
+|---|---|
+| `get` with the album | **30 of 30** |
+| `get` without the album | 0 |
+| `search` | 0 |
+
+Every one of them synced. The first attempt's own response time: **53ms**
+fastest, **61ms** median, 74ms at the 90th percentile, 103ms at the 95th,
+170ms slowest.
+
+The sample's limits, because a measurement that oversells itself is worse
+than none: fifteen tracks, one person's library, and every one of them a
+track that *had* lyrics. So the claim is "for tracks that resolve at all,
+the album match resolves them" — not "the album match never misses". A
+track whose album name disagrees with LRCLIB's record still 404s and still
+falls through.
+
+### So the chain is hedged
+
+An attempt is asked when the chain reaches it. The ones below it go out
+early only if it is taking long enough that overlapping them would actually
+save something — **250ms**, which is 4x the measured median and 1.5x the
+slowest response in the sample, so no lookup in it would have fanned out at
+all.
+
+| | |
+|---|---|
+| the attempt answers quickly | nothing below it is ever asked |
+| the attempt 404s | the next one goes at once, with no hedge to wait out |
+| the attempt errors | the chain raises; the rest were never going to be read |
+| the attempt is slow | at 250ms the rest go out beside it, as they used to |
+
+What that buys is **two requests of every three not made**. LRCLIB is free,
+runs on donations and is under load, and asking it three questions to use
+the first answer is a cost it carries so this app can save a wait that, at
+these speeds, is not there to save.
+
+What it costs is paid only in the case the concurrency was for. The same
+service was measured at 0.7 to 4.8 *seconds* per request in an earlier
+session; when it is that slow the hedge fires, the chain fans out exactly
+as before, and the lookup is at most 250ms longer than the all-at-once
+version. Against 4.8s that is 5%.
+
+A track with no album reported asks two questions rather than three anyway,
 because the first two would otherwise be the same request.
 
 ### Connections are kept alive
@@ -66,25 +115,27 @@ long to report.
 
 ### What it costs now
 
-Measured against the live service, the same three URLs asked both ways,
-alternating so server variance hits both arms equally:
+Measured against the live service when the attempts still all went out
+together, the same three URLs asked both ways, alternating so server
+variance hit both arms equally:
 
 | | sequential | concurrent |
 |---|---|---|
 | three-attempt lookup, median | **5973 ms** | **1811 ms** |
 | the first attempt's own time | 1567 ms | 1602 ms |
 
-The second row is the important one: LRCLIB is no slower under three
-concurrent requests from one client, so a track whose exact match hits is
-neither faster nor slower than before. What went away is the waiting for
-attempts that were only ever asked because an earlier one failed.
+The second row is why the concurrency was safe to keep for the slow case:
+LRCLIB is no slower under three concurrent requests from one client. Those
+figures are also from a period when the service was answering in seconds.
+It is currently answering the first attempt in **61ms by median**, which is
+what makes the hedge above the right shape: the fan-out is still there for
+the bad day, and is simply never reached on a good one.
 
-Almost all of what remains is LRCLIB's own response time, which was
-measured between 0.7 s and 4.8 s per request and varies far more than
-anything this app controls. `gzip` was measured and **not** adopted: it
-takes the 250 KB search response down to 25 KB, but the body transfer is
-only ~130 ms of a ~1500 ms request and the one comparison available did
-not show a win worth a decode path.
+`gzip` was measured and **not** adopted: it takes the 250 KB search
+response down to 25 KB, but the body transfer was only ~130 ms of a
+~1500 ms request and the one comparison available did not show a win worth
+a decode path. With `search` now rarely asked at all, it is further from
+being worth it than it was.
 
 ## While the lookup is out: the title card
 

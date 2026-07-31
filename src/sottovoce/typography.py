@@ -109,6 +109,36 @@ def base_size(role: str) -> int:
     return _ROLES[role].size_px
 
 
+# The sung line's size, in points, when the COMPACT layout is choosing it
+# instead of the window's width.
+#
+# The full layout derives its scale from the width, and that is what makes
+# dragging an edge a size control there. In a strip it is what makes
+# widening the window useless: the room for a line and the line itself grow
+# at the same rate, so the ratio between them is a constant and a line that
+# elides at one width elides at every width. Naming the size directly is
+# what gives the width something to do — with the type held still, a wider
+# window is more of the line.
+#
+# Five steps of about 20%, which is an ordinary type-scale interval, with
+# the app's own sung-line size in the middle. It is in the middle rather
+# than beside a default set here, because a second statement of "20" is a
+# second thing to keep right.
+COMPACT_TEXT_SIZES = (14, 17, 20, 24, 28)
+DEFAULT_COMPACT_TEXT_SIZE = _ROLES[CURRENT].size_px
+
+
+def compact_scale(size_px: int) -> float:
+    """The type scale that puts the sung line at ``size_px``.
+
+    A scale rather than a size, because everything else on the strip — the
+    gutters, the buttons, the margins, the height floor — is already
+    proportional to one, and a strip whose text changed size while its
+    controls did not would be the type scale with a hole in it.
+    """
+    return size_px / _ROLES[CURRENT].size_px
+
+
 def font_stack(system_family: str) -> str:
     """A Qt stylesheet font-family list: the platform UI font first, then
     the fallbacks, deduplicated. Every family is quoted — the macOS system

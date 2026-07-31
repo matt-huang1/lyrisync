@@ -257,3 +257,31 @@ def test_collapse_drops_leading_and_trailing_separators():
 def _bit_combinations(width):
     for value in range(1 << width):
         yield [bool(value & (1 << bit)) for bit in range(width)]
+
+
+# -- the strip's own entries ----------------------------------------------
+
+
+def test_the_strips_two_settings_appear_only_inside_the_strip():
+    """Both are about a type size the full layout does not have: there the
+    size IS the width, so a control for it would be a second answer to the
+    same question."""
+    assert m.COMPACT_SIZE not in entries()
+    assert m.FIT_TO_SONG not in entries()
+    assert m.COMPACT_SIZE in entries(compact=True)
+    assert m.FIT_TO_SONG in entries(compact=True)
+
+
+def test_the_compact_switch_itself_is_always_reachable():
+    """Its two dependants come and go with it; the switch cannot, or there
+    would be no way back into the layout that offers them."""
+    assert m.COMPACT in entries()
+
+
+def test_the_size_sits_with_the_layout_it_belongs_to():
+    """Directly under the switch that turns the layout on, and above the
+    fit that measures against it, which is also the order they depend on
+    each other in."""
+    order = m.MENU_ORDER
+    assert order.index(m.COMPACT) + 1 == order.index(m.COMPACT_SIZE)
+    assert order.index(m.COMPACT_SIZE) + 1 == order.index(m.FIT_TO_SONG)

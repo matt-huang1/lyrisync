@@ -4581,28 +4581,42 @@ def test_compact_takes_the_window_down_to_a_strip(make_window):
     assert window.width() == 460  # a WIDE thin strip: the width is untouched
 
 
-def test_each_layout_keeps_the_height_it_was_left_at(make_window):
+def test_the_full_layout_keeps_the_height_it_was_left_at(make_window):
     """Going compact and coming back gives the window its old shape, not a
-    shape derived from the strip. The strip's own height is kept too, so a
-    second trip does not start from the floor again."""
+    shape derived from the strip."""
     window = make_window()
     window.resize(460, 260)
     APP.processEvents()
 
     go_compact(window)
-    window.resize(460, window.height() + 30)  # the user widens the strip
-    strip = window.height()
     APP.processEvents()
 
     window._set_compact(False)
     APP.processEvents()
     assert window.height() == 260
 
+
+def test_the_strips_height_is_its_type_sizes_and_is_not_remembered(make_window):
+    """The full layout's height is a free number and is kept. The strip's
+    is not: it is one row of type, so the type size answers it, and a
+    remembered height would only be a way to disagree with the setting."""
+    window = make_window()
     go_compact(window)
-    assert window.height() == strip
+    APP.processEvents()
+    assert window.height() == w.min_window_height(window._scale, compact=True)
+
+    # Nothing can leave it at another height, and coming back does not
+    # restore one.
+    window.resize(window.width(), window.height() + 40)
+    APP.processEvents()
+    window._set_compact(False)
+    APP.processEvents()
+    go_compact(window)
+    APP.processEvents()
+    assert window.height() == w.min_window_height(window._scale, compact=True)
 
 
-def test_compact_and_both_heights_survive_a_restart(make_window):
+def test_compact_and_the_full_height_survive_a_restart(make_window):
     window = make_window()
     window.resize(460, 240)
     APP.processEvents()
@@ -4616,8 +4630,10 @@ def test_compact_and_both_heights_survive_a_restart(make_window):
     # because make_window resizes every window it builds and would land on
     # top of the restored size.
     assert window._settings.value("window/size").height() == strip
-    assert window._settings.value("window/compact_height", type=int) == strip
     assert window._settings.value("window/full_height", type=int) == 240
+    # The strip's height is derived now, so the key that used to hold it is
+    # removed rather than left behind for somebody to believe.
+    assert window._settings.value("window/compact_height") is None
 
     reopened = make_window()
     APP.processEvents()
@@ -5043,7 +5059,7 @@ def expected_width(window, text_width):
         text_width,
         window._scale,
         w._MIN_WIDTH,
-        w.width_cap(screen.geometry().width()),
+        w.width_cap(screen.availableGeometry().width()),
     )
 
 
@@ -5238,8 +5254,9 @@ def test_turning_it_off_gives_the_users_width_back(make_window):
     window._set_fit_to_song(False)
     finish_fit(window)
     assert window.width() == 500
-    # And the type scale follows the width again.
-    assert window._scale == w._scale_for(500)
+    # And the type is where it was throughout: the strip's size is the
+    # user's to name, and the width was never what set it.
+    assert window._scale == w.compact_scale(window._compact_text_size)
 
 
 def test_the_setting_survives_a_restart(make_window):
@@ -5361,3 +5378,363 @@ def test_shutdown_saves_the_width_it_was_heading_for(make_window):
 
     window._shutdown()
     assert window._settings.value("window/size").width() == target.width()
+
+
+# -- the strip's own type size --------------------------------------------
+
+
+def elided_now(window):
+    """What the sung row is actually showing, which in a strip is the line
+    cut to fit rather than the line."""
+    return window._current.text()
+
+
+def resize_and_lay_out(window, width, height=None):
+    """Resize a window nobody has shown, the way a shown one behaves.
+
+    A hidden widget defers its resize event until it is shown, so these
+    windows never run one; _relayout is the app's own answer to that and
+    is what every path that changes the shape itself calls.
+    """
+    window.resize(width, window.height() if height is None else height)
+    window._relayout()
+    APP.processEvents()
+
+
+def move_and_notice(window, point):
+    """Move a window nobody has shown, and let it notice where it landed.
+    moveEvent is deferred for the same reason resizeEvent is."""
+    window.move(point)
+    window._update_docked()
+    APP.processEvents()
+
+
+def test_the_strips_type_is_the_setting_and_not_the_width(make_window):
+    """The bug this replaced: the type scale followed the window's width,
+    so the room for a line and the line grew together and widening the
+    strip could not show one more character of it."""
+    window = make_window()
+    go_compact(window)
+    window._set_fit_to_song(False)
+    APP.processEvents()
+    scale = window._scale
+
+    for width in (300, 460, 900, 1400):
+        resize_and_lay_out(window, width)
+        assert window._scale == scale, width
+        assert window._scale == w.compact_scale(window._compact_text_size)
+
+
+def test_the_full_layout_still_takes_its_type_from_its_width(make_window):
+    """Untouched, which is the layers rule: the setting above is reachable
+    only from inside the strip and may not change the plain window."""
+    window = make_window()
+    for width in (300, 460, 900):
+        resize_and_lay_out(window, width, 260)
+        assert window._scale == w._scale_for(width)
+
+
+def test_widening_the_strip_shows_more_of_the_line(make_window):
+    """The whole point of decoupling them. Measured on the elided text
+    rather than on a width: what the user is looking at is how much of the
+    line is on screen."""
+    window = make_window()
+    go_compact(window)
+    window._set_fit_to_song(False)
+    load(window, TrackLyrics(synced=[(1.0, "a line long enough that a narrow strip has to cut it short")]))
+    window._on_position_update(snapshot(position=2.0))
+    APP.processEvents()
+
+    seen = []
+    for width in (300, 500, 800, 1200):
+        resize_and_lay_out(window, width)
+        seen.append(len(elided_now(window)))
+    assert seen == sorted(seen)
+    assert seen[-1] > seen[0]
+
+
+def test_the_strips_height_follows_its_type_size(make_window):
+    window = make_window()
+    go_compact(window)
+    APP.processEvents()
+
+    heights = []
+    for size in w.COMPACT_TEXT_SIZES:
+        window._set_compact_text_size(size)
+        finish_fit(window)
+        APP.processEvents()
+        assert window._scale == w.compact_scale(size), size
+        assert window.height() == w.min_window_height(
+            window._scale, compact=True
+        ), size
+        heights.append(window.height())
+    assert heights == sorted(heights)
+    assert heights[-1] > heights[0]
+
+
+def test_the_size_is_the_only_thing_that_moves_the_strips_height(make_window):
+    """A width change must leave it alone, or the strip would be a window
+    changing shape in two directions every time a song arrived."""
+    window = make_window()
+    go_compact(window)
+    window._set_fit_to_song(False)
+    APP.processEvents()
+    height = window.height()
+    for width in (300, 700, 1100):
+        resize_and_lay_out(window, width)
+        assert window.height() == height, width
+
+
+def test_the_strip_offers_no_vertical_resize(make_window):
+    """Its height has one right answer, so an edge that showed a resize
+    cursor and then refused would be worse than one that never claimed to.
+    A press there moves the window instead."""
+    window = make_window()
+    go_compact(window)
+    APP.processEvents()
+    assert not window._hit_edges(QPoint(window.width() // 2, 1))
+    assert not window._hit_edges(QPoint(window.width() // 2, window.height() - 1))
+    # The sides still resize, and they are what the width is dragged by.
+    assert window._hit_edges(QPoint(1, window.height() // 2)) & Qt.Edge.LeftEdge
+    assert (
+        window._hit_edges(QPoint(window.width() - 1, window.height() // 2))
+        & Qt.Edge.RightEdge
+    )
+
+
+def test_the_full_layout_still_resizes_vertically(make_window):
+    window = make_window()
+    APP.processEvents()
+    assert window._hit_edges(QPoint(window.width() // 2, 1)) & Qt.Edge.TopEdge
+    assert (
+        window._hit_edges(QPoint(window.width() // 2, window.height() - 1))
+        & Qt.Edge.BottomEdge
+    )
+
+
+def test_dragging_a_side_of_the_strip_keeps_its_derived_height(make_window):
+    """The drag path has its own height arithmetic, and it used to compute
+    the floor from the width it was landing on. In a strip the width has
+    nothing to say about it."""
+    window = make_window()
+    go_compact(window)
+    APP.processEvents()
+    height = window.height()
+    window._press_global = QPoint(0, 0)
+    window._press_geometry = window.geometry()
+    window._resize_edges = Qt.Edge.RightEdge
+    window._apply_resize(QPoint(120, 0))
+    APP.processEvents()
+    assert window.height() == height
+    assert window.width() == window._press_geometry.width() + 120
+
+
+def test_the_size_survives_a_restart(make_window):
+    window = make_window()
+    go_compact(window)
+    window._set_compact_text_size(28)
+    window._save_settings()
+    window._settings.sync()
+
+    reopened = make_window()
+    assert reopened._compact_text_size == 28
+    reopened._refresh_menu()
+    assert reopened._compact_size_actions[28].isChecked() is True
+    assert reopened._compact_size_actions[20].isChecked() is False
+
+
+def test_a_stored_size_that_is_not_a_preset_falls_back(make_window):
+    """The same rule the speech rate is held to: a hand-edited or outgrown
+    preference is not honoured, because the menu could not show it and the
+    user would have no way back."""
+    window = make_window()
+    window._settings.setValue("window/compact_text_size", 9)
+    window._settings.sync()
+
+    reopened = make_window()
+    assert reopened._compact_text_size == w.DEFAULT_COMPACT_TEXT_SIZE
+
+
+def test_the_size_menu_appears_only_inside_the_strip(make_window):
+    window = make_window()
+    window._refresh_menu()
+    assert window._menu_actions[m.COMPACT_SIZE].isVisible() is False
+
+    go_compact(window)
+    window._refresh_menu()
+    assert window._menu_actions[m.COMPACT_SIZE].isVisible() is True
+
+
+def test_changing_the_size_refits_the_window_to_the_song(make_window):
+    """The widest line is a different width at a different size, so the
+    fit has to be asked again — and it is the same travel a new song
+    takes."""
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+    small = window.width()
+
+    window._set_compact_text_size(28)
+    finish_fit(window)
+    APP.processEvents()
+    assert window.width() > small
+    assert window.width() == expected_width(window, widest_sung(window, FITTED))
+
+
+def test_changing_the_size_outside_the_strip_moves_nothing(make_window):
+    """Off is off: the full layout's shape is not this setting's business,
+    and the value is still recorded for the next time the strip is worn."""
+    window = make_window()
+    window.resize(460, 260)
+    APP.processEvents()
+    before = (window.size(), window._scale)
+
+    window._set_compact_text_size(28)
+    APP.processEvents()
+    assert (window.size(), window._scale) == before
+    assert window._compact_text_size == 28
+
+
+# -- the docked shape ------------------------------------------------------
+
+
+def dock_the_window(window):
+    """Put the window exactly where docking would, without the travel."""
+    x, y = window._docked_anchor()
+    move_and_notice(window, QPoint(x, y))
+    return x, y
+
+
+def test_the_window_knows_when_it_is_docked(make_window):
+    window = make_window()
+    move_and_notice(window, QPoint(80, 300))
+    assert window._docked is False
+
+    dock_the_window(window)
+    assert window._docked is True
+
+
+def test_dragging_it_away_gives_the_rounded_shape_straight_back(make_window):
+    window = make_window()
+    dock_the_window(window)
+    assert window._docked is True
+
+    move_and_notice(window, window.pos() + QPoint(1, 0))
+    assert window._docked is False
+
+
+def test_a_width_change_under_a_docked_window_keeps_it_docked(make_window):
+    """Docking centres on the screen, so the docked position moves with the
+    width. The window is re-docked rather than centre-anchored, and it has
+    to still recognise itself afterwards."""
+    window = make_window()
+    go_compact(window)
+    dock_the_window(window)
+    assert window._docked is True
+
+    window._resize_width_to(window.width() + 180, animate=False)
+    APP.processEvents()
+    assert window._docked is True
+    assert window.pos().toTuple() == window._docked_anchor()
+
+
+def test_a_resize_alone_can_undock_a_window(make_window):
+    """A window that stays put while its width changes is no longer
+    centred, and says so."""
+    window = make_window()
+    dock_the_window(window)
+    resize_and_lay_out(window, window.width() + 60)
+    assert window._docked is False
+
+
+def test_the_docked_panel_has_square_top_corners(make_window):
+    """The whole visual claim, read off the pixels. The very corner pixel
+    is the panel when docked and the backdrop when not."""
+    window = make_window()
+    resize_and_lay_out(window, 400, 90)
+
+    def corner_pixels(docked):
+        window._docked = docked
+        image = panel_pixels(window, QRect(0, 0, 400, 90), False, 2.0)
+        return (
+            image.pixel(0, 0),
+            image.pixel(image.width() - 1, 0),
+            image.pixel(0, image.height() - 1),
+            image.pixel(image.width() - 1, image.height() - 1),
+        )
+
+    rounded = corner_pixels(False)
+    squared = corner_pixels(True)
+    # Nothing is painted into a rounded corner: all four are the empty fill.
+    assert len(set(rounded)) == 1
+    # Docked, the two at the top are painted and the two underneath are not.
+    assert squared[0] != rounded[0]
+    assert squared[1] != rounded[1]
+    assert squared[2] == rounded[2]
+    assert squared[3] == rounded[3]
+
+
+def test_the_rounded_path_is_what_drawroundedrect_always_drew(make_window):
+    """One builder serves both shapes, so the undocked window must come out
+    byte for byte as it did — otherwise "square top corners when docked"
+    would have quietly restyled every other window in the app."""
+    from PySide6.QtGui import QImage, QPainter
+
+    for ratio in (1.0, 2.0):
+        size, radius = 200, float(w._CORNER_RADIUS)
+        rect = QRectF(0, 0, size, size)
+
+        def render(use_path):
+            image = QImage(int(size * ratio), int(size * ratio),
+                           QImage.Format.Format_ARGB32)
+            image.setDevicePixelRatio(ratio)
+            image.fill(0)
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(Qt.GlobalColor.white)
+            if use_path:
+                painter.drawPath(w._panel_path(rect, radius, False))
+            else:
+                painter.drawRoundedRect(rect, radius, radius)
+            painter.end()
+            return image.constBits().tobytes()
+
+        assert render(True) == render(False), f"the outline moved at {ratio}x"
+
+
+def test_a_docked_band_is_still_drawn_straight_and_is_the_same_pixels(make_window):
+    """The fast path is about the sides, which are straight in both shapes.
+    Asserted for the docked one rather than assumed, because the whole
+    reason the fast path is allowed to exist is that somebody checked."""
+    window = make_window()
+    window._docked = True
+    for top in range(w._CORNER_RADIUS, window.height() - w._CORNER_RADIUS - 8, 7):
+        damaged = QRect(0, top, window.width(), 8)
+        fast = panel_pixels(window, damaged, True, 2.0)
+        slow = panel_pixels(window, damaged, False, 2.0)
+        device = QRect(0, int(top * 2), int(window.width() * 2), 16)
+        assert (
+            fast.copy(device).constBits().tobytes()
+            == slow.copy(device).constBits().tobytes()
+        ), f"the docked band at y={top} differs"
+
+
+def test_the_material_is_told_the_same_two_corners(make_window):
+    """The blur is a native view under the painted scrim. Rounded at the
+    top while the scrim is square would show the desktop through two
+    notches at exactly the corners the shape exists to remove."""
+    assert vibrancy.masked_corners(False) == vibrancy.ALL_CORNERS
+    assert vibrancy.masked_corners(True) == vibrancy.BOTTOM_CORNERS
+    assert vibrancy.BOTTOM_CORNERS & vibrancy.CORNER_TOP_LEFT == 0
+    assert vibrancy.BOTTOM_CORNERS & vibrancy.CORNER_TOP_RIGHT == 0
+    assert vibrancy.BOTTOM_CORNERS & vibrancy.CORNER_BOTTOM_LEFT
+    assert vibrancy.BOTTOM_CORNERS & vibrancy.CORNER_BOTTOM_RIGHT
+
+
+def test_asking_for_the_material_corners_without_one_is_harmless(make_window):
+    """Off cocoa there is no material, and this runs on every move."""
+    window = make_window()
+    assert window._material is None
+    window._apply_material_corners()  # must not raise

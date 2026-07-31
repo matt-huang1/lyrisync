@@ -70,3 +70,31 @@ DARK_APPEARANCE = "NSAppearanceNameDarkAqua"
 def appearance_name(dark: bool) -> str:
     """The NSAppearance the material should adopt for this mode."""
     return DARK_APPEARANCE if dark else LIGHT_APPEARANCE
+
+
+# CACornerMask. The layer belongs to an NSVisualEffectView, which is not
+# flipped, so its origin is the BOTTOM left: MinY is the pair of corners
+# under the window and MaxY the pair against the menu bar. Stated here with
+# the rest of Apple's enum values, and — like every one of them — verified
+# by readback rather than believed.
+CORNER_BOTTOM_LEFT = 1 << 0
+CORNER_BOTTOM_RIGHT = 1 << 1
+CORNER_TOP_LEFT = 1 << 2
+CORNER_TOP_RIGHT = 1 << 3
+ALL_CORNERS = (
+    CORNER_BOTTOM_LEFT | CORNER_BOTTOM_RIGHT | CORNER_TOP_LEFT | CORNER_TOP_RIGHT
+)
+BOTTOM_CORNERS = CORNER_BOTTOM_LEFT | CORNER_BOTTOM_RIGHT
+
+
+def masked_corners(docked: bool) -> int:
+    """Which of the material's corners are rounded.
+
+    The docked window squares off the two against the menu bar so the
+    panel reads as the bar's own band continuing downwards. The material
+    is a separate native view under the painted scrim, and it has to be
+    told the same thing: a blur still rounded at the top under a scrim
+    that is not would show the desktop through two small notches at the
+    very corners the shape exists to remove.
+    """
+    return BOTTOM_CORNERS if docked else ALL_CORNERS

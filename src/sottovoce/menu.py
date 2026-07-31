@@ -16,6 +16,7 @@ SPOKEN = "spoken"
 SPEECH_RATE = "speech_rate"
 ECHO = "echo"
 COMPACT = "compact"
+COMPACT_SIZE = "compact_size"
 FIT_TO_SONG = "fit_to_song"
 ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
@@ -42,6 +43,7 @@ MENU_ORDER = (
     SPEECH_RATE,
     ECHO,
     COMPACT,
+    COMPACT_SIZE,
     FIT_TO_SONG,
     ALBUM_COLOUR,
     ALL_DESKTOPS,
@@ -151,10 +153,14 @@ def visible_entries(
     user's and stays theirs. It is the one entry here whose own default is
     ON, and it can be, because it is reachable only from inside a layout
     that is itself default-off. The plain window is unchanged either way.
+
+    The strip's text size follows it for the same reason and pays the same
+    way: in the full layout the type size IS the width, so there would be
+    nothing for a second control to say.
     """
     shown = set(ALWAYS_VISIBLE)
     if compact:
-        shown.add(FIT_TO_SONG)
+        shown.update((COMPACT_SIZE, FIT_TO_SONG))
     if has_korean_lyrics:
         shown.add(ROMANISATION)
     if speech_available:

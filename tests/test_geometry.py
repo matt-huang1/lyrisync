@@ -10,6 +10,7 @@ from sottovoce.geometry import (
     control_gap,
     docked_position,
     fitted_window_width,
+    is_docked,
     min_window_height,
     resized_position,
     scale_for,
@@ -445,10 +446,14 @@ def test_the_floor_wins_over_the_cap():
     assert fitted_window_width(1000, 1.0, MIN_WIDTH, 100) == MIN_WIDTH
 
 
-def test_the_cap_is_half_the_screen():
-    assert width_cap(1710) == 855
-    assert width_cap(1440) == 720
-    assert width_cap(2560) == 1280
+def test_the_cap_is_the_screen():
+    """It used to be half of it, and that was the only thing standing
+    between the user and a strip the width of their screen while the type
+    size was the width's to decide. The sung line's size is named directly
+    now, so the control for "this is too wide" is the size."""
+    assert width_cap(1710) == 1710
+    assert width_cap(1440) == 1440
+    assert width_cap(2560) == 2560
 
 
 def test_the_cap_grows_with_the_screen():
@@ -456,14 +461,21 @@ def test_the_cap_grows_with_the_screen():
     assert caps == sorted(caps)
 
 
-def test_the_cap_clears_the_measured_corpus_on_the_screen_it_was_set_on():
+def test_the_cap_clears_the_measured_corpus_at_every_shipped_size():
     """776 lines of real lyrics from 14 songs, measured in the app's own
-    type at scale 1.0. The widest needs an 839pt window; the cap on the
-    1710pt screen this was measured on is 855. A smaller screen caps more,
-    which is the cap doing its job rather than failing."""
-    widest_song_needs = 839
-    assert width_cap(1710) >= widest_song_needs
-    assert width_cap(1440) < widest_song_needs
+    type. The widest window any of them needs, per shipped size: 600 at
+    14pt, 717 at 17pt, 848 at 20pt, 1023 at 24pt, 1196 at 28pt. Every one
+    of them fits the 1710pt screen they were measured on, which is the
+    point — elision is what happens when a line will not fit the SCREEN,
+    not a routine cost of choosing larger type.
+
+    The old half-screen cap is what made it routine: at 24pt it would have
+    been 855, and 4 of the 14 songs are past that.
+    """
+    widest_needed = {14: 600, 17: 717, 20: 848, 24: 1023, 28: 1196}
+    for size, needed in widest_needed.items():
+        assert width_cap(1710) >= needed, size
+    assert 855 < widest_needed[24]
 
 
 # -- where the window goes when its width changes under it ----------------
@@ -558,3 +570,81 @@ def test_a_width_change_on_a_second_display_stays_there():
     x, y = resized_position(frame, 700, SECOND_SCREEN, SECOND_AVAILABLE)
     assert x + 700 / 2 == pytest.approx(2000 + 460 / 2, abs=1)
     assert y == 200
+
+
+# -- recognising the docked position --------------------------------------
+
+
+def test_a_window_exactly_where_docking_put_it_is_docked():
+    for width in (260, 460, 839, 1200):
+        x, y = docked_position(width, PLAIN_SCREEN, PLAIN_AVAILABLE)
+        assert is_docked((x, y, width, 79), PLAIN_SCREEN, PLAIN_AVAILABLE)
+
+
+def test_one_pixel_off_is_not_docked():
+    """The whole point of recognising it by position: a window somebody
+    nudged is a floating window again, and it says so immediately rather
+    than at the next thing that remembers to clear a flag."""
+    x, y = docked_position(460, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    frame = (x, y, 460, 79)
+    assert is_docked(frame, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    for moved in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+        assert not is_docked(
+            (moved[0], moved[1], 460, 79), PLAIN_SCREEN, PLAIN_AVAILABLE
+        )
+
+
+def test_the_same_place_at_another_width_is_not_docked():
+    """Docking centres on the screen, so the position that means "docked"
+    moves with the width. A strip that grew for a longer song and stayed
+    put is off centre, and drawing it as docked would be drawing a claim
+    that is no longer true."""
+    x, y = docked_position(460, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    assert not is_docked((x, y, 700, 79), PLAIN_SCREEN, PLAIN_AVAILABLE)
+
+
+def test_docked_is_recognised_under_a_notch_too():
+    x, y = docked_position(460, NOTCHED, NOTCHED_AVAILABLE, NOTCH_INSET)
+    assert is_docked((x, y, 460, 79), NOTCHED, NOTCHED_AVAILABLE, NOTCH_INSET)
+    # And the inset is part of the question: the same point read without it
+    # is only docked because the two answers happen to coincide here.
+    assert y == NOTCHED_AVAILABLE[1]
+
+
+def test_docked_under_a_hidden_menu_bar_clears_the_notch():
+    """The case the safe area exists for: the menu bar is set to hide, so
+    the available area is the whole screen and the notch is still there."""
+    hidden_bar = (0, 0, 1512, 982)
+    x, y = docked_position(460, NOTCHED, hidden_bar, NOTCH_INSET)
+    assert y == NOTCH_INSET
+    assert is_docked((x, y, 460, 79), NOTCHED, hidden_bar, NOTCH_INSET)
+    assert not is_docked((x, 0, 460, 79), NOTCHED, hidden_bar, NOTCH_INSET)
+
+
+def test_the_dock_never_reaches_into_the_menu_bar():
+    """The rule stated as the one thing it must never do. Whatever the
+    screen, the top edge is at or below the first row macOS says is
+    available, which is by definition the first row under the bar."""
+    for screen, available, inset in (
+        (PLAIN_SCREEN, PLAIN_AVAILABLE, 0),
+        (NOTCHED, NOTCHED_AVAILABLE, NOTCH_INSET),
+        (NOTCHED, (0, 0, 1512, 982), NOTCH_INSET),
+        ((0, 0, 2560, 1440), (0, 25, 2560, 1415), 0),
+    ):
+        _, y = docked_position(460, screen, available, inset)
+        assert y >= available[1], (screen, available)
+
+
+def test_a_resize_agrees_with_the_paint_about_being_docked():
+    """The two callers must agree or the window would be drawn as a docked
+    one while being moved as a floating one. Same function, so they cannot:
+    this pins that the resize really does route through it."""
+    x, y = docked_position(460, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    redocked = resized_position((x, y, 460, 79), 700, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    assert redocked == docked_position(700, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    assert is_docked((*redocked, 700, 79), PLAIN_SCREEN, PLAIN_AVAILABLE)
+
+    floating = (x + 40, y, 460, 79)
+    assert not is_docked(floating, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    moved = resized_position(floating, 700, PLAIN_SCREEN, PLAIN_AVAILABLE)
+    assert not is_docked((*moved, 700, 79), PLAIN_SCREEN, PLAIN_AVAILABLE)

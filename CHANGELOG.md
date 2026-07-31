@@ -6,6 +6,47 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Milestone 20 — the strip gets a type size, the dock gets a shape
+
+**Long lines in the compact strip no longer elide for no reason.** The bug
+was real and the window was behaving exactly as designed: the type scale
+followed the window's width, so the room for a line and the line itself
+grew at the same rate and widening the strip showed the same words in
+bigger type. The maths says so outright — the width cancels, and a line
+past 316pt fits at no width at all.
+
+So **the strip names its text size**, from five presets in the menu (14,
+17, 20, 24, 28pt), and the width goes back to deciding how much of a line
+is on screen. On the longest line in a 14-song corpus, at 28pt: a 320pt
+strip shows six words, a 900pt strip shows most of it, and a 1400pt strip
+shows all of it. Its height follows the size, so there is nothing to drag
+vertically and it no longer offers to. The full layout is untouched — there
+the type size *is* the width, which is why this control only appears inside
+the strip.
+
+The width the song fits itself to is now **capped by the screen rather than
+by half of it**. Half was the only brake there could be while the type size
+was the width's to decide; the brake now is the size. Measured over 776
+real lines, the old cap never bound anything at 20pt or below and would
+have started clipping songs routinely at the larger sizes.
+
+**A docked window is shaped like the notch.** Square across the top,
+rounded underneath, flush against the underside of the menu bar, so it
+reads as the bar's own band continuing downwards instead of a floating
+panel with desktop showing through two corners. It works the same on
+notched and unnotched Macs, takes nothing from the menu bar, and is round
+again the moment it is dragged a pixel away — the window works out whether
+it is docked from where it is, so there is no state to get stuck.
+
+**Lyrics lookups ask LRCLIB less.** The three fallback attempts used to go
+out together. Measured across 30 lookups of 15 real tracks: the first
+attempt answered **every single time**, in 61ms by median. So the ones
+below it are now asked only when they are needed — at once if the attempt
+above returns a definitive "no", after a 250ms hedge if it is slow, and
+never if it answers. That is two requests in three no longer made of a free
+service running on donations. When LRCLIB is having a bad day the attempts
+still overlap exactly as they did, a quarter of a second later.
+
 ## Milestone 19 — the same app, a fifteenth of the energy
 
 No feature changed. The app's twelve-hour energy impact sat beside a chat

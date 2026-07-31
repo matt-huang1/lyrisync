@@ -49,6 +49,7 @@ from PySide6.QtGui import (
     QFontMetricsF,
     QIcon,
     QPainter,
+    QPainterPath,
     QPen,
 )
 from PySide6.QtWidgets import (
@@ -96,6 +97,7 @@ from sottovoce.geometry import (
     control_gap,
     docked_position,
     fitted_window_width,
+    is_docked,
     min_window_height,
     resized_position,
     scale_for as _scale_for,
@@ -125,6 +127,7 @@ from sottovoce.menu import (
     ALBUM_COLOUR,
     ALL_DESKTOPS,
     COMPACT,
+    COMPACT_SIZE,
     DOCK_TOP,
     ECHO,
     FIT_TO_SONG,
@@ -180,9 +183,12 @@ from sottovoce.symbols import (
 from sottovoce.transition import LineTransition
 from sottovoce.typography import (
     BOTTOM_MARGIN,
+    COMPACT_TEXT_SIZES,
     CONTEXT,
     CURRENT,
     CURRENT_SPACING,
+    DEFAULT_COMPACT_TEXT_SIZE,
+    compact_scale,
     HEADER,
     LINE_TRAVEL,
     PLAIN,
@@ -198,6 +204,7 @@ from sottovoce.vibrancy import (
     AUTORESIZE_FILL,
     BLENDING_MODE_BEHIND_WINDOW,
     MATERIAL_HUD_WINDOW,
+    masked_corners,
     STATE_ACTIVE,
     WINDOW_BELOW,
     appearance_name,
@@ -248,6 +255,54 @@ _DEFAULT_OPACITY = 1.0
 
 def _qcolor(colour: appearance.RGBA) -> QColor:
     return QColor(*colour)
+
+
+def _panel_path(rect: QRectF, radius: float, square_top: bool) -> QPainterPath:
+    """The panel's outline: rounded on all four corners, or square across
+    the top and rounded underneath.
+
+    The second shape is the docked one. A window flush under the menu bar
+    with two rounded corners against it reads as a panel that happens to be
+    up there, with a sliver of desktop showing through each corner; with
+    the top squared off it reads as the menu bar's own band continuing
+    downwards, which on a notched Mac is the notch and on an unnotched one
+    is the bar. The difference is two corners and it is the whole effect.
+
+    One builder for both, rather than the square-top case being a special
+    route: the rounded case here is byte for byte what
+    ``drawRoundedRect(rect, radius, radius)`` produces, at 1x and at 2x,
+    and a test pins that — so there is no second answer to what an
+    undocked panel looks like, only one function asked for a different
+    corner.
+    """
+    top = 0.0 if square_top else radius
+    path = QPainterPath()
+    path.moveTo(rect.left(), rect.top() + top)
+    if top:
+        path.arcTo(rect.left(), rect.top(), 2 * top, 2 * top, 180, -90)
+    path.lineTo(rect.right() - top, rect.top())
+    if top:
+        path.arcTo(rect.right() - 2 * top, rect.top(), 2 * top, 2 * top, 90, -90)
+    path.lineTo(rect.right(), rect.bottom() - radius)
+    path.arcTo(
+        rect.right() - 2 * radius,
+        rect.bottom() - 2 * radius,
+        2 * radius,
+        2 * radius,
+        0,
+        -90,
+    )
+    path.lineTo(rect.left() + radius, rect.bottom())
+    path.arcTo(
+        rect.left(),
+        rect.bottom() - 2 * radius,
+        2 * radius,
+        2 * radius,
+        270,
+        -90,
+    )
+    path.closeSubpath()
+    return path
 
 
 # Anticipatory line fade: the old line fades out over [ts-200, ts-100],
@@ -826,17 +881,22 @@ class LyricsWindow(QWidget):
         # The compact layout. `_compact` is what the user asked for and
         # `_compact_applied` is what the window is currently wearing: a
         # sync pass borrows the full layout for as long as it runs, so the
-        # two disagree for exactly that long. Both heights are kept, so
-        # switching layouts gives back the shape that layout was last left
-        # at rather than a shape derived from the other one.
+        # two disagree for exactly that long. The full layout's height is
+        # kept, so switching back gives it the shape it was last left at.
+        # The strip's is not kept, because it is not a free number: it
+        # follows the type size below, and there is one right answer.
         self._compact = False  # restored from settings below
         self._compact_applied = False
-        self._compact_height = 0  # 0 means "never been in this layout"
+        self._compact_text_size = DEFAULT_COMPACT_TEXT_SIZE
+        # Whether the window is exactly where docking put it, which is the
+        # only thing that decides its shape. Derived from the position on
+        # every move, never set by the dock command: see _update_docked.
+        self._docked = False
         self._full_height = 0
         # Sizing the strip to the song. `_compact_width` is the width the
         # USER chose for it, kept even while the song is choosing the
-        # window's actual width, because it is what the type scale stays
-        # pinned to. `_full_width` keeps the other layout out of it.
+        # window's actual width, so turning the fit off has something to
+        # give back. `_full_width` keeps the other layout out of it.
         self._fit_to_song = True  # restored from settings below
         self._compact_width = 0
         self._full_width = 0
@@ -2244,19 +2304,22 @@ class LyricsWindow(QWidget):
             )
             return
 
+        square_top = self._docked
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(fill)
-        painter.drawRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
+        painter.drawPath(_panel_path(rect, _CORNER_RADIUS, square_top))
 
         inset = width / 2
         pen = QPen(edge)
         pen.setWidthF(width)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(
-            rect.adjusted(inset, inset, -inset, -inset),
-            _CORNER_RADIUS - inset,
-            _CORNER_RADIUS - inset,
+        painter.drawPath(
+            _panel_path(
+                rect.adjusted(inset, inset, -inset, -inset),
+                _CORNER_RADIUS - inset,
+                square_top,
+            )
         )
 
     def _straight_band(self, damaged) -> bool:
@@ -2279,6 +2342,56 @@ class LyricsWindow(QWidget):
         # window keeps the shadow of the shape it used to be.
         self._invalidate_shadow()
 
+    def moveEvent(self, event) -> None:
+        """Every move: a drag, a clamp, a nudge, the travel to a remembered
+        position, the flight, docking itself.
+
+        One funnel rather than a call beside each of those, because the
+        question is about where the window ended up and not about what put
+        it there — and because the answer has to be right after a move
+        somebody added later without knowing this existed.
+        """
+        super().moveEvent(event)
+        self._update_docked()
+
+    def _docked_anchor(self) -> tuple:
+        """Where docking would put this window at its current width. The
+        three things only a running window can answer, gathered in one
+        place so the pure rule has nothing to look up for itself."""
+        screen, available = self._screen_rects()
+        return docked_position(self.width(), screen, available, self._top_inset())
+
+    def _update_docked(self) -> None:
+        """Notice the window arriving at, or leaving, the docked position.
+
+        Recomputed rather than cached behind a flag, and asked in full on
+        every move: MEASURED at 8.9us on this machine, of which 6.8us is
+        the screen's safe area and 1.4us the two Qt rects, so a drag
+        delivering 60 moves a second spends 0.05% of one core on it. A
+        cache would
+        have to be invalidated by a screen change, a Dock that moved, a menu
+        bar set to hide itself and a resize, and the first one that forgot
+        would leave the window drawn as docked from the middle of the
+        screen. See geometry.is_docked for why there is no flag either.
+        """
+        screen, available = self._screen_rects()
+        docked = is_docked(
+            (self.x(), self.y(), self.width(), self.height()),
+            screen,
+            available,
+            self._top_inset(),
+        )
+        if docked is self._docked:
+            return
+        self._docked = docked
+        logger.debug("dock shape: %s", "square top" if docked else "rounded")
+        # The material is a native view with its own corners, so the two
+        # have to be told together or the blur keeps the shape the paint
+        # has just left.
+        self._apply_material_corners()
+        self._invalidate_shadow()
+        self.update()
+
     def _relayout(self) -> None:
         """Everything that follows the window's width.
 
@@ -2292,31 +2405,51 @@ class LyricsWindow(QWidget):
         # elision measures with and the gutters it measures against.
         self._reelide()
         self._place_buttons()
+        # A width change moves where docking would put the window, so a
+        # window that WAS docked may not be any more and one that was not
+        # may now be. Here rather than in resizeEvent, so it rides with
+        # everything else that follows the window's shape.
+        self._update_docked()
 
     def _type_scale(self) -> float:
         """The scale the type is set at.
 
-        Normally the window's own width, which is what makes dragging an
-        edge a size control: everything on the window is proportional to
-        it. While the strip is sizing itself to a song that has to stop,
-        and the reason is not taste.
+        In the FULL layout, the window's own width, which is what makes
+        dragging an edge a size control there: everything on the window is
+        proportional to it.
 
-        MEASURED. With the type following the width, the room for a line
-        and the line itself grow at exactly the same rate, so the ratio
-        between them is a constant: (460 - 144) / T. A line wider than
-        316pt at scale 1.0 therefore fits at NO width, and 13 of 14 real
-        songs are past that. "Make the window wide enough" has no answer
-        unless something is held still, and what is held still is the type.
+        In the COMPACT layout, the size the user picked, and the width has
+        nothing to do with it. MEASURED, and the measurement is why: with
+        the type following the width, the room for a line and the line
+        itself grow at exactly the same rate, so the ratio between them is
+        a constant — (460 - 144) / T — and a line wider than 316pt at scale
+        1.0 fits at NO width. 13 of 14 real songs are past that. A strip
+        whose type followed its width could therefore be widened all
+        afternoon without one more character of the line appearing, which
+        is not a window that is hard to use so much as a control that does
+        nothing.
 
-        So the width the user chose for the strip stops being a width and
-        becomes a type size: it still sets the scale, the song sets the
-        width, and dragging an edge hands both back at once. It is also
-        what keeps the STRIP'S HEIGHT still while its width moves, since
-        the height floor comes off the same scale.
+        Naming the size directly is what gives the width a job. The type
+        stands still, so a wider strip is more of the line and a narrower
+        one is less; the song's fit measures against a size that is not
+        about to move; and the strip's HEIGHT is still while its width
+        moves, since the floor comes off the same scale.
         """
-        if self._fitting and self._compact_width:
-            return _scale_for(self._compact_width)
-        return _scale_for(self.width())
+        return self._type_scale_at(self.width(), self._compact_applied)
+
+    def _type_scale_at(self, width: int, compact: bool) -> float:
+        """The scale a layout this wide would set its type at.
+
+        Asked about a shape the window has not taken yet as well as about
+        the one it is in, which is why it takes both rather than reading
+        either. Everything that changes the window's shape has to know the
+        scale it is about to land on BEFORE it lands: the height floor
+        comes off the scale, Qt will not let a resize through its own
+        minimum, and a floor computed from the scale the window is leaving
+        is how a strip gets clamped up to the five-row height it is trying
+        to stop being.
+        """
+        return compact_scale(self._compact_text_size) if compact else _scale_for(width)
 
     def _restyle(self) -> None:
         """The one place the window's stylesheet is written.
@@ -2558,11 +2691,15 @@ class LyricsWindow(QWidget):
         borrowing the full layout — so there is no path that can leave the
         rows of one layout inside the margins of the other.
 
-        The height is swapped rather than recomputed. Each layout keeps the
-        height it was last left at, so going compact and coming back gives
-        the window its old shape rather than a shape derived from the
-        strip; and a sync pass, which borrows the full layout without being
-        asked to, hands the strip back at the height it took it from.
+        The FULL layout's height is given back rather than recomputed: it
+        keeps the height it was last left at, so going compact and coming
+        back gives the window its old shape, and a sync pass — which
+        borrows the full layout without being asked to — hands the strip
+        back the way it found it.
+
+        The STRIP'S height is computed, because there is nothing to
+        remember. It is one row of type, and which row of type is the one
+        setting this layout has.
         """
         wanted = self._compact_active
         changed = wanted is not self._compact_applied
@@ -2576,20 +2713,35 @@ class LyricsWindow(QWidget):
         # not fit is elided in _set_line_text instead.
         for row in (self._current, self._pron):
             row.setWordWrap(not wanted)
-        # Before the resize, not after: the floor is what decides how short
-        # the window is allowed to become, and Qt would clamp a strip back
-        # up to the five-row floor if it were still in force.
-        self._apply_layout_margins()
         if changed:
             self._stop_fit()
-            self.resize(self._width_for(wanted), self._height_for(wanted))
+            width = self._width_for(wanted)
+            # The floor BEFORE the resize, at the scale the new layout will
+            # be at rather than the one being left: Qt will not let a
+            # resize through its own minimum, so a strip asked to be 79
+            # tall while the five-row floor of 183 was still in force would
+            # simply stay 183 and the layout would look like it had failed.
+            self.setMinimumHeight(
+                min_window_height(
+                    self._type_scale_at(width, wanted),
+                    sync_bar=self._syncing,
+                    compact=wanted,
+                )
+            )
+            self.resize(width, self._height_for(wanted))
             if wanted and not self._compact_width:
                 # The first strip. The width it opened at is the user's
-                # own, and is what the type scale stays pinned to while the
-                # song chooses the rest, so it has to be written down
-                # BEFORE anything fits.
+                # own, and is what turning the fit off gives back, so it
+                # has to be written down BEFORE anything fits.
                 self._compact_width = self.width()
-            self._apply_scale()
+        # After the resize: in the full layout the scale is the width's,
+        # and a hidden widget defers its resize event until it is shown, so
+        # nothing else would recompute it. The margins follow unconditionally
+        # because which layout is in force has changed even when the scale
+        # has not.
+        self._apply_scale()
+        self._apply_layout_margins()
+        if changed:
             # Instant: the layout has just changed shape anyway, and a
             # strip that arrived and then grew would read as two events.
             self._fit_width(animate=False)
@@ -2601,29 +2753,55 @@ class LyricsWindow(QWidget):
     def _remember_size(self, compact: bool) -> None:
         """Write down the shape this layout is being left at.
 
-        The WIDTH is not recorded while the song is choosing it. That slot
-        holds the width the user picked for the strip, it is what the type
-        scale is pinned to, and overwriting it with a fitted width would
-        let the scale drift a song at a time towards whatever the longest
-        line happened to be.
+        The strip's HEIGHT is not written down at all: it follows the type
+        size, so there is one right answer for it and remembering another
+        would only be a way to disagree with the setting.
+
+        Its WIDTH is not recorded while the song is choosing it. That slot
+        holds the width the user picked for the strip, which is what
+        turning the fit off gives back, and overwriting it with a fitted
+        one would let it drift a song at a time towards whatever the
+        longest line happened to be.
         """
         if compact:
-            self._compact_height = self.height()
             if not self._fitting:
                 self._compact_width = self.width()
         else:
             self._full_width = self.width()
             self._full_height = self.height()
 
+    def _strip_height(self) -> int:
+        """The height of a strip at the type size in force. Not a floor
+        that something taller may sit above: a strip is one row of type,
+        and how tall that row is, is the whole of the question.
+
+        From `_type_scale`, not from `_scale`: the second is what has been
+        applied and lags a layout change by exactly the moment this is
+        asked in.
+        """
+        return min_window_height(
+            self._type_scale(), sync_bar=self._syncing, compact=True
+        )
+
     def _height_for(self, compact: bool) -> int:
-        """The height to give this layout back: what it was last left at,
-        never below its own floor. A layout that has never been worn opens
-        at its floor, which for compact is the strip itself."""
-        floor = min_window_height(self._scale, compact=compact)
-        remembered = self._compact_height if compact else self._full_height
-        if not remembered:
-            return floor if compact else max(_DEFAULT_HEIGHT, floor)
-        return max(floor, remembered)
+        """The height to give this layout back.
+
+        The strip's is derived. The full layout's is what it was last left
+        at, never below its own floor; a full layout that has never been
+        worn opens at the height a first run opens at.
+
+        The floor is taken at the scale the layout is about to be at, which
+        for the full layout is the width it is about to take — never at the
+        scale the window is leaving.
+        """
+        if compact:
+            return self._strip_height()
+        floor = min_window_height(
+            self._type_scale_at(self._width_for(False), False), compact=False
+        )
+        if not self._full_height:
+            return max(_DEFAULT_HEIGHT, floor)
+        return max(floor, self._full_height)
 
     def _width_for(self, compact: bool) -> int:
         """The width to give this layout back.
@@ -2635,6 +2813,52 @@ class LyricsWindow(QWidget):
         """
         remembered = self._compact_width if compact else self._full_width
         return max(_MIN_WIDTH, remembered or self.width())
+
+    def _set_compact_text_size(self, size_px: int) -> None:
+        """Set how big the sung line is in the strip.
+
+        The one control the strip's shape follows from. The type stops
+        following the width here, so this is what says how big the text is;
+        the width then says how much of a line is on screen, and the height
+        is neither's to choose.
+
+        Nothing happens outside the compact layout, and that is the layers
+        rule rather than an optimisation: the full layout's type size is
+        its width, and a setting that quietly re-shaped it would be this
+        layer leaking into the plain window.
+        """
+        if size_px == self._compact_text_size:
+            return
+        self._compact_text_size = size_px
+        self._settings.setValue("window/compact_text_size", size_px)
+        if self._compact_applied:
+            self._apply_compact_type()
+        self._refresh_menu()
+        logger.info("compact text size %dpt", size_px)
+
+    def _apply_compact_type(self, animate: bool = True) -> None:
+        """Everything that follows the strip's own type size.
+
+        In this order, and the order is the whole of it: the scale first,
+        because the gutters the elision measures against and the height the
+        window is about to take both come off it; then the shape, which is
+        the song's width at the new size and the height that size asks for;
+        then the lines, laid out again for both.
+
+        Not resizeEvent's job, because the resize may be a no-op — the same
+        width at a larger size is a strip that has to re-elide and has not
+        changed shape.
+
+        ONE resize, whether or not the song has a width to ask for. The
+        height follows the size in every case, including the ones the fit
+        declines: no lyrics yet, the window away at the menu bar, or the
+        feature simply off. A fit that may or may not have moved the window
+        plus a correction afterwards would be two travels for one change.
+        """
+        self._apply_scale()
+        target = self._fitted_width()
+        self._resize_width_to(self.width() if target is None else target, animate)
+        self._relayout()
 
     # -- sizing the strip to the song --------------------------------------
 
@@ -2695,42 +2919,65 @@ class LyricsWindow(QWidget):
             )
         return widest
 
-    def _fit_width(self, animate: bool = True) -> None:
-        """Size the strip to the song, if that is this window's business.
+    def _fitted_width(self) -> Optional[int]:
+        """The width this song asks for, or None when the width is not the
+        song's to choose right now.
 
-        Called when a song's lyrics arrive and at the few other moments
-        that change what would be measured — never on a line change.
+        Separated from acting on it because two callers want the answer and
+        only one of them wants "then leave the window alone". A type-size
+        change has to resize the window whether or not there is a song to
+        measure, since the HEIGHT follows the size either way; asking this
+        first is what lets it use one resize for both cases instead of a
+        fit that may or may not have happened and a correction after it.
         """
         if not self._fitting:
-            return
+            return None
         if not self._lyrics_visible or self._flight_home is not None:
             # Away at the menu bar, or on the way there. Nobody can see the
             # width, and mid-flight the journey is holding the window's real
             # geometry and would hand the old one back on landing. An album
             # played hidden costs nothing, and the show puts the width
             # right before it takes off.
-            return
+            return None
         widest = self._widest_line()
         if widest <= 0:
-            return  # nothing to fit to: the width stays where it was
-        screen, _ = self._screen_rects()
+            return None  # nothing to fit to: the width stays where it was
+        _, available = self._screen_rects()
         target = fitted_window_width(
-            widest, self._scale, _MIN_WIDTH, width_cap(screen[2])
+            widest, self._scale, _MIN_WIDTH, width_cap(available[2])
         )
         logger.debug(
-            "fit: widest line %.0fpt at scale %.2f, %d -> %d wide",
+            "fit: widest line %.0fpt at %dpt type, %d -> %d wide",
             widest,
-            self._scale,
+            self._compact_text_size,
             self.width(),
             target,
         )
-        self._resize_width_to(target, animate)
+        return target
+
+    def _fit_width(self, animate: bool = True) -> None:
+        """Size the strip to the song, if that is this window's business.
+
+        Called when a song's lyrics arrive and at the few other moments
+        that change what would be measured — never on a line change.
+        """
+        target = self._fitted_width()
+        if target is not None:
+            self._resize_width_to(target, animate)
 
     def _resize_width_to(self, target: int, animate: bool = True) -> None:
         """Take the window to this width, keeping it where it looks like it
         already is. The one path there, so the menu switching the feature
-        off travels the same way a new song does."""
-        if target == self.width():
+        off travels the same way a new song does.
+
+        The HEIGHT travels with it in the compact layout, because a strip's
+        height is its type size's and a type size change is one of the
+        things that comes through here. One rect, so the window arrives at
+        its new shape once rather than in two steps that would each be a
+        movement to watch.
+        """
+        height = self._strip_height() if self._compact_applied else self.height()
+        if target == self.width() and height == self.height():
             return
         screen, available = self._screen_rects()
         x, y = resized_position(
@@ -2740,7 +2987,7 @@ class LyricsWindow(QWidget):
             available,
             self._top_inset(),
         )
-        self._travel_to(QRect(x, y, target, self.height()), animate)
+        self._travel_to(QRect(x, y, target, height), animate)
 
     def _travel_to(self, rect: QRect, animate: bool = True) -> None:
         """Take the window to a new shape, gently.
@@ -2807,10 +3054,6 @@ class LyricsWindow(QWidget):
             return
         self._fit_to_song = enabled
         self._settings.setValue("window/fit_to_song", enabled)
-        # Before the resize, not after: with it on the type scale has to be
-        # pinned before anything measures against it, and with it off the
-        # travel's own landing puts the scale back on the width.
-        self._apply_scale()
         if enabled:
             self._fit_width()
         else:
@@ -2823,9 +3066,9 @@ class LyricsWindow(QWidget):
         """A drag on an edge is the user taking the width back.
 
         Turned off at the START of the resize rather than at the end, so
-        the drag behaves exactly as it does with the feature off: the type
-        scale follows the edge live instead of being pinned for the length
-        of the gesture and jumping when it is let go.
+        the drag behaves exactly as it does with the feature off. It has to
+        be the start for a second reason now: the song would otherwise
+        re-fit the window out from under a gesture still in progress.
         """
         if not self._fitting:
             return
@@ -3035,11 +3278,22 @@ class LyricsWindow(QWidget):
     # -- interaction: drag, resize, scroll-opacity, menu -------------------
 
     def _hit_edges(self, pos: QPoint) -> Qt.Edges:
+        """Which edges a press at this point would resize.
+
+        The compact layout offers no vertical ones, and that is the honest
+        version of a strip whose height follows its type size: there is
+        nothing a top or bottom drag could do, and an edge that showed a
+        resize cursor and then refused to resize would be worse than one
+        that never claimed to. What those edges do instead is what the
+        rest of the window does, which is move it.
+        """
         edges = Qt.Edges()
         if pos.x() <= _RESIZE_MARGIN:
             edges |= Qt.Edge.LeftEdge
         if pos.x() >= self.width() - _RESIZE_MARGIN:
             edges |= Qt.Edge.RightEdge
+        if self._compact_applied:
+            return edges
         if pos.y() <= _RESIZE_MARGIN:
             edges |= Qt.Edge.TopEdge
         if pos.y() >= self.height() - _RESIZE_MARGIN:
@@ -3089,14 +3343,20 @@ class LyricsWindow(QWidget):
 
         maximum = self._available_geometry().size()
         width = max(_MIN_SIZE.width(), min(maximum.width(), rect.width()))
-        # Height floor depends on the width the resize will land on (fonts
-        # scale with width), so compute it from the clamped width.
-        floor = min_window_height(
-            _scale_for(width),
-            sync_bar=self._syncing,
-            compact=self._compact_applied,
-        )
-        height = max(floor, min(maximum.height(), rect.height()))
+        if self._compact_applied:
+            # The strip's height is its type size's, whatever the width
+            # does. This is also the drag that used to do nothing visible:
+            # with the type following the width, a wider strip had bigger
+            # text and showed the same words. It shows more of them now.
+            height = self._strip_height()
+        else:
+            # Height floor depends on the width the resize will land on
+            # (fonts scale with width there), so it is computed from the
+            # clamped width rather than from where the window is now.
+            floor = min_window_height(
+                _scale_for(width), sync_bar=self._syncing, compact=False
+            )
+            height = max(floor, min(maximum.height(), rect.height()))
         # Re-anchor so the edge being dragged is the one that gives.
         if self._resize_edges & Qt.Edge.LeftEdge:
             rect.setLeft(rect.right() - width + 1)
@@ -3680,6 +3940,23 @@ class LyricsWindow(QWidget):
         compact.triggered.connect(self._set_compact)
         actions[COMPACT] = compact
 
+        # Shown only inside the compact layout, like the entry below it and
+        # for the same reason: in the full layout the type size IS the
+        # width, so there would be nothing for this to say.
+        size_menu = self._menu.addMenu("Compact text size")
+        size_group = QActionGroup(size_menu)
+        size_group.setExclusive(True)
+        self._compact_size_actions = {}
+        for size_px in COMPACT_TEXT_SIZES:
+            preset = size_menu.addAction(f"{size_px} pt")
+            preset.setCheckable(True)
+            size_group.addAction(preset)
+            preset.triggered.connect(
+                lambda checked=False, size=size_px: self._set_compact_text_size(size)
+            )
+            self._compact_size_actions[size_px] = preset
+        actions[COMPACT_SIZE] = size_menu.menuAction()
+
         # Shown only inside the compact layout, which is the only place it
         # means anything, and the one entry here whose own default is on.
         fit_to_song = self._menu.addAction("Fit the width to the song")
@@ -3857,6 +4134,8 @@ class LyricsWindow(QWidget):
         login_action.setText(login_item.label_for(self._login_status))
         for wpm, action in self._rate_actions.items():
             action.setChecked(wpm == self._speech_rate)
+        for size_px, action in self._compact_size_actions.items():
+            action.setChecked(size_px == self._compact_text_size)
         self._refresh_tray_icon()
 
     def _build_tray(self) -> None:
@@ -4437,6 +4716,13 @@ class LyricsWindow(QWidget):
             self._apply_vibrancy()
             self._apply_shadow()
             self._apply_all_desktops(self._all_desktops)
+        # A hidden widget defers its move and resize events until it is
+        # shown, and plenty happens to a hidden window: the flight puts the
+        # position back before hiding it, a remembered position moves it,
+        # and the saved geometry is restored before anything is on screen.
+        # Without this the first frame would be drawn in the shape the
+        # window had before all of that.
+        self._update_docked()
 
     def _palette_now(self) -> appearance.Palette:
         """The colours to paint with: this appearance, as the accessibility
@@ -4788,9 +5074,12 @@ class LyricsWindow(QWidget):
             if native is not None:
                 effect.setAppearance_(native)
             # The material owns its own corners at the same radius the
-            # scrim is painted with, so the two coincide exactly.
+            # scrim is painted with, so the two coincide exactly — and on
+            # the same two or four of them, so a docked window's blur is
+            # squared off where its paint is.
             effect.setWantsLayer_(True)
             effect.layer().setCornerRadius_(float(_CORNER_RADIUS))
+            effect.layer().setMaskedCorners_(masked_corners(self._docked))
             effect.layer().setMasksToBounds_(True)
             container.addSubview_positioned_relativeTo_(effect, WINDOW_BELOW, nsview)
         except Exception:
@@ -4813,6 +5102,31 @@ class LyricsWindow(QWidget):
         # different background, so any tint has to be re-derived for it.
         self._resnap_tint()
         return True
+
+    def _apply_material_corners(self) -> None:
+        """Tell the material which of its corners are rounded.
+
+        Separate from installing it because the shape changes far more
+        often than the material does: every time the window arrives at or
+        leaves the docked position. Verified by readback, like every other
+        native state this window sets.
+        """
+        if self._material is None:
+            return
+        wanted = masked_corners(self._docked)
+        try:
+            layer = self._material.layer()
+            if layer is None:
+                return
+            layer.setMaskedCorners_(wanted)
+            landed = int(layer.maskedCorners())
+        except Exception:
+            logger.debug("could not set the material's corners", exc_info=True)
+            return
+        if landed != wanted:
+            logger.warning(
+                "material corners did not land: asked 0x%x, got 0x%x", wanted, landed
+            )
 
     def _apply_all_desktops(self, enabled: bool) -> None:
         """All-desktops toggle: native window flags only —
@@ -4886,9 +5200,17 @@ class LyricsWindow(QWidget):
         # before anything else had a chance to say so.
         self._compact = self._settings.value("window/compact", False, type=bool)
         self._compact_applied = self._compact
-        self._compact_height = self._settings.value(
-            "window/compact_height", 0, type=int
+        # Read before the size for the same reason as the layout: in the
+        # strip this IS the type scale, so a saved size restored ahead of
+        # it would be measured against the wrong one. A value that is not
+        # one of the presets is a hand-edited or an outgrown preference,
+        # and it falls back rather than being honoured — the same rule the
+        # speech rate is held to.
+        self._compact_text_size = self._settings.value(
+            "window/compact_text_size", DEFAULT_COMPACT_TEXT_SIZE, type=int
         )
+        if self._compact_text_size not in COMPACT_TEXT_SIZES:
+            self._compact_text_size = DEFAULT_COMPACT_TEXT_SIZE
         self._full_height = self._settings.value("window/full_height", 0, type=int)
         self._compact_width = self._settings.value("window/compact_width", 0, type=int)
         self._full_width = self._settings.value("window/full_width", 0, type=int)
@@ -4999,6 +5321,7 @@ class LyricsWindow(QWidget):
         self._settings.setValue("window/size", self.size())
         self._settings.setValue("window/opacity", self._opacity)
         self._settings.setValue("window/compact", self._compact)
+        self._settings.setValue("window/compact_text_size", self._compact_text_size)
         self._settings.setValue("window/fit_to_song", self._fit_to_song)
         # The shape the OTHER layout was last left at. The live one is in
         # window/size already; recording it twice is how the two would come
@@ -5006,7 +5329,11 @@ class LyricsWindow(QWidget):
         # _remember_size is what declines to overwrite a width the song is
         # currently choosing.
         self._remember_size(self._compact_applied)
-        self._settings.setValue("window/compact_height", self._compact_height)
+        # The strip's height is derived from its type size now, so the key
+        # that used to hold it is removed rather than left behind: a stored
+        # number nothing reads is a second answer waiting for somebody to
+        # believe it.
+        self._settings.remove("window/compact_height")
         self._settings.setValue("window/full_height", self._full_height)
         self._settings.setValue("window/compact_width", self._compact_width)
         self._settings.setValue("window/full_width", self._full_width)

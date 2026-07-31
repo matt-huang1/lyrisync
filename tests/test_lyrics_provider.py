@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 
 import pytest
 
@@ -503,16 +504,17 @@ def test_parse_lrc_garbage_and_empty():
 # -- the chain runs its attempts at once ----------------------------------
 
 
-def test_every_attempt_goes_out_together(provider, monkeypatch):
-    """The chain used to cost the SUM of its attempts. Measured against
-    LRCLIB, the three-attempt case ran 3.3-10.4s while no single attempt
-    took more than 4.9s — the attempts never depended on each other, only
-    the choice between their answers did."""
+def test_a_404_hands_the_floor_to_the_next_attempt_at_once(provider, monkeypatch):
+    """The chain still falls back, and it does not wait out the hedge to do
+    it: a definitive "not here" leaves nothing to overlap with."""
     fake = use_fetcher(monkeypatch, ("api/search", []))
+    monkeypatch.setattr(lp, "_HEDGE_SECONDS", 30.0)  # never reached
+    started = time.monotonic()
     provider.get_lyrics(snapshot())
 
     assert sorted(fake.calls) == sorted(lp.attempt_urls(snapshot()))
     assert len(fake.calls) == 3
+    assert time.monotonic() - started < 1.0
 
 
 def test_a_song_with_no_album_asks_two_questions_not_three(provider):
@@ -529,7 +531,12 @@ def test_the_most_precise_answer_wins_whatever_order_they_land_in(
     provider, monkeypatch
 ):
     """Priority order, not completion order. Search is the loose match and
-    may well answer first; it must still lose to the exact one."""
+    may well answer first; it must still lose to the exact one.
+
+    The hedge is shortened so the fan-out definitely happens: with the
+    exact match slow, this is the case the concurrency exists for, and it
+    is the only one in which there is an order to get wrong."""
+    monkeypatch.setattr(lp, "_HEDGE_SECONDS", 0.01)
     slow_but_exact = threading.Event()
 
     def fetcher(url):
@@ -552,9 +559,10 @@ def test_a_failure_that_outranks_an_answer_is_still_a_retry_state(
     provider, monkeypatch
 ):
     """Sequentially, an error on the exact match ended the chain and search
-    was never asked. Concurrently it IS asked, and its answer must still be
-    refused: caching a loose match because the precise one happened to
-    fail would be a wrong answer written down permanently."""
+    was never asked. Once the hedge fires it IS asked, and its answer must
+    still be refused: caching a loose match because the precise one
+    happened to fail would be a wrong answer written down permanently."""
+    monkeypatch.setattr(lp, "_HEDGE_SECONDS", 0.01)
     use_fetcher(
         monkeypatch,
         ("album_name", lp.LyricsError("LRCLIB returned HTTP 500")),
@@ -570,7 +578,7 @@ def test_a_failure_below_the_winner_is_never_looked_at(provider, monkeypatch):
     """The mirror of the rule above: the exact match answered, so what
     happened to the attempts under it is not the chain's business — it
     would not even have asked them before."""
-    use_fetcher(
+    fake = use_fetcher(
         monkeypatch,
         ("album_name", SYNCED_RESPONSE),
         ("api/get", lp.LyricsError("timed out")),
@@ -578,6 +586,8 @@ def test_a_failure_below_the_winner_is_never_looked_at(provider, monkeypatch):
     )
 
     assert provider.get_lyrics(snapshot()).kind == "synced"
+    # And they are not asked either, which is the whole of the hedge.
+    assert fake.count == 1
 
 
 def test_an_attempt_that_never_answers_is_not_a_licence_to_use_a_worse_one(
@@ -601,3 +611,103 @@ def test_an_attempt_that_never_answers_is_not_a_licence_to_use_a_worse_one(
             provider.get_lyrics(snapshot())
     finally:
         never.set()
+
+
+# -- the hedge: the ones below are asked only when they are needed ---------
+
+
+def test_a_first_attempt_that_answers_is_the_only_question_asked(
+    provider, monkeypatch
+):
+    """MEASURED, and it is the whole reason this exists: over 30 lookups of
+    15 real tracks the album match answered 30 times, in 61ms by median.
+    Two of every three requests were being made so that an answer nobody
+    would read could arrive alongside the one they would."""
+    fake = use_fetcher(
+        monkeypatch,
+        ("album_name", SYNCED_RESPONSE),
+        ("api/search", [search_record(syncedLyrics=SYNCED_LRC)]),
+    )
+
+    assert provider.get_lyrics(snapshot()).kind == "synced"
+    assert fake.count == 1
+    assert fake.asked_once("album_name")
+    assert fake.asked("api/search") == []
+
+
+def test_a_slow_first_attempt_lets_the_rest_go_out_beside_it(
+    provider, monkeypatch
+):
+    """The case the concurrency was for. Past the hedge this is the chain
+    it always was, one hedge later — so the attempts overlap rather than
+    queueing behind a service having a bad minute."""
+    monkeypatch.setattr(lp, "_HEDGE_SECONDS", 0.05)
+    holding = threading.Event()
+    asked_while_holding = threading.Event()
+
+    def fetcher(url):
+        if "album_name" in url:
+            holding.wait(3.0)
+            return SYNCED_RESPONSE
+        asked_while_holding.set()
+        return None
+
+    monkeypatch.setattr(lp, "_fetch_json", fetcher)
+    try:
+        # The others go out while the first is still out, not after it.
+        threading.Timer(0.5, holding.set).start()
+        lyrics = provider.get_lyrics(snapshot())
+    finally:
+        holding.set()
+
+    assert lyrics.kind == "synced"  # the precise answer still wins
+    assert asked_while_holding.is_set()
+
+
+def test_the_hedge_is_not_waited_out_when_the_answer_is_already_there(
+    provider, monkeypatch
+):
+    """A fast first attempt must not cost the hedge. The delay is a
+    deadline for asking the others, never a pause before reading the one
+    that answered."""
+    monkeypatch.setattr(lp, "_HEDGE_SECONDS", 5.0)
+    use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
+
+    started = time.monotonic()
+    assert provider.get_lyrics(snapshot()).kind == "synced"
+    assert time.monotonic() - started < 1.0
+
+
+def test_an_error_on_the_first_attempt_asks_nothing_else(provider, monkeypatch):
+    """The chain raises on it, so the attempts below were never going to be
+    read. Asking them anyway would be spending a free service's time on
+    answers with nowhere to go."""
+    fake = use_fetcher(
+        monkeypatch, ("album_name", lp.LyricsError("LRCLIB returned HTTP 503"))
+    )
+
+    with pytest.raises(lp.LyricsError):
+        provider.get_lyrics(snapshot())
+    assert fake.count == 1
+
+
+def test_no_question_is_ever_asked_twice(provider, monkeypatch):
+    """The hedge asks for everything below the attempt it is waiting on,
+    and the loop asks for the next one when it reaches it. Both routes run,
+    and a request sent twice is exactly the cost this is here to avoid."""
+    monkeypatch.setattr(lp, "_HEDGE_SECONDS", 0.01)
+    fake = use_fetcher(monkeypatch, ("api/search", []))
+    provider.get_lyrics(snapshot())
+
+    assert sorted(fake.calls) == sorted(set(fake.calls))
+
+
+def test_the_hedge_is_the_measurement_it_came_from(provider):
+    """Not a number set by eye. The first attempt was measured at 61ms by
+    median, 103ms at the 95th percentile and 170ms at its slowest, so the
+    delay clears the slowest observed response with room and no lookup in
+    the sample would have fanned out at all."""
+    assert lp._HEDGE_SECONDS >= 0.170
+    # And it stays well under the per-attempt bound, or it would be the
+    # timeout rather than a hedge before it.
+    assert lp._HEDGE_SECONDS < lp._ATTEMPT_WAIT / 10

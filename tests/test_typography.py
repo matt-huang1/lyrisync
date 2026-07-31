@@ -167,3 +167,59 @@ def test_line_travel_is_a_hint_not_a_transition():
     """Small enough that nobody watching the lyrics notices it happening,
     and never zero — zero would be the old in-place fade."""
     assert 0 < t.LINE_TRAVEL <= 12
+
+
+# -- the strip's own type size --------------------------------------------
+
+
+def test_the_default_compact_size_is_the_apps_own_sung_line():
+    """Stated once. A second literal here would be a second answer to how
+    big the sung line is, and the two would part company the first time
+    the type scale was touched."""
+    assert t.DEFAULT_COMPACT_TEXT_SIZE == t.base_size(t.CURRENT)
+    assert t.compact_scale(t.DEFAULT_COMPACT_TEXT_SIZE) == 1.0
+
+
+def test_the_default_is_one_of_the_presets_and_is_in_the_middle():
+    """A default the menu cannot show is a default nobody can get back to,
+    and a ladder with the default at one end is a ladder that only goes one
+    way."""
+    assert t.DEFAULT_COMPACT_TEXT_SIZE in t.COMPACT_TEXT_SIZES
+    index = t.COMPACT_TEXT_SIZES.index(t.DEFAULT_COMPACT_TEXT_SIZE)
+    assert 0 < index < len(t.COMPACT_TEXT_SIZES) - 1
+
+
+def test_the_presets_climb():
+    assert list(t.COMPACT_TEXT_SIZES) == sorted(set(t.COMPACT_TEXT_SIZES))
+
+
+def test_every_step_is_about_a_fifth(): 
+    """An ordinary type-scale interval. Small enough that the next size up
+    is a change and not a different window, large enough to be worth
+    having a menu entry for."""
+    steps = [
+        b / a for a, b in zip(t.COMPACT_TEXT_SIZES, t.COMPACT_TEXT_SIZES[1:])
+    ]
+    for step in steps:
+        assert 1.15 <= step <= 1.25, steps
+
+
+def test_the_scale_is_the_size_over_the_base():
+    for size in t.COMPACT_TEXT_SIZES:
+        scale = t.compact_scale(size)
+        assert t.style_for(t.CURRENT, scale).size_px == size
+
+
+def test_every_preset_keeps_the_hierarchy():
+    """The strip shows two of the roles, and the sung line has to stay
+    ahead of the one under it at every size the menu offers."""
+    for size in t.COMPACT_TEXT_SIZES:
+        scale = t.compact_scale(size)
+        current = t.style_for(t.CURRENT, scale)
+        pron = t.style_for(t.PRONUNCIATION, scale)
+        assert pron.size_px < current.size_px, size
+        assert pron.weight < current.weight, size
+
+
+def test_the_smallest_preset_is_still_a_readable_size():
+    assert min(t.COMPACT_TEXT_SIZES) >= 12

@@ -251,25 +251,57 @@ def docked_position(
     return (sx + (swidth - window_width) // 2, max(ay, sy + top_inset))
 
 
-# How much of a screen the compact layout may take up when it is sizing
-# itself to a song. Half, because past that a floating strip stops reading
-# as an overlay on somebody's work and starts reading as a window over it.
-#
-# Checked against 776 lines of real lyrics from 14 songs, measured in the
-# app's own type at scale 1.0. The widest line in the corpus is 695pt and
-# needs an 839pt window; on the 1710pt screen this was measured on, the cap
-# is 855pt, so nothing in the corpus is clipped by it. On a 1440pt screen
-# the cap is 720pt and 4 of the 14 are, which is the cap doing its job: a
-# smaller screen gets a proportionally smaller strip rather than the same
-# strip taking more of it.
-_WIDTH_CAP_FRACTION = 0.5
+def is_docked(
+    frame: tuple[int, int, int, int],
+    screen: tuple[int, int, int, int],
+    available: tuple[int, int, int, int],
+    top_inset: int = 0,
+) -> bool:
+    """Whether this window is exactly where docking would put it.
+
+    Recognised by POSITION, never by a flag. Docking is a command and the
+    window is as draggable the instant after it as the instant before, so
+    there is no state to keep — a flag would have to be cleared by every
+    drag, every clamp, every nudge and every screen change, and the first
+    one that forgot would leave a window claiming to be docked from the
+    middle of somebody's screen.
+
+    Two callers ask, and they must agree or the window would be drawn as a
+    docked one while being moved as a floating one: ``resized_position``,
+    deciding whether a width change re-docks or centre-anchors, and the
+    window's own paint, deciding which shape to draw.
+    """
+    x, y, width, _ = frame
+    return (x, y) == docked_position(width, screen, available, top_inset)
 
 
-def width_cap(screen_width: int) -> int:
-    """The widest a strip sizing itself to a song may become on this
-    screen. A bound on the feature, not on the window: a drag can still
-    make it any width the screen allows."""
-    return round(screen_width * _WIDTH_CAP_FRACTION)
+def width_cap(available_width: int) -> int:
+    """The widest a strip sizing itself to a song may become. A bound on
+    the feature, not on the window: a drag can still make it any width the
+    screen allows.
+
+    The screen, and no fraction of it. It used to be half, on the argument
+    that past that a floating strip stops reading as an overlay on
+    somebody's work and starts reading as a window over it — and that
+    argument was made when the type size was the width's to decide. It
+    could not be anything else then: a line that did not fit was a line
+    that fit at no width, so the cap was the only thing standing between
+    the user and a strip the width of their screen.
+
+    With the sung line's size named directly, the cap changed jobs. What
+    it bounds now is the consequence of a size the user picked, and the
+    control for "this strip is too wide" is the size itself.
+
+    MEASURED, over the same 776 lines from 14 real songs, as the widest
+    window each song's widest line needs. At the shipped sizes and below
+    the old cap never bound anything on the 1710pt screen this was measured
+    on: 14 of 14 songs fit in half of it at 20pt and under. It only started
+    binding at the sizes that did not exist yet — 10 of 14 at 24pt, 6 of 14
+    at 28pt — which is elision arriving as a routine cost of choosing
+    larger type. Against the whole screen every song fits at every size,
+    the widest needing 1379pt at 28pt type.
+    """
+    return available_width
 
 
 def fitted_window_width(
@@ -322,7 +354,7 @@ def resized_position(
     that keeps a window reachable does not care what moved it.
     """
     x, y, width, height = frame
-    if (x, y) == docked_position(width, screen, available, top_inset):
+    if is_docked(frame, screen, available, top_inset):
         target = docked_position(new_width, screen, available, top_inset)
     else:
         target = (x + (width - new_width) // 2, y)
