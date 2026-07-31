@@ -132,6 +132,7 @@ from sottovoce.menu import (
     OPEN_AT_LOGIN,
     POSITION_LIST,
     POSITION_STATUS,
+    PROXIMITY,
     QUIT,
     REMEMBER_POSITION,
     ROMANISATION,
@@ -145,6 +146,7 @@ from sottovoce.menu import (
     visible_entries,
 )
 from sottovoce import notifications
+from sottovoce import proximity
 from sottovoce.player_events import PlaybackAnnouncer
 from sottovoce.player_monitor import (
     POLL_INTERVAL_SECONDS,
@@ -364,13 +366,24 @@ _YIELD_CURVE = _MOVE_CURVE
 _REVEAL_MS = _FADE_MS
 _REVEAL_CURVE = _MOVE_CURVE
 
-# How often the compact layout asks where the pointer is. There is no
-# event to wait for (see _check_pointer), so this is the whole of the
-# window's answer and the interval is the whole of its latency: at 100ms
-# the controls are already moving before the hand has finished arriving,
-# and one poll costs 0.8us measured, which is 0.0008% of a core at this
-# rate. Slower would be felt; faster would buy nothing that can be seen.
-_HOVER_POLL_MS = 100
+# How often the window asks where the pointer is. There is no event to
+# wait for (see _check_pointer), so this is the whole of the window's
+# answer and the interval is the whole of its latency: at 100ms the
+# controls are already moving before the hand has finished arriving.
+# Slower would be felt; faster would buy nothing that can be seen.
+#
+# TWO layers ask, and they share the one poll rather than each keeping a
+# timer: the compact layout's controls coming out from under the pointer,
+# and yielding to the pointer. One number, one timer, one reading of where
+# the pointer is per tick, so the two can never disagree about it.
+#
+# MEASURED, on this machine, at 200,000 iterations each: asking macOS
+# where the pointer is costs 0.309us, testing it against the window's
+# frame takes the poll to 0.714us, and the region test that the yield adds
+# takes it to 0.973us. At 100ms that is 0.00097% of a core, and the added
+# 0.258us is 0.00026% of one. Working out where a dodge goes costs 0.852us
+# and happens once per arrival, not once per poll.
+_POINTER_POLL_MS = 100
 
 # How big an application icon is drawn for the menu. macOS puts 16-point
 # icons beside menu items; this is asked for in points and comes back at
@@ -900,6 +913,21 @@ class LyricsWindow(QWidget):
         self._reveal_effects: dict = {}
         self._control_offered: dict = {}
         self._hovered = False
+        # Yielding to the pointer. `_proximity` is the pure observation of
+        # where the pointer is and whether the behaviour is running;
+        # `_proximity_home` is the window's REAL position, held for as long
+        # as a dodge is standing aside and given back at the end of it,
+        # exactly the way the flight holds one. None means the window is
+        # where it belongs, so there is no flag to clear.
+        self._proximity_mode = proximity.OFF  # restored from settings below
+        self._proximity = proximity.Approach()
+        self._proximity_home: Optional[QPoint] = None
+        # How far into a ghost the window is, and where it is heading. The
+        # yield's pair, kept apart for the yield's reason: a poll that
+        # agrees with the current state must cost nothing.
+        self._ghost_level = 0.0
+        self._ghosting = False
+        self._ghost_anim: Optional[QVariantAnimation] = None
         # The lyric rows before the compact layout shortened them, so a
         # resize can lay them out again from the line rather than from what
         # was left of it.
@@ -1137,17 +1165,21 @@ class LyricsWindow(QWidget):
         self._apply_poll_interval()
 
         # Where the pointer is, asked rather than waited for. Repeating,
-        # and running only while the compact layout is in force and the
-        # window is showing: the second thing in this app that genuinely
-        # has to ask, for a harder version of the notification yield's
-        # reason. macOS delivers enter, leave and mouse-moved events to an
-        # app's windows only while that app is ACTIVE, and this one is an
-        # accessory that never activates and a window that never takes
-        # focus, so there are no hover events to subscribe to at all. See
-        # _check_pointer, where the measurement is.
-        self._hover_timer = QTimer(self)
-        self._hover_timer.setInterval(_HOVER_POLL_MS)
-        self._hover_timer.timeout.connect(self._check_pointer)
+        # and running only while something could act on the answer: the
+        # second thing in this app that genuinely has to ask, for a harder
+        # version of the notification yield's reason. macOS delivers enter,
+        # leave and mouse-moved events to an app's windows only while that
+        # app is ACTIVE, and this one is an accessory that never activates
+        # and a window that never takes focus, so there are no hover events
+        # to subscribe to at all. See _check_pointer, where the measurement
+        # is.
+        #
+        # Two layers read this one poll — the compact layout's controls and
+        # yielding to the pointer — so the answer they act on is the same
+        # answer, read once.
+        self._pointer_timer = QTimer(self)
+        self._pointer_timer.setInterval(_POINTER_POLL_MS)
+        self._pointer_timer.timeout.connect(self._check_pointer)
 
         self._loop = LineLoop()
         self._loop_timer = QTimer(self)
@@ -1410,6 +1442,18 @@ class LyricsWindow(QWidget):
 
     # -- line loop ---------------------------------------------------------
 
+    def _awaiting_attempt(self) -> bool:
+        """Whether the echo loop is waiting on the done button.
+
+        The state where the song is paused and the turn is the user's, and
+        it is asked by three things that would otherwise each spell it
+        out: whether to offer the done button at all, whether the compact
+        layout holds its controls out whatever the pointer is doing, and
+        whether yielding to the pointer is suspended. They are one fact,
+        and three copies of it is three places for it to drift.
+        """
+        return self._loop.engaged and self._loop.phase is LoopPhase.ATTEMPT
+
     def _toggle_loop(self, checked: bool) -> None:
         if not checked:
             self._release_loop()
@@ -1430,7 +1474,7 @@ class LyricsWindow(QWidget):
     def _release_loop(self, resume_if_attempt: bool = True) -> None:
         if not self._loop.engaged and not self._loop_button.isChecked():
             return
-        was_attempt = self._loop.engaged and self._loop.phase is LoopPhase.ATTEMPT
+        was_attempt = self._awaiting_attempt()
         self._loop.release()
         self._loop_timer.stop()
         self._loop_button.setChecked(False)
@@ -1894,9 +1938,7 @@ class LyricsWindow(QWidget):
         self._offer_control(self._loop_button, display.mode is Mode.SYNCED)
         self._offer_control(
             self._attempt_button,
-            display.mode is Mode.SYNCED
-            and self._loop.engaged
-            and self._loop.phase is LoopPhase.ATTEMPT,
+            display.mode is Mode.SYNCED and self._awaiting_attempt(),
         )
         if display.mode is not Mode.SYNCED:
             # Synced path updates it per line.
@@ -2692,6 +2734,14 @@ class LyricsWindow(QWidget):
         wanted = self._compact_active
         changed = wanted is not self._compact_applied
         if changed:
+            # The window is about to change shape, and a dodge is holding
+            # its position: reshaping it where it stands would leave the
+            # home describing a window that no longer exists. Landed
+            # rather than travelled, and ``stand_down`` rather than a
+            # release, so nothing steps aside again under a hand that
+            # never left.
+            self._set_dodged(False, animate=False)
+            self._proximity.stand_down()
             self._remember_size(self._compact_applied)
             self._compact_applied = wanted
             self._hovered = wanted and self._pointer_inside()
@@ -2735,7 +2785,7 @@ class LyricsWindow(QWidget):
             self._fit_width(animate=False)
         self._reelide()
         self._apply_reveal_effects()
-        self._update_hover_watch()
+        self._update_pointer_watch()
         self._place_buttons()
 
     def _remember_size(self, compact: bool) -> None:
@@ -2963,18 +3013,36 @@ class LyricsWindow(QWidget):
         things that comes through here. One rect, so the window arrives at
         its new shape once rather than in two steps that would each be a
         movement to watch.
+
+        Measured from where the window BELONGS rather than from where it
+        is, so the song and a window standing aside from the pointer are
+        not two authorities on its position. Everything the anchoring rule
+        cares about is a property of the home rectangle: whether it is
+        docked, and where its centre is. Anchoring on a dodged one would
+        centre the new width on a temporary position and then hand that
+        back as the permanent one.
         """
         height = self._strip_height() if self._compact_applied else self.height()
-        if target == self.width() and height == self.height():
+        home = self._home_rect()
+        if target == home.width() and height == home.height():
             return
         screen, available = self._screen_rects()
         x, y = resized_position(
-            (self.x(), self.y(), self.width(), self.height()),
+            (home.x(), home.y(), home.width(), home.height()),
             target,
             screen,
             available,
             self._top_inset(),
         )
+        if self._proximity_home is not None:
+            # The home moved under a window that is standing aside, so
+            # where it stands aside TO is worked out again from the new
+            # one. Same rule as a remembered-position move: one owner of
+            # the real position, one derivation of the temporary one.
+            self._proximity_home = QPoint(x, y)
+            moved = self._dodge_target(QRect(x, y, target, height))
+            if moved is not None:
+                x, y = moved.x(), moved.y()
         self._travel_to(QRect(x, y, target, height), animate)
 
     def _travel_to(self, rect: QRect, animate: bool = True) -> None:
@@ -3128,9 +3196,17 @@ class LyricsWindow(QWidget):
         """
         if not self._compact_applied:
             return 1.0
-        if self._hovered:
+        if self._awaiting_attempt():
             return 1.0
-        if self._loop.engaged and self._loop.phase is LoopPhase.ATTEMPT:
+        if self._ghosting:
+            # A ghosted window passes clicks through, so its controls are
+            # things that can be seen and not pressed. That is the mirror
+            # of the rule below about a widget at zero opacity, and it is
+            # the same answer: a control that cannot be used is worse on
+            # screen than off it. The attempt above outranks this because
+            # yielding is suspended for the whole of that phase anyway.
+            return 0.0
+        if self._hovered:
             return 1.0
         return 0.0
 
@@ -3204,7 +3280,17 @@ class LyricsWindow(QWidget):
         self._reveal = self._reveal_to
         self._apply_reveal()
 
-    def _pointer_inside(self) -> bool:
+    def _pointer_position(self) -> QPoint:
+        """Where the pointer is, in screen coordinates.
+
+        The one place that asks. Everything about the pointer in this
+        window is downstream of this call, so there is one thing to
+        measure, one thing to stub, and no chance of two layers acting on
+        two readings taken a moment apart.
+        """
+        return QCursor.pos()
+
+    def _pointer_inside(self, point: Optional[QPoint] = None) -> bool:
         """Whether the pointer is over this window, asked of the pointer.
 
         Not ``underMouse()`` and not an enter/leave event, for two separate
@@ -3212,8 +3298,13 @@ class LyricsWindow(QWidget):
         window the moment the pointer is over one of its own children,
         which is exactly when the answer has to be yes. And the events do
         not arrive at all: see _check_pointer.
+
+        ``point`` is passed by the poll, which has already read it and
+        must not read it twice.
         """
-        return self.frameGeometry().contains(QCursor.pos())
+        return self.frameGeometry().contains(
+            self._pointer_position() if point is None else point
+        )
 
     def _set_hovered(self, hovered: bool) -> None:
         if hovered == self._hovered:
@@ -3222,7 +3313,7 @@ class LyricsWindow(QWidget):
         self._update_reveal()
 
     def _check_pointer(self) -> None:
-        """One poll: is the pointer over this window?
+        """One poll: where is the pointer, and what does that mean here?
 
         MEASURED, and it corrected the first version of this outright. The
         obvious implementation is enterEvent and leaveEvent, and it works
@@ -3237,31 +3328,308 @@ class LyricsWindow(QWidget):
 
         What still answers is the pointer's own position, which is a screen
         coordinate and belongs to nobody. So this asks, on a timer, and the
-        timer runs only while the compact layout is in force and the window
-        is showing: a full-size window has its controls out anyway, and a
-        hidden one has no pointer over it. One poll costs 0.8us.
+        timer runs only while something could act on the answer: see
+        _update_pointer_watch. One poll costs 0.973us measured, of which
+        0.309us is asking macOS where the pointer is.
+
+        The position is read ONCE and handed to both layers. Two readings
+        a tick would not only cost twice as much, they could differ — the
+        pointer is entitled to move between them — and the compact
+        layout's controls and the yield would then be acting on different
+        answers to the same question.
         """
-        self._set_hovered(self._pointer_inside())
+        point = self._pointer_position()
+        self._set_hovered(self._pointer_inside(point))
+        self._observe_pointer(point)
 
-    def _update_hover_watch(self) -> None:
-        """Poll only while the compact layout is on and the window is on
-        screen.
+    def _update_pointer_watch(self) -> None:
+        """Poll only while a layer that wants the pointer is on and the
+        window is on screen.
 
-        Called from each of the three things it depends on, so none of them
-        has to know about the others. The same shape as the notification
+        Called from each of the things it depends on, so none of them has
+        to know about the others. The same shape as the notification
         yield's watch, and the same cheapest half of "poll only as often as
         needed": the difference between polling and not polling at all.
+
+        Two layers want it and either is enough — the compact layout's
+        controls, which a full-size window has out anyway, and yielding to
+        the pointer, which works in both layouts. A hidden window rules
+        out both: nothing is over it and it is in nobody's way.
         """
-        wanted = self._compact_applied and self._lyrics_visible
-        if wanted == self._hover_timer.isActive():
+        wanted = self._lyrics_visible and (
+            self._compact_applied or self._proximity_mode != proximity.OFF
+        )
+        if wanted == self._pointer_timer.isActive():
             return
         if wanted:
-            self._hover_timer.start()
-            logger.debug("compact: watching for the pointer")
+            self._pointer_timer.start()
+            logger.debug("pointer: watching")
         else:
-            self._hover_timer.stop()
+            self._pointer_timer.stop()
             self._set_hovered(False)
-            logger.debug("compact: stopped watching for the pointer")
+            # Nothing is coming to tell this window the pointer left, so
+            # whatever the yield borrowed is handed back here rather than
+            # waiting for a poll that will not arrive.
+            #
+            # Landed rather than travelled, which is the flight's rule
+            # about a resize in flight seen once more: the reason the
+            # watch stops is almost always that the window is about to
+            # leave for the menu bar, and the flight captures the real
+            # geometry the instant after this. A return still in the air
+            # would be captured as home and handed back as one.
+            self._release_proximity(animate=False)
+            logger.debug("pointer: stopped watching")
+
+    # -- yielding to the pointer -------------------------------------------
+
+    def _home_pos(self) -> QPoint:
+        """Where the window belongs, which is not always where it is.
+
+        A dodge holds the real position for as long as it is standing
+        aside, exactly as the flight holds it for as long as the window is
+        away. Everything that reads the window's position as a FACT about
+        it — what to save at shutdown, what to record for the app in front
+        — asks this rather than ``pos()``, so a position the pointer
+        caused can never be written down as one the user chose.
+        """
+        # ``is not None``, never a truth test: PySide gives QPoint a
+        # __bool__ and QPoint(0, 0) is FALSE, so a window docked at the
+        # top-left of the primary screen would hand back where it is
+        # standing as where it belongs.
+        if self._proximity_home is None:
+            return self.pos()
+        return QPoint(self._proximity_home)
+
+    def _home_rect(self) -> QRect:
+        """The same, as a rectangle. The size is the live one because a
+        dodge never changes it: only the position is borrowed, so there is
+        no second answer about how big the window is."""
+        return QRect(self._home_pos(), self.size())
+
+    def _proximity_refusal(self) -> Optional[str]:
+        """Why the window may not get out of the pointer's way right now."""
+        return proximity.refusal(
+            mode=self._proximity_mode,
+            visible=self._lyrics_visible,
+            syncing=self._syncing,
+            attempting=self._awaiting_attempt(),
+            explaining=self._why_shown,
+            dragging=self._drag_offset is not None or bool(self._resize_edges),
+            flying=self._flight_anim is not None,
+        )
+
+    def _observe_pointer(self, point: QPoint) -> None:
+        """What this poll's pointer position means for the yield.
+
+        The region is asked of where the window BELONGS, and the release
+        of that and of where it actually is: proximity.still_engaged holds
+        the whole of that rule and this only supplies the two rectangles.
+        """
+        home = self._home_rect()
+        frame = self.frameGeometry()
+        inside = proximity.still_engaged(
+            point=(point.x(), point.y()),
+            home=(home.x(), home.y(), home.width(), home.height()),
+            current=(frame.x(), frame.y(), frame.width(), frame.height()),
+            engaged=self._proximity.engaged,
+        )
+        outcome = self._proximity.observe(
+            inside=inside, refusal=self._proximity_refusal()
+        )
+        if outcome is proximity.IDLE or outcome is proximity.HELD:
+            return
+        logger.debug(
+            "pointer: %s at %d, %d (%s)",
+            outcome,
+            point.x(),
+            point.y(),
+            self._proximity_mode,
+        )
+        self._apply_proximity()
+
+    def _apply_proximity(self) -> None:
+        """Put the window where the observation says it should be.
+
+        Idempotent and asked of the state rather than told by the caller,
+        which is the same reason ``is_docked`` is asked of the position:
+        one function decides what "the pointer is here" looks like, so a
+        mode change, a suspension and an ordinary arrival cannot mean three
+        slightly different things.
+        """
+        active = self._proximity.active
+        self._set_dodged(active and self._proximity_mode == proximity.DODGE)
+        self._set_ghosting(active and self._proximity_mode == proximity.GHOST)
+
+    def _dodge_target(self, home: QRect) -> Optional[QPoint]:
+        """Where a window whose home is ``home`` would step to, now."""
+        point = self._pointer_position()
+        available = self._available_geometry()
+        target = proximity.dodge_destination(
+            (home.x(), home.y(), home.width(), home.height()),
+            (point.x(), point.y()),
+            (
+                available.x(),
+                available.y(),
+                available.width(),
+                available.height(),
+            ),
+        )
+        return None if target is None else QPoint(*target)
+
+    def _set_dodged(self, dodged: bool, animate: bool = True) -> None:
+        """Step aside, or come back.
+
+        Coming back goes to the position that was borrowed, exactly — not
+        to a recomputed one — which is what makes the promise keepable: a
+        docked window is docked again afterwards, down to the pixel of
+        parity that ``is_docked`` is recognised by.
+        """
+        if dodged == (self._proximity_home is not None):
+            return
+        if not dodged:
+            home, self._proximity_home = self._proximity_home, None
+            logger.debug("dodge: back to %d, %d", home.x(), home.y())
+            self._glide_to(home, animate)
+            return
+        target = self._dodge_target(self.geometry())
+        if target is None:
+            # Nowhere to go. Said rather than faked: a window shuffled to
+            # a position still under the pointer would uncover nothing and
+            # look like the feature working.
+            logger.info("dodge: no free position to step to, staying put")
+            return
+        self._proximity_home = self.pos()
+        self._glide_to(target, animate)
+
+    def _adopt_dodged_position(self) -> None:
+        """The user has taken hold of a window that had stepped aside.
+
+        Wherever they put it is where it belongs now, so the borrowed
+        position is simply dropped rather than handed back. Nothing steps
+        aside again until the pointer has left and come back, because the
+        behaviour is edge triggered and ``stand_down`` keeps the engagement
+        it was already in.
+        """
+        if self._proximity_home is None:
+            return
+        self._stop_move()
+        self._proximity_home = None
+        self._proximity.stand_down()
+        logger.debug("dodge: the window was taken by hand, adopting where it is")
+
+    def _set_ghosting(self, ghosting: bool, animate: bool = True) -> None:
+        """Fade out of the way and let the clicks through, or take it back.
+
+        The click pass-through is switched at the START of the fade rather
+        than at the end of it, in both directions. The pointer arriving is
+        the request, and a window that stayed clickable for the length of a
+        fade would swallow exactly the click the user came to make.
+
+        Retargeted from the level the window actually reached, not from the
+        one the last animation was heading for — the yield's rule and the
+        flight's, so a pointer that skims the window turns around from
+        halfway rather than completing a fade nobody is waiting for.
+        """
+        if ghosting == self._ghosting:
+            return
+        self._ghosting = ghosting
+        self._apply_click_through(ghosting)
+        # The strip's controls are part of what is being handed over: see
+        # _reveal_target.
+        self._update_reveal()
+        end = 1.0 if ghosting else 0.0
+        start = self._ghost_level
+        self._stop_ghost_animation()
+        if start == end or not animate:
+            self._ghost_level = end
+            self._apply_window_opacity()
+            return
+        animation = QVariantAnimation(self)
+        animation.setDuration(proximity.fade_ms(start, end))
+        animation.setEasingCurve(_YIELD_CURVE)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.valueChanged.connect(self._on_ghost_step)
+        animation.finished.connect(self._end_ghost)
+        animation.start()
+        self._ghost_anim = animation
+        logger.debug("ghost: level %.2f to %.2f in %dms", start, end, animation.duration())
+
+    def _on_ghost_step(self, value) -> None:
+        self._ghost_level = float(value)
+        self._apply_window_opacity()
+
+    def _end_ghost(self) -> None:
+        """Land on the level exactly, rather than wherever the last frame
+        happened to fall."""
+        self._ghost_level = 1.0 if self._ghosting else 0.0
+        self._ghost_anim = None
+        self._apply_window_opacity()
+
+    def _stop_ghost_animation(self) -> None:
+        if self._ghost_anim is not None:
+            self._ghost_anim.stop()
+            self._ghost_anim = None
+
+    def _apply_click_through(self, ignore: bool) -> None:
+        """Let a click reach whatever is under this window, or take it
+        back.
+
+        Two switches for one state, because they answer to two different
+        things. The Qt attribute is what stops this window's own widgets
+        from taking a press, and it is the whole of the answer on any
+        platform without Cocoa; ``ignoresMouseEvents`` is what makes the
+        click land on somebody else's app, which nothing inside Qt can do.
+        Setting only the first would give a window that ignores clicks
+        without passing them on, which is the worst of both.
+
+        Verified by readback, like every other native state this window
+        sets: asking is not the same as it having happened.
+        """
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, ignore)
+        nswindow = self._nswindow()
+        if nswindow is None:
+            return
+        try:
+            nswindow.setIgnoresMouseEvents_(bool(ignore))
+            landed = bool(nswindow.ignoresMouseEvents())
+        except Exception:
+            logger.debug("could not change how the window takes clicks", exc_info=True)
+            return
+        if landed != bool(ignore):
+            logger.warning(
+                "click pass-through did not land: asked %s, got %s", ignore, landed
+            )
+
+    def _release_proximity(self, animate: bool = True) -> None:
+        """Give back everything either behaviour borrowed, at once.
+
+        One method for the whole layer, for the reason the flight has one:
+        switching the mode, the window being hidden and shutdown all mean
+        the same thing here, and three paths back would be three chances
+        to leave the window faint, click-through or standing aside.
+        """
+        self._proximity.release()
+        self._set_dodged(False, animate)
+        self._set_ghosting(False, animate)
+
+    def _set_proximity_mode(self, mode: str) -> None:
+        """Choose what the window does when the pointer arrives.
+
+        The old mode gives everything back before the new one is written
+        down, so switching from Dodge to Ghost cannot leave a window
+        standing aside with nothing left that remembers where it came
+        from.
+        """
+        mode = proximity.mode_from(mode)
+        if mode == self._proximity_mode:
+            return
+        self._release_proximity()
+        self._proximity_mode = mode
+        self._settings.setValue("window/proximity", mode)
+        self._update_pointer_watch()
+        self._refresh_menu()
+        logger.info("yield to the pointer: %s", mode)
 
     # -- interaction: drag, resize, scroll-opacity, menu -------------------
 
@@ -3298,6 +3666,9 @@ class LyricsWindow(QWidget):
             # something the user cannot see, at a position about to be
             # given back.
             return
+        # A press can only reach a window that stepped aside if the user
+        # followed it there, which is the gesture for taking it back.
+        self._adopt_dodged_position()
         self._press_global = event.globalPosition().toPoint()
         self._press_geometry = self.geometry()
         self._resize_edges = self._hit_edges(event.position().toPoint())
@@ -3573,12 +3944,38 @@ class LyricsWindow(QWidget):
         self._move_to(QPoint(*remembered))
 
     def _move_to(self, target: QPoint) -> None:
-        """Travel to a remembered position, clamped and animated.
+        """Travel to a remembered position.
+
+        A window that has stepped aside from the pointer is moved by
+        changing where it will step BACK to, not by moving it — the same
+        rule docking already follows for a window away at the menu bar,
+        and for the same reason: the yield is holding the real position
+        and would hand the old one straight back the moment the pointer
+        left. Where it stands aside to is then derived again from the new
+        home, or the two would disagree about where "back" is.
+        """
+        if self._proximity_home is not None:
+            clamped = _clamped_point(
+                QRect(target, self.size()), self._available_geometry()
+            )
+            self._proximity_home = clamped
+            moved = self._dodge_target(QRect(clamped, self.size()))
+            logger.debug(
+                "move: %d, %d is the new home while standing aside", *clamped.toTuple()
+            )
+            self._glide_to(moved if moved is not None else clamped)
+            return
+        self._glide_to(target)
+
+    def _glide_to(self, target: QPoint, animate: bool = True) -> None:
+        """Take the window to a position, clamped and animated.
 
         Clamped on arrival rather than only when learned: the position may
         have been recorded on a second display that is no longer attached,
         or before the dock moved, and a remembered position is not a
-        licence to put the window somewhere it cannot be reached.
+        licence to put the window somewhere it cannot be reached. A dodge
+        comes back through here too, and the clamp is a no-op for it — the
+        position it is returning to was on screen when it was borrowed.
         """
         clamped = _clamped_point(
             QRect(target, self.size()), self._available_geometry()
@@ -3605,12 +4002,15 @@ class LyricsWindow(QWidget):
             clamped.y(),
         )
         self._stop_move()
-        if self._display_options.reduce_motion:
-            # The window still goes where it was asked to go — the layer is
-            # about where it lives, not about how it gets there — it simply
-            # arrives without travelling.
+        if not animate or self._display_options.reduce_motion:
+            # The window still goes where it was asked to go — both layers
+            # that come through here are about where it ends up rather than
+            # about how it gets there, so Reduce Motion takes the travel
+            # and leaves the answer. ``animate`` is the other case: a
+            # shutdown or a mode change, where there is nobody left to
+            # watch a journey.
             self.move(clamped)
-            logger.debug("reduce motion: moved without travelling")
+            logger.debug("moved without travelling (animate=%s)", animate)
             return
         animation = QPropertyAnimation(self, b"pos", self)
         animation.setDuration(_MOVE_MS)
@@ -3719,7 +4119,10 @@ class LyricsWindow(QWidget):
 
         ``position`` is passed by the callers that already know where the
         window is going and would otherwise be asking mid-travel. A drag
-        has already landed and passes nothing.
+        has already landed and passes nothing, and what it gets back is
+        where the window BELONGS: a position the pointer caused is not a
+        preference the user expressed, and recording one would teach the
+        map that this app's own dodging is where the window lives.
         """
         refusal = learn_refusal(
             enabled=self._remember_position,
@@ -3729,7 +4132,7 @@ class LyricsWindow(QWidget):
         if refusal is not None:
             logger.debug("learn: nothing recorded, %s", refusal)
             return
-        position = self.pos() if position is None else position
+        position = self._home_pos() if position is None else position
         self._positions.remember(
             self._frontmost, position.x(), position.y(), self._frontmost_name
         )
@@ -3865,6 +4268,7 @@ class LyricsWindow(QWidget):
         self._menu.on(ALL_DESKTOPS, self._set_all_desktops)
         self._menu.on(MENUBAR_ANIMATION, self._set_menubar_animation)
         self._menu.on(YIELD_NOTIFICATIONS, self._set_yield_to_notifications)
+        self._menu.on(PROXIMITY, self._set_proximity_mode)
         # A command rather than a switch: it puts the window somewhere
         # once. Nothing holds it there afterwards, so there is no state for
         # a tick to describe.
@@ -3975,6 +4379,7 @@ class LyricsWindow(QWidget):
         self._menu.set_label(OPEN_AT_LOGIN, login_item.label_for(self._login_status))
         self._menu.set_chosen(SPEECH_RATE, self._speech_rate)
         self._menu.set_chosen(COMPACT_SIZE, self._compact_text_size)
+        self._menu.set_chosen(PROXIMITY, self._proximity_mode)
         self._menu.sync()
         self._refresh_tray_icon()
 
@@ -4159,7 +4564,7 @@ class LyricsWindow(QWidget):
         self._update_yield_watch()
         # A window at the menu bar has no pointer over it, and the reveal
         # goes back with the watch so it does not come back revealed.
-        self._update_hover_watch()
+        self._update_pointer_watch()
         self._begin_flight(visible)
 
     # -- leaving for the menu bar, and coming back -------------------------
@@ -5039,15 +5444,22 @@ class LyricsWindow(QWidget):
     def _apply_window_opacity(self) -> None:
         """The one place that decides how solid the window is.
 
-        Three things have an opinion and they compose rather than compete:
-        the user's own setting is the baseline, a yield takes it down
-        towards a ceiling, and a flight scales whatever is left as the
-        window leaves for the menu bar. Every one of them used to call
+        Four things have an opinion and they compose rather than compete:
+        the user's own setting is the baseline, a notification yield takes
+        it down towards a ceiling, a ghost takes whatever is left down
+        towards its own, and a flight scales the result as the window
+        leaves for the menu bar. Every one of them used to call
         setWindowOpacity itself, which worked only because no two of them
         were ever true at once — and a fade to a notification that landed
         during a flight would have been the first pair.
+
+        The two ceilings compose as a ``min`` each: a banner arriving over
+        a ghosted window leaves the window at whichever of the two is
+        fainter, which is the one that is more out of the way, and neither
+        can ever make the window brighter than the user asked for.
         """
         base = notifications.yielded_opacity(self._opacity, self._yield_level)
+        base = proximity.ghost_opacity(base, self._ghost_level)
         self.setWindowOpacity(base * self._flight_opacity)
 
     def _restore_settings(self) -> None:
@@ -5161,11 +5573,21 @@ class LyricsWindow(QWidget):
         self._yield_to_notifications = self._settings.value(
             "window/yield_notifications", False, type=bool
         )
+        # Assigned rather than routed through the setter, like every layer
+        # here. Off by default and validated back to one of the three
+        # modes, the same rule the speech rate and the strip's type size
+        # are held to: a value nobody recognises leaves the window doing
+        # what it does with no layer on.
+        self._proximity_mode = proximity.mode_from(
+            self._settings.value("window/proximity", proximity.OFF)
+        )
         self._lyrics_visible = self._settings.value("window/visible", True, type=bool)
         self._update_yield_watch()
-        # The hover watch is not started here: _apply_compact does it, and
-        # it runs after the constructor has finished building the controls
-        # the reveal is about.
+        # The pointer watch is not started here: _apply_compact does it,
+        # and it runs after the constructor has finished building the
+        # controls the reveal is about. It reads the mode restored above,
+        # so a window that starts in the full layout with the yield on is
+        # still watching.
         # Open at Login is NOT restored from here: the stored value is what
         # the user last asked for, and the system is what is actually true.
         # Reading it back is the whole point, so the setting is only ever
@@ -5180,7 +5602,11 @@ class LyricsWindow(QWidget):
             )
 
     def _save_settings(self) -> None:
-        self._settings.setValue("window/pos", self.pos())
+        # Where the window BELONGS, not where a dodge has it standing:
+        # shutdown lands a resize in flight for exactly this reason, and a
+        # temporary position persisted as the permanent one is the same
+        # bug with a different cause.
+        self._settings.setValue("window/pos", self._home_pos())
         self._settings.setValue("window/size", self.size())
         self._settings.setValue("window/opacity", self._opacity)
         self._settings.setValue("window/compact", self._compact)
@@ -5208,6 +5634,7 @@ class LyricsWindow(QWidget):
         self._settings.setValue(
             "window/yield_notifications", self._yield_to_notifications
         )
+        self._settings.setValue("window/proximity", self._proximity_mode)
         self._settings.setValue("window/app_positions", self._positions.to_json())
 
     def _shutdown(self) -> None:
@@ -5255,12 +5682,19 @@ class LyricsWindow(QWidget):
             self._tray.release()
             self._tray = None
         self._settle_timer.stop()
-        self._hover_timer.stop()
+        self._pointer_timer.stop()
         self._stop_reveal()
         # Landed rather than stopped, before the save below: a resize
         # abandoned mid-travel would persist a waypoint as the window's
         # size. The same argument the flight makes three lines down.
         self._finish_fit()
+        # And before the save for the flight's other reason: a dodge holds
+        # the window's real position while it stands aside. Without the
+        # travel, because there is nobody left to watch it. _save_settings
+        # asks for the home position anyway, so this is what stops the
+        # window being torn down faint and click-through rather than what
+        # stops the wrong position being written.
+        self._release_proximity(animate=False)
         self._stop_move()
         # Stopped before the save, like the flight below and for a milder
         # version of the same reason: a poll landing mid-teardown would ask

@@ -82,6 +82,7 @@ def test_bare_menu_with_every_layer_dormant():
         m.SYSTEM_MENU,
         m.ALL_DESKTOPS,
         m.YIELD_NOTIFICATIONS,
+        m.PROXIMITY,
         m.MENUBAR_ANIMATION,
         m.QUIT,
     )
@@ -169,6 +170,7 @@ def test_the_standing_preferences_live_in_the_two_submenus():
     assert children(m.SYSTEM_MENU) == (
         m.ALL_DESKTOPS,
         m.YIELD_NOTIFICATIONS,
+        m.PROXIMITY,
         m.MENUBAR_ANIMATION,
         m.SEPARATOR_BEFORE_LOGIN,
         m.OPEN_AT_LOGIN,

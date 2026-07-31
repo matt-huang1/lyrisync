@@ -21,7 +21,7 @@ can be logic rather than widget is a **Qt-free pure module** —
 `geometry.py`, `typography.py`, `appearance.py`, `transition.py`,
 `flight.py`, `app_positions.py`, `gestures.py`, `romanize.py`,
 `menubar.py`, `http_client.py`, `settings.py`, `notifications.py`,
-`failure.py`, `player_events.py`. That is
+`proximity.py`, `failure.py`, `player_events.py`. That is
 why the contrast floor is a test rather than a judgement, and why the
 whole suite runs headless on Linux.
 
@@ -389,7 +389,9 @@ Rules that come with them:
   pointer is asks for its position, on a timer, and only while something
   could act on the answer. The offscreen platform has no pointer, so no
   test can catch this: it is verified by driving the real one with the
-  app backgrounded.
+  app backgrounded. **Two layers read that one poll and they read it
+  once between them** — the pointer may move between two calls, and two
+  readings would be two answers to one question.
 - Per-app position memory: **our own activation is dropped** rather than
   becoming the frontmost app — dragging the window activates us. The
   debounce rule is authoritative and the timer is only a prompt, because
@@ -416,6 +418,30 @@ Rules that come with them:
   the paint has left.
 - The flight puts the window's **position back before it is hidden**, and
   one method gives back everything it borrowed. Startup does not fly.
+- Yielding to the pointer: the trigger region is anchored on **where the
+  window belongs**, never on where it is, or a dodged window reports
+  clear one poll after reporting covered, for ever. Leaving takes BOTH
+  rectangles, each with the release margin, or a dodged window can never
+  be caught. The behaviour is **edge triggered**: it begins on the
+  pointer arriving and nothing restarts it, so a suspension that ends
+  with the hand still there does not step the window out from under it.
+  `Approach` keeps engagement and action as two booleans, because
+  whether the pointer is on the window is not the same fact as whether
+  the window may act on it.
+- **A dodge is a loan, like the flight.** `_proximity_home` holds the
+  real position and `_home_pos()` is what the save at shutdown, the
+  per-app learn and the fitted width ask instead of `pos()`. Anything
+  that moves the real position while it is borrowed writes the HOME and
+  derives the temporary one again. A docked window must come back to the
+  pixel: `is_docked` is recognised by position.
+- **Click-through is two switches**: `WA_TransparentForMouseEvents` for
+  this window's own widgets, `setIgnoresMouseEvents_` for the click to
+  reach another app. Only the first is a window that swallows clicks
+  without passing them on. Verified by readback. It is switched at the
+  START of the fade, both ways, or the window eats the click the user
+  came to make. A ghosted strip offers **no controls**: a control that
+  can be seen and not pressed is the mirror of the widget-at-zero-opacity
+  rule.
 - Every native login-item, hotkey, workspace and window-list call goes
   through its module's single door. Releasing the hotkey is the **first**
   thing `_shutdown` does — it is the only thing that can still call in.
@@ -480,6 +506,7 @@ it there would be a second answer to one question.
 | | |
 |---|---|
 | [docs/compact-and-docking.md](docs/compact-and-docking.md) | the strip, the pointer poll, and the notch |
+| [docs/pointer-yield.md](docs/pointer-yield.md) | Dodge, Ghost, and the hysteresis |
 | [docs/decision-log.md](docs/decision-log.md) | every decision, in order, with its measurement |
 | [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) | the twelve principles the rest is downstream of |
 | [docs/](docs/) | one page per topic: architecture, contrast, album colour, motion, packaging, testing, … |

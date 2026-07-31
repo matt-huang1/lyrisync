@@ -32,7 +32,8 @@ Everything that can be logic rather than widget is:
 | `geometry.py` | the type scale, minimum height (full and compact), button boxes, drag clamping, rect intersection, the dock position, the fitted width |
 | `flight.py` | the journey to and from the menu bar item |
 | `app_positions.py` | the per-app position map, the settling rule, the gates |
-| `notifications.py` | the overlap and opacity rules for yielding — plus one native door |
+| `notifications.py` | the overlap and opacity rules for yielding to a banner — plus one native door |
+| `proximity.py` | yielding to the pointer: the trigger region, the hysteresis, where a dodge goes, the ghost's opacity |
 | `player_events.py` | observing Spotify's own announcement that something changed — plus one native door |
 | `typography.py` | the type scale — imported by `geometry.py` |
 | `appearance.py` | both palettes, the album tint maths, the high-contrast overrides |

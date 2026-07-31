@@ -35,6 +35,8 @@ the reasoning: what was decided, why, and what was measured to check it.
   switched to, and the clock bug behind it
 - [Yielding to notifications](notification-yield.md) — fading out of a
   banner's way, and why it needs no permission
+- [Getting out of the pointer's way](pointer-yield.md) — Dodge and Ghost,
+  the hysteresis, and the ceiling that had to be looked at
 - [Motion and typography](motion-and-typography.md) — the line change, the
   type scale, and how motion is verified
 

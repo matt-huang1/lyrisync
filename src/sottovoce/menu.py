@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Callable, NamedTuple, Optional
 
 from sottovoce.login_item import MENU_LABEL as OPEN_AT_LOGIN_LABEL
+from sottovoce.proximity import MODES as PROXIMITY_MODES
 from sottovoce.speech import SPEECH_RATE_PRESETS
 from sottovoce.typography import COMPACT_TEXT_SIZES
 
@@ -55,6 +56,7 @@ ALBUM_COLOUR = "album_colour"
 ALL_DESKTOPS = "all_desktops"
 MENUBAR_ANIMATION = "menubar_animation"
 YIELD_NOTIFICATIONS = "yield_notifications"
+PROXIMITY = "proximity"
 DOCK_TOP = "dock_top"
 REMEMBER_POSITION = "remember_position"
 POSITION_STATUS = "position_status"
@@ -183,6 +185,16 @@ MENU = (
         children=(
             Entry(ALL_DESKTOPS, "Show on all desktops", TOGGLE),
             Entry(YIELD_NOTIFICATIONS, "Yield to notifications", TOGGLE),
+            # Directly under the yield, because it is the same sentence
+            # said about a different intruder: that one gets out of the
+            # way of a banner, this one gets out of the way of the hand.
+            Entry(
+                PROXIMITY,
+                "Yield to the pointer",
+                CHOICE,
+                options=PROXIMITY_MODES,
+                option_label="{}",
+            ),
             Entry(MENUBAR_ANIMATION, "Animate the menu bar icon", TOGGLE),
             Entry(SEPARATOR_BEFORE_LOGIN, kind=SEPARATOR),
             # Label swaps to name the approval case.
@@ -232,6 +244,11 @@ SEPARATORS = frozenset(
 # what is playing and everything to do with the window. Gating it on a
 # notification being on screen right now would offer it for five seconds at
 # a time, which is not a way to find a setting.
+#
+# Yielding to the pointer is the same argument once more, and the reductio
+# of it: gating that one on the pointer being over the window would mean
+# the only way to find the setting is to be in the state it exists to
+# change, and reaching the menu bar item to look would leave that state.
 # The menu bar animation is here too, and it is the same argument once more:
 # a standing preference about how the item behaves, not about the song. It
 # only has anything to do while a song is playing, but a toggle that appeared
@@ -253,6 +270,7 @@ ALWAYS_VISIBLE = frozenset(
         ALL_DESKTOPS,
         MENUBAR_ANIMATION,
         YIELD_NOTIFICATIONS,
+        PROXIMITY,
         DOCK_TOP,
         REMEMBER_POSITION,
         QUIT,

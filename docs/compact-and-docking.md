@@ -146,10 +146,20 @@ activates has no hover events to miss.
 
 What still answers is the pointer's own position, which is a screen
 coordinate and belongs to nobody. So the window asks, on a 100ms timer
-that runs only while the compact layout is in force and the window is
-showing. One poll costs **0.8us** measured, which is 0.0008% of a core at
-that rate; the interval is the whole of the latency, and at 100ms the
-controls are already moving before the hand has finished arriving.
+that runs only while something could act on the answer. The interval is
+the whole of the latency, and at 100ms the controls are already moving
+before the hand has finished arriving.
+
+**Two layers read this poll now**, and they read it once between them:
+this one, and [getting out of the pointer's way](pointer-yield.md), which
+works in both layouts and so keeps the timer running with the compact
+layout off. One reading of `QCursor.pos()` per tick rather than one each,
+because the pointer is entitled to move between two calls and the two
+layers would then be acting on different answers to the same question.
+Re-measured with both on this machine, 200,000 iterations each: asking
+macOS where the pointer is costs 0.309us, this layer's frame test takes
+the poll to 0.714us, and the other layer's region test takes it to
+0.973us — 0.00097% of a core at this rate.
 
 Asking the pointer also fixes the bug the event version would have had
 anyway: Qt sends the window a Leave the moment the pointer moves onto one

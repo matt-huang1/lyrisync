@@ -6,6 +6,50 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Milestone 22 — getting out of the pointer's way
+
+**The opacity gesture works and is never used.** Option and a scroll over
+the window has adjusted opacity since milestone 4, and it has to be
+remembered, aimed and then undone — three deliberate acts for a problem
+that lasts two seconds. So the pointer arriving over the window is the
+request now, and a three-value setting says what the window does about it:
+**Off** (the default), **Dodge**, **Ghost**.
+
+Dodge vacates the window's rectangle and comes back exactly when the
+pointer leaves. Ghost stays put, fades to 0.15 and passes clicks through
+to whatever is behind it. Neither is a better version of the other: the
+first is for a window parked over something you look at, the second for
+one parked over something you click.
+
+**It rides the poll the compact layout already had**, because macOS
+delivers enter and leave events only to the active app and this one never
+activates. Two layers, one timer, one reading of the pointer per tick:
+0.973us a poll measured, 0.00097% of a core at 100ms, of which this layer
+added 0.00026%.
+
+**The region is anchored on where the window belongs**, never on where it
+is, which is the one decision that stops a dodge oscillating — and leaving
+takes both rectangles, so a dodged window can still be followed and
+caught. The behaviour begins on the pointer arriving and nothing restarts
+it, so a sync pass or an echo attempt that ends with the hand still on the
+window does not step it aside from underneath.
+
+**A dodge is a loan.** The window's real position is held for as long as
+it stands aside, exactly the way the flight holds one, so a temporary
+position is never learned as a per-app position, never saved at shutdown,
+and never what a song anchors its width change on. A docked window docks
+again to the pixel.
+
+**The ghost's ceiling was set by arithmetic, looked at, and corrected.**
+0.12 came out of the contrast maths and reads as indistinguishable from
+nothing; rendered at five values in both appearances, 0.15 is where a
+trace of the sung line survives and nothing else does. The measurements
+followed to check it: 86% of the screen underneath untouched, and the work
+under the window keeping 15.6:1 against a 4.5:1 floor that permits 0.51
+and could not have picked the number.
+
+Full reasoning in [docs/pointer-yield.md](docs/pointer-yield.md).
+
 ## Milestone 21 — one menu, natively drawn, and grouped
 
 **The same menu looked like two menus.** The menu bar item and the window's
