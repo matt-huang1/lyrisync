@@ -93,6 +93,20 @@ Rules that come with them:
   `QThreadPool.globalInstance()`, process-wide, and assigning to its
   `start()` leaks into every test that runs afterwards. Record with a
   subclass of the task instead.
+- **No test may pin a pixel that is really a font measurement.** Anything
+  downstream of a fitted width or an elided line differs by platform: the
+  same fixture line measures 237pt to 351pt across real families, which
+  straddles the 316pt where a strip stops fitting inside 460 and is how a
+  green suite on macOS became a red one on Linux. Assert the property —
+  it fits, it is the narrowest that does, neither bound decided it,
+  nothing is elided — and re-measure with the font in force rather than
+  naming a number.
+- **Reading a QImage's bytes requires holding the image**, and
+  `pixels_of()` is the one place that does it. `img.copy(r).constBits()`
+  is a memoryview onto a temporary PySide does not keep alive, so
+  `.tobytes()` can read freed memory: measured at 9 failures in 20 runs
+  against 0 in 40 once the copy is bound. It presents as a flaky pixel
+  comparison and reads as a bug in the drawing.
 - **`QSettings` is injected, never configured globally.**
   `setDefaultFormat`/`setPath` are process-wide and silently do nothing on
   macOS.

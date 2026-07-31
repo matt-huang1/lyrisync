@@ -1207,6 +1207,25 @@ def test_a_resize_mid_change_re_elides_and_is_not_drawn_from_the_cache(make_wind
     assert effect.renders == 1
 
 
+def pixels_of(image, rect=None):
+    """The raw bytes of an image, or of one rectangle of it.
+
+    The copy is BOUND before it is read, and that is the whole of this
+    function. ``image.copy(rect).constBits()`` hands back a memoryview onto
+    a temporary QImage that PySide does not keep alive for it, so the copy
+    can be released before ``tobytes()`` reads the buffer and the read
+    returns whatever the allocator has since put there.
+
+    That is not a theory. Written the short way, the straight-band test
+    failed 9 runs in 20 of its own node, with the panel's colour reading as
+    zeroes in a band that had been drawn correctly; written this way, 0 in
+    40. It never failed in a full-suite run, which is how it survived a
+    whole milestone being read as an intermittent bug in the painting.
+    """
+    held = image if rect is None else image.copy(rect)
+    return held.constBits().tobytes()
+
+
 def panel_pixels(window, damaged, straight, ratio):
     """What _paint_panel puts on an image for ``damaged``.
 
@@ -1256,8 +1275,7 @@ def test_a_band_is_drawn_straight_and_it_is_the_same_pixels(make_window, glow, r
             int(damaged.x() * ratio), int(damaged.y() * ratio),
             int(damaged.width() * ratio), int(damaged.height() * ratio),
         )
-        band_of = lambda img: img.copy(device).constBits().tobytes()  # noqa: E731
-        assert band_of(fast) == band_of(slow), (
+        assert pixels_of(fast, device) == pixels_of(slow, device), (
             f"the band at y={top} differs at {ratio}x"
         )
 
@@ -2916,7 +2934,7 @@ def test_the_drawn_glyphs_are_not_all_the_same_pixels(with_tray, make_window):
                 )
                 icon = window._tray_icon_for(spec)
                 image = icon.pixmap(mb.GLYPH_UNITS, mb.GLYPH_UNITS).toImage()
-                seen.add(bytes(image.constBits()))
+                seen.add(pixels_of(image))
     # practice forces bright and a dot, so hidden-vs-shown collapses there
     assert len(seen) == 6
 
@@ -4578,7 +4596,10 @@ def test_compact_takes_the_window_down_to_a_strip(make_window):
     )
     assert window.height() == window.minimumHeight()
     assert window.height() < 220
-    assert window.width() == 460  # a WIDE thin strip: the width is untouched
+    # A WIDE thin strip: the width is untouched. Safe as a literal because
+    # no song has been loaded, so there is nothing for the fit to measure
+    # and no font can reach this number.
+    assert window.width() == 460
 
 
 def test_the_full_layout_keeps_the_height_it_was_left_at(make_window):
@@ -5063,6 +5084,21 @@ def expected_width(window, text_width):
     )
 
 
+def room_for_text(window):
+    """How much of the window's width is the line's, at the scale in force.
+
+    The gutters are asked for rather than assumed, because they follow the
+    type size and the whole point of these tests is that neither the size
+    nor the font is a constant.
+    """
+    return window.width() - 2 * w.compact_text_gutter(window._scale)
+
+
+def screen_cap(window):
+    screen = window.screen() or APP.primaryScreen()
+    return w.width_cap(screen.availableGeometry().width())
+
+
 def finish_fit(window):
     """Run the width animation to its end without waiting it out."""
     if window._fit_anim is not None:
@@ -5084,12 +5120,127 @@ def test_fitting_is_on_by_default_and_only_acts_in_compact(make_window):
 
 
 def test_the_strip_sizes_itself_when_a_song_arrives(make_window):
+    """The properties of the fit, none of which is a pixel count.
+
+    This used to assert the width landed under 460, which passed on macOS
+    and failed on the Linux runner at 465. Nothing was wrong: the fixture's
+    longest line measures 246pt in the font macOS resolves and about 321pt
+    in the one fontconfig picks, and 465 is exactly ceil(321) plus the two
+    gutters. The bound was a font measurement in disguise, so the test was
+    really asserting which machine it ran on.
+
+    What it should protect is what the feature promises, and all of it
+    survives the font changing underneath.
+    """
     window = make_window()
     go_compact(window)
     load(window, FITTED)
     finish_fit(window)
-    assert window.width() == expected_width(window, widest_sung(window, FITTED))
-    assert w._MIN_WIDTH < window.width() < 460
+    widest = widest_sung(window, FITTED)
+
+    # It is the width the pure arithmetic asks for, given what was measured.
+    assert window.width() == expected_width(window, widest)
+
+    # Neither bound is what decided it, so the fit below is the real answer
+    # rather than a clamp. Checked first, because the tightness only means
+    # anything when nothing else got in the way.
+    assert w._MIN_WIDTH < window.width() < screen_cap(window)
+
+    # The widest line fits, and by less than a pixel: as small as the strip
+    # can be while still showing the whole of it.
+    assert 0 <= room_for_text(window) - widest < 1
+
+    # Which is the same thing said where the user would see it: nothing on
+    # screen is elided.
+    assert window._current.text() == window._full_text[window._current]
+    assert "…" not in window._current.text()
+
+
+def test_a_song_too_wide_for_the_screen_is_capped_and_elides(make_window):
+    """The other side of it. Past the cap the line does not fit and says so,
+    and the window stops at the cap rather than growing past the screen."""
+    window = make_window()
+    go_compact(window)
+    load(window, OUTLIER)
+    finish_fit(window)
+
+    assert window.width() == screen_cap(window)
+    assert room_for_text(window) < widest_sung(window, OUTLIER)
+    window._on_position_update(snapshot(position=6.0))
+    APP.processEvents()
+    assert window._current.text().endswith("…")
+
+
+def test_the_fit_is_right_whatever_the_font_is(make_window):
+    """The guard the stale bound should have been.
+
+    A fitted width is a font measurement plus two gutters, so any test that
+    names a pixel is really naming a font. Measured across the families this
+    machine has, the fixture's longest line runs from 237pt (Times New
+    Roman) to 351pt (Menlo) — a 48% spread that straddles the 316pt where a
+    strip stops fitting inside 460, which is exactly how a green suite on
+    one platform became a red one on another.
+
+    So the property is asserted against whatever the font turns out to be,
+    over several real families rather than the one the platform happens to
+    default to. Nothing here is skipped when a platform is short of fonts:
+    one family is still a family.
+    """
+    from PySide6.QtGui import QFontDatabase
+
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+    finish_fit(window)
+
+    # Real families, taken from the platform rather than named: a hard-coded
+    # family list would be the same portability bug one level up. The
+    # leading-dot names are the system's own internal faces and are skipped
+    # over as candidates, not skipped as tests.
+    available = [f for f in QFontDatabase.families() if not f.startswith(".")]
+    original = window._family_stack
+    seen = {}
+    try:
+        for family in [original, *available]:
+            stack = family if family is original else f'"{family}"'
+            window._family_stack = stack
+            window._restyle()
+            widest = widest_sung(window, FITTED)
+            window._fit_width(animate=False)
+            finish_fit(window)
+            assert 0 <= room_for_text(window) - widest < 1, family
+            assert w._MIN_WIDTH <= window.width() <= screen_cap(window), family
+            seen[round(widest)] = window.width()
+            if len(seen) >= 4:
+                break
+    finally:
+        window._family_stack = original
+        window._restyle()
+
+    # And the families really did disagree, or the loop above proved
+    # nothing: a test that only ever saw one measurement is the old one.
+    assert len(seen) > 1, f"only one text width seen across {len(available)} families"
+
+
+def test_the_fitted_width_follows_the_chosen_type_size(make_window):
+    """The same song at a larger size needs a wider window, and the room it
+    leaves for the line still matches what that line now measures. Stated as
+    a relation between the sizes rather than as five numbers, because the
+    numbers are the font's and the relation is the app's."""
+    window = make_window()
+    go_compact(window)
+    load(window, FITTED)
+
+    widths = []
+    for size in w.COMPACT_TEXT_SIZES:
+        window._set_compact_text_size(size)
+        finish_fit(window)
+        APP.processEvents()
+        assert 0 <= room_for_text(window) - widest_sung(window, FITTED) < 1
+        widths.append(window.width())
+
+    assert widths == sorted(widths)
+    assert widths[-1] > widths[0]
 
 
 def test_the_strip_does_not_resize_on_a_line_change(make_window):
@@ -5153,25 +5304,31 @@ def test_one_outlier_line_cannot_widen_the_whole_song(make_window):
     go_compact(window)
     load(window, OUTLIER)
     finish_fit(window)
-    screen = window.screen() or APP.primaryScreen()
-    assert window.width() == w.width_cap(screen.geometry().width())
+    # From the AVAILABLE width, which is what the window fits against.
+    assert window.width() == screen_cap(window)
 
 
-def test_the_type_scale_is_held_while_the_song_chooses_the_width(make_window):
-    """Otherwise there is no width to find: the type grows exactly as fast
-    as the window, so a line that does not fit at one width does not fit at
-    any. The width the user picked stops being a width and becomes a type
-    size."""
+def test_the_song_takes_the_width_and_leaves_the_type_alone(make_window):
+    """The song chooses the width; the type size is the user's and does not
+    move with it. Without that there would be no width to find at all — the
+    type would grow exactly as fast as the window, so a line that does not
+    fit at one width would not fit at any.
+
+    "The song moved it" is said as "the width is the fitted one", not as
+    "the width is no longer 460": whether the fit happens to land on the
+    width it started from is a fact about the font, and on some platform it
+    will.
+    """
     window = make_window()
     go_compact(window)
-    assert window._compact_width == 460
+    users_width = window._compact_width
     scale = window._scale
 
     load(window, FITTED)
     finish_fit(window)
-    assert window.width() != 460
+    assert window.width() == expected_width(window, widest_sung(window, FITTED))
     assert window._scale == scale
-    assert window._compact_width == 460  # the user's own width, untouched
+    assert window._compact_width == users_width  # the user's own, untouched
 
 
 def test_the_strips_height_does_not_move_when_its_width_does(make_window):
@@ -5207,7 +5364,10 @@ def test_the_fitted_width_never_becomes_the_full_layouts(make_window):
     go_compact(window)
     load(window, FITTED)
     finish_fit(window)
-    assert window.width() != 500
+    # The song's width, whatever it works out to be in this font. Asserting
+    # it is "not 500" would be asserting that the font does not happen to
+    # produce 500, which is not a claim about the app.
+    assert window.width() == expected_width(window, widest_sung(window, FITTED))
 
     window._set_compact(False)
     APP.processEvents()
@@ -5699,7 +5859,7 @@ def test_the_rounded_path_is_what_drawroundedrect_always_drew(make_window):
             else:
                 painter.drawRoundedRect(rect, radius, radius)
             painter.end()
-            return image.constBits().tobytes()
+            return pixels_of(image)
 
         assert render(True) == render(False), f"the outline moved at {ratio}x"
 
@@ -5715,10 +5875,9 @@ def test_a_docked_band_is_still_drawn_straight_and_is_the_same_pixels(make_windo
         fast = panel_pixels(window, damaged, True, 2.0)
         slow = panel_pixels(window, damaged, False, 2.0)
         device = QRect(0, int(top * 2), int(window.width() * 2), 16)
-        assert (
-            fast.copy(device).constBits().tobytes()
-            == slow.copy(device).constBits().tobytes()
-        ), f"the docked band at y={top} differs"
+        assert pixels_of(fast, device) == pixels_of(slow, device), (
+            f"the docked band at y={top} differs"
+        )
 
 
 def test_the_material_is_told_the_same_two_corners(make_window):
