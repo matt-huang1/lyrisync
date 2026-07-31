@@ -73,8 +73,10 @@ opinion about — window opacity, which layers are on, show on all desktops.
 Two things that describe the same fact will eventually describe it
 differently.
 
-- The menu bar menu and the window's right-click menu are literally the
-  same `QMenu` object.
+- The menu bar menu and the window's right-click menu are one model drawn
+  once as one native `NSMenu`. They were one `QMenu` object for a long
+  time, which was one source of truth for the entries and two for how they
+  looked.
 - The hotkey drives the same setter the menu entry does, so the tick
   matches the window whichever was used.
 - `typography.py` owns the type scale and `geometry.py` imports it, so the

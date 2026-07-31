@@ -40,14 +40,11 @@ from PySide6.QtCore import (
 )
 from PySide6.QtCore import Property  # noqa: E402  (grouped separately: it is a class helper)
 from PySide6.QtGui import (
-    QAction,
-    QActionGroup,
     QColor,
     QCursor,
     QFont,
     QFontDatabase,
     QFontMetricsF,
-    QIcon,
     QPainter,
     QPainterPath,
     QPen,
@@ -57,15 +54,11 @@ from PySide6.QtWidgets import (
     QFrame,
     QGraphicsEffect,
     QGraphicsOpacityEffect,
-    QHBoxLayout,
     QLabel,
-    QMenu,
     QPushButton,
     QScrollArea,
-    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
-    QWidgetAction,
 )
 
 from sottovoce import accessibility
@@ -93,12 +86,14 @@ from sottovoce.geometry import (
     button_margin,
     button_side,
     clamped_position,
+    cocoa_point_from_qt,
     compact_text_gutter,
     control_gap,
     docked_position,
     fitted_window_width,
     is_docked,
     min_window_height,
+    qt_rect_from_cocoa,
     resized_position,
     scale_for as _scale_for,
     width_cap,
@@ -122,6 +117,7 @@ from sottovoce.macspaces import (
 )
 from sottovoce import login_item
 from sottovoce import menubar
+from sottovoce import nsmenu
 from sottovoce import settings as preferences
 from sottovoce.menu import (
     ALBUM_COLOUR,
@@ -132,14 +128,14 @@ from sottovoce.menu import (
     ECHO,
     FIT_TO_SONG,
     FORGET_POSITIONS,
+    Menu,
     OPEN_AT_LOGIN,
     POSITION_LIST,
     POSITION_STATUS,
     QUIT,
     REMEMBER_POSITION,
     ROMANISATION,
-    SEPARATOR_AFTER_SHOW,
-    SEPARATOR_BEFORE_QUIT,
+    Row,
     SHOW_LYRICS,
     SPEECH_RATE,
     SPOKEN,
@@ -381,14 +377,6 @@ _HOVER_POLL_MS = 100
 # the screen's own scale, so a Retina menu gets a 32-pixel icon rather than
 # a 16-pixel one stretched.
 _MENU_ICON_POINTS = 16
-
-# The remembered-apps rows are widgets rather than menu items (see
-# _readout_row), so their padding is ours to get right. Chosen to sit the
-# icon and text where a native menu item with an icon puts them, so the
-# readout lines up with the entries above it.
-_READOUT_INDENT = 20
-_READOUT_TRAIL = 14
-_READOUT_GAP = 6
 
 # How long shutdown waits for the monitor thread and then for the worker
 # pool. Long enough for a tick to finish the round trip it is waiting on
@@ -962,7 +950,7 @@ class LyricsWindow(QWidget):
         # Which glyph the menu bar item is showing, so it is only ever set
         # when it changes: the refresh runs on every monitor tick.
         self._tray_state = None  # a menubar.IconSpec once the tray exists
-        self._tray_icons: dict = {}  # spec -> QIcon, drawn once each
+        self._tray_pngs: dict = {}  # spec -> PNG bytes, drawn once each
         # The optional arrangement stepping, and how many line changes have
         # gone by. Counted whether or not the layer is on, so switching it on
         # mid-song picks up where the song is.
@@ -3481,77 +3469,35 @@ class LyricsWindow(QWidget):
         for this one", which is not a thing anybody wants for one app while
         wanting it for the others. Forget-all stays, because "stop doing
         this" is a real wish and that is where it belongs.
+
+        What a row IS is nsmenu.py's business: it is an NSMenuItem carrying
+        a view, because a disabled item is drawn grey and four grey rows
+        read as four things that are unavailable rather than as four facts.
+        This end hands over a label and some icon bytes and knows nothing
+        about either.
         """
-        self._positions_menu.clear()
         listed = self._positions.listed()
-        for bundle_id, name in listed:
-            self._positions_menu.addAction(
-                self._readout_row(display_label(bundle_id, name), bundle_id)
-            )
+        self._menu.set_rows(
+            POSITION_LIST,
+            tuple(
+                Row(display_label(bundle_id, name), self._app_icon(bundle_id))
+                for bundle_id, name in listed
+            ),
+        )
         logger.debug("remembered-apps menu rebuilt with %d entries", len(listed))
 
-    def _readout_row(self, text: str, bundle_id: Optional[str]) -> QWidgetAction:
-        """One remembered app, at full brightness and not a control.
-
-        A disabled QAction was the obvious way to say "not clickable" and it
-        said the wrong thing: macOS greys disabled items, so a list of four
-        apps read as four things that were unavailable rather than as four
-        facts. This is a QWidgetAction carrying a label, which macOS draws at
-        the ordinary text colour.
-
-        Measured rather than assumed, because "renders at full contrast" and
-        "does not pretend to be clickable" are two claims and a QWidgetAction
-        had to satisfy both. In a real menu, on both routes this menu takes
-        (the window's right-click popup and the menu bar item):
-
-        - a disabled QAction draws grey; this draws the same black an enabled
-          one does
-        - hovering it does NOT select it — ``activeAction()`` stays None,
-          because the widget takes the mouse itself — so it never lights up
-        - even forced active it draws no highlight, and clicking it leaves the
-          menu open
-
-        Marking the widget ``WA_TransparentForMouseEvents`` was tried and is
-        WRONG, which is worth recording because it is the instinct: with the
-        mouse passing through, the menu selects the row on hover and it starts
-        behaving like a control. Swallowing the mouse is what makes it inert.
-        """
-        holder = QWidget()
-        row = QHBoxLayout(holder)
-        # Matches the indent a native menu item with an icon sits at, so the
-        # rows line up with the entries above them rather than announcing
-        # that they are made of something else.
-        row.setContentsMargins(_READOUT_INDENT, 2, _READOUT_TRAIL, 2)
-        row.setSpacing(_READOUT_GAP)
-        icon = self._app_icon(bundle_id)
-        if icon is not None:
-            glyph = QLabel()
-            glyph.setPixmap(icon.pixmap(_MENU_ICON_POINTS, _MENU_ICON_POINTS))
-            row.addWidget(glyph)
-        else:
-            row.addSpacing(_MENU_ICON_POINTS)
-        row.addWidget(QLabel(text))
-        row.addStretch(1)
-        entry = QWidgetAction(self._positions_menu)
-        entry.setDefaultWidget(holder)
-        # Nothing is connected to it. A click emits triggered and lands
-        # nowhere, which is the same outcome as the disabled row had and
-        # without the grey.
-        return entry
-
-    def _app_icon(self, bundle_id: Optional[str]):
-        """The app's icon as a QIcon, or None where there is not one.
+    def _app_icon(self, bundle_id: Optional[str]) -> Optional[bytes]:
+        """The app's icon as TIFF bytes, or None where there is not one.
 
         Two calls deep into AppKit, so it is never asked for on a path that
         runs often: the submenu asks on opening, and the readout asks only
-        when the app in front changes.
+        when the app in front changes. Bytes rather than an image, because
+        nothing pyobjc-shaped crosses out of frontmost.py and nothing
+        Qt-shaped goes into the menu.
         """
         if not bundle_id:
             return None
-        data = frontmost.app_icon_tiff(bundle_id, _MENU_ICON_POINTS)
-        if not data:
-            return None
-        return symbols.icon_from_tiff(data, _MENU_ICON_POINTS)
+        return frontmost.app_icon_tiff(bundle_id, _MENU_ICON_POINTS) or None
 
     def _on_app_activated(self, identity) -> None:
         """An app came to the front. Runs on the main thread — NSWorkspace
@@ -3886,173 +3832,73 @@ class LyricsWindow(QWidget):
     def _build_menu(self) -> None:
         """Build the one settings menu, once.
 
-        The same QMenu backs the menu bar item and the window's right-click
-        menu, so the two cannot drift apart. Its structure never changes
-        afterwards — ``_refresh_menu`` only flips visibility, check marks
-        and the sync label — which keeps the native menu bar item from
-        being rebuilt underneath the user.
+        One MODEL, drawn once as a native NSMenu that both the menu bar
+        item and the window's right-click use. Until milestone 21 this was
+        one QMenu, which was one object and two appearances: Qt converts a
+        tray menu into a real NSMenu and draws a popup itself, so the same
+        entries looked like two different menus depending on which way you
+        opened them. The model is in menu.py, the drawing is in nsmenu.py,
+        and this is the wiring between them and the app.
 
-        Checkable entries connect to ``triggered``, not ``toggled``: a
-        refresh calls setChecked() on all of them, and toggled would feed
-        that straight back into the setters.
+        Its structure never changes afterwards — ``_refresh_menu`` only
+        flips visibility, check marks, chosen presets and two labels —
+        which keeps the native menu bar item from being rebuilt underneath
+        the user.
+
+        Nothing here checks or unchecks an entry, and that rule survived
+        the move: the handler changes the app's state and the refresh that
+        follows says what the state now is. It is why the QMenu entries
+        were connected to ``triggered`` rather than ``toggled``, and why
+        ``Menu.trigger`` calls the handler with the state the entry is
+        moving to rather than trusting a tick that moved itself.
         """
-        self._menu = QMenu(self)
-        actions = {}
-
-        show = self._menu.addAction("Show lyrics")
-        show.setCheckable(True)
-        show.triggered.connect(self._set_lyrics_visible)
-        actions[SHOW_LYRICS] = show
-
-        actions[SEPARATOR_AFTER_SHOW] = self._menu.addSeparator()
-
-        romanisation = self._menu.addAction("Romanisation")
-        romanisation.setCheckable(True)
-        romanisation.triggered.connect(self._set_romanisation)
-        actions[ROMANISATION] = romanisation
-
-        spoken = self._menu.addAction("Spoken reference")
-        spoken.setCheckable(True)
-        spoken.triggered.connect(self._set_spoken_reference)
-        actions[SPOKEN] = spoken
-
-        rate_menu = self._menu.addMenu("Speech rate")
-        rate_group = QActionGroup(rate_menu)
-        rate_group.setExclusive(True)
-        self._rate_actions = {}
-        for wpm in SPEECH_RATE_PRESETS:
-            preset = rate_menu.addAction(f"{wpm} wpm")
-            preset.setCheckable(True)
-            rate_group.addAction(preset)
-            preset.triggered.connect(
-                lambda checked=False, rate=wpm: self._set_speech_rate(rate)
-            )
-            self._rate_actions[wpm] = preset
-        actions[SPEECH_RATE] = rate_menu.menuAction()
-
-        echo = self._menu.addAction("Echo practice")
-        echo.setCheckable(True)
-        echo.triggered.connect(self._set_echo_practice)
-        actions[ECHO] = echo
-
-        compact = self._menu.addAction("Compact")
-        compact.setCheckable(True)
-        compact.triggered.connect(self._set_compact)
-        actions[COMPACT] = compact
-
-        # Shown only inside the compact layout, like the entry below it and
-        # for the same reason: in the full layout the type size IS the
-        # width, so there would be nothing for this to say.
-        size_menu = self._menu.addMenu("Compact text size")
-        size_group = QActionGroup(size_menu)
-        size_group.setExclusive(True)
-        self._compact_size_actions = {}
-        for size_px in COMPACT_TEXT_SIZES:
-            preset = size_menu.addAction(f"{size_px} pt")
-            preset.setCheckable(True)
-            size_group.addAction(preset)
-            preset.triggered.connect(
-                lambda checked=False, size=size_px: self._set_compact_text_size(size)
-            )
-            self._compact_size_actions[size_px] = preset
-        actions[COMPACT_SIZE] = size_menu.menuAction()
-
-        # Shown only inside the compact layout, which is the only place it
-        # means anything, and the one entry here whose own default is on.
-        fit_to_song = self._menu.addAction("Fit the width to the song")
-        fit_to_song.setCheckable(True)
-        fit_to_song.triggered.connect(self._set_fit_to_song)
-        actions[FIT_TO_SONG] = fit_to_song
-
-        album_colour = self._menu.addAction("Album colour")
-        album_colour.setCheckable(True)
-        album_colour.triggered.connect(self._set_album_colour)
-        actions[ALBUM_COLOUR] = album_colour
-
-        all_desktops = self._menu.addAction("Show on all desktops")
-        all_desktops.setCheckable(True)
-        all_desktops.triggered.connect(self._set_all_desktops)
-        actions[ALL_DESKTOPS] = all_desktops
-
-        menubar_animation = self._menu.addAction("Animate the menu bar icon")
-        menubar_animation.setCheckable(True)
-        menubar_animation.triggered.connect(self._set_menubar_animation)
-        actions[MENUBAR_ANIMATION] = menubar_animation
-
-        yield_notifications = self._menu.addAction("Yield to notifications")
-        yield_notifications.setCheckable(True)
-        yield_notifications.triggered.connect(self._set_yield_to_notifications)
-        actions[YIELD_NOTIFICATIONS] = yield_notifications
-
-        # A command rather than a switch, and not checkable for that
-        # reason: it puts the window somewhere once. Nothing holds it
-        # there afterwards, so there is no state for a tick to describe.
-        dock_top = self._menu.addAction("Dock to top")
-        dock_top.triggered.connect(self._dock_to_top)
-        actions[DOCK_TOP] = dock_top
-
-        remember_position = self._menu.addAction("Remember position per app")
-        remember_position.setCheckable(True)
-        remember_position.triggered.connect(self._set_remember_position)
-        actions[REMEMBER_POSITION] = remember_position
-
-        # What the layer knows, in words, because nothing else in the app
-        # says it: learning is implicit, so without this the only evidence
-        # the feature works is the window happening to move. Disabled
-        # because it is a readout and not a control — there is nothing to
-        # click, and a clickable line would imply there were. Its text is
-        # set in _refresh_menu, which runs on every opening, so it is
-        # current whenever it can be seen.
-        position_status = self._menu.addAction("")
-        position_status.setEnabled(False)
-        # NoRole rather than Qt's default TextHeuristicRole, and not
-        # defensively: this is the one entry whose text the app does not
-        # write. It contains whatever bundle identifier is in front, and the
-        # heuristic that moves "Preferences…" into the application menu
-        # matches on substrings — com.apple.systempreferences would trip it.
-        # An entry that relocates itself depending on which app you switched
-        # to would be a diagnostic that vanishes exactly when read.
-        position_status.setMenuRole(QAction.MenuRole.NoRole)
-        actions[POSITION_STATUS] = position_status
-
-        # The one menu whose CONTENTS are rebuilt rather than only
-        # relabelled. Everything else here is a fixed set of entries whose
-        # visibility changes, because rebuilding the menu bar item's own
-        # structure makes it flicker — but a list of what has been learned
-        # cannot be a fixed set, and this one is assembled only while the
-        # user is looking at this submenu, never while the menu bar item is
-        # idle. Its own aboutToShow, so opening the parent menu costs
-        # nothing.
-        self._positions_menu = self._menu.addMenu("Remembered apps")
-        self._positions_menu.aboutToShow.connect(self._rebuild_positions_menu)
-        actions[POSITION_LIST] = self._positions_menu.menuAction()
-
-        # Appears only once something has been learned (see menu.py).
-        forget_positions = self._menu.addAction("Forget remembered positions")
-        forget_positions.triggered.connect(self._forget_positions)
-        actions[FORGET_POSITIONS] = forget_positions
-
-        # Label swaps to name the approval case in _refresh_menu.
-        open_at_login = self._menu.addAction(login_item.MENU_LABEL)
-        open_at_login.setCheckable(True)
-        open_at_login.triggered.connect(self._set_open_at_login)
-        actions[OPEN_AT_LOGIN] = open_at_login
-
-        # Label swaps between "Sync" and "Re-sync" in _refresh_menu.
-        sync = self._menu.addAction("Sync this song")
-        sync.triggered.connect(self._begin_sync)
-        actions[SYNC] = sync
-
-        actions[SEPARATOR_BEFORE_QUIT] = self._menu.addSeparator()
+        self._menu = Menu()
+        self._menu.on(SHOW_LYRICS, self._set_lyrics_visible)
+        self._menu.on(ROMANISATION, self._set_romanisation)
+        self._menu.on(SPOKEN, self._set_spoken_reference)
+        self._menu.on(SPEECH_RATE, self._set_speech_rate)
+        self._menu.on(ECHO, self._set_echo_practice)
+        self._menu.on(COMPACT, self._set_compact)
+        self._menu.on(COMPACT_SIZE, self._set_compact_text_size)
+        self._menu.on(FIT_TO_SONG, self._set_fit_to_song)
+        self._menu.on(ALBUM_COLOUR, self._set_album_colour)
+        self._menu.on(ALL_DESKTOPS, self._set_all_desktops)
+        self._menu.on(MENUBAR_ANIMATION, self._set_menubar_animation)
+        self._menu.on(YIELD_NOTIFICATIONS, self._set_yield_to_notifications)
+        # A command rather than a switch: it puts the window somewhere
+        # once. Nothing holds it there afterwards, so there is no state for
+        # a tick to describe.
+        self._menu.on(DOCK_TOP, self._dock_to_top)
+        self._menu.on(REMEMBER_POSITION, self._set_remember_position)
+        self._menu.on(FORGET_POSITIONS, self._forget_positions)
+        self._menu.on(OPEN_AT_LOGIN, self._set_open_at_login)
+        self._menu.on(SYNC, self._begin_sync)
         # Straight to the app's quit, so the existing aboutToQuit shutdown
         # (settings saved, monitor joined) runs however quit is reached.
-        actions[QUIT] = self._menu.addAction("Quit", QApplication.instance().quit)
+        self._menu.on(QUIT, QApplication.instance().quit)
 
-        self._menu_actions = actions
-        # Order matters: re-read the system's answer first, so the refresh
+        # The two things a refresh on a timer cannot do honestly. Order
+        # matters in the first: re-read the system's answer, so the refresh
         # that follows is drawing the state the system is actually in.
-        self._menu.aboutToShow.connect(self._reread_login_item)
-        self._menu.aboutToShow.connect(self._refresh_menu)
+        self._menu.on_open(None, self._on_menu_opening)
+        # And the one submenu whose CONTENTS are rebuilt rather than only
+        # relabelled. Everything else is a fixed set of entries whose
+        # visibility changes, because rebuilding a menu the status item
+        # owns makes it flicker — but a list of what has been learned
+        # cannot be a fixed set, and this one is assembled only while the
+        # user is looking at it, never while the menu bar item is idle.
+        self._menu.on_open(POSITION_LIST, self._rebuild_positions_menu)
+
+        view = nsmenu.NativeMenu(self._menu)
+        if view.build():
+            self._menu.attach(view)
+        else:
+            logger.info("no native menu: AppKit unavailable")
+
+    def _on_menu_opening(self) -> None:
+        """Somebody is about to read the menu."""
+        self._reread_login_item()
+        self._refresh_menu()
 
     def _refresh_position_readout(self) -> None:
         """The line that says what the layer knows, and the icon beside it.
@@ -4069,28 +3915,28 @@ class LyricsWindow(QWidget):
         because this runs on every render and drawing one is two calls into
         AppKit.
         """
-        action = self._menu_actions[POSITION_STATUS]
         name = self._frontmost_name or self._positions.name_for(self._frontmost)
-        action.setText(
+        self._menu.set_label(
+            POSITION_STATUS,
             status_summary(
                 count=len(self._positions),
                 frontmost=self._frontmost,
                 frontmost_name=name,
                 placed=self._positions.peek(self._frontmost) is not None,
-            )
+            ),
         )
         if self._frontmost != self._readout_icon_for:
             self._readout_icon_for = self._frontmost
-            action.setIcon(self._app_icon(self._frontmost) or QIcon())
+            self._menu.set_icon(POSITION_STATUS, self._app_icon(self._frontmost))
 
     def _refresh_menu(self) -> None:
         """Bring the shared menu in line with the current state. Cheap
         enough to run on every render, so the menu bar item is already
-        correct before it is opened rather than only on aboutToShow."""
+        correct before it is opened rather than only on opening."""
         sync_label = self._view_model.sync_menu_entry(
             self._provider.has_user_sync(self._view_model.track_id)
         )
-        visible = set(
+        self._menu.show_only(
             visible_entries(
                 has_korean_lyrics=self._view_model.has_korean_lyrics,
                 speech_available=self._speech_available,
@@ -4104,71 +3950,70 @@ class LyricsWindow(QWidget):
                 compact=self._compact_applied,
             )
         )
-        for key, action in self._menu_actions.items():
-            action.setVisible(key in visible)
         if sync_label is not None:
-            self._menu_actions[SYNC].setText(sync_label)
+            self._menu.set_label(SYNC, sync_label)
         self._refresh_position_readout()
-        self._menu_actions[SHOW_LYRICS].setChecked(self._lyrics_visible)
-        self._menu_actions[ROMANISATION].setChecked(
-            self._view_model.romanisation_enabled
-        )
-        self._menu_actions[SPOKEN].setChecked(self._spoken_enabled)
-        self._menu_actions[ECHO].setChecked(self._echo_enabled)
+        self._menu.set_checked(SHOW_LYRICS, self._lyrics_visible)
+        self._menu.set_checked(ROMANISATION, self._view_model.romanisation_enabled)
+        self._menu.set_checked(SPOKEN, self._spoken_enabled)
+        self._menu.set_checked(ECHO, self._echo_enabled)
         # What the user asked for, not what a sync pass is borrowing: the
         # tick describes the setting, and the pass gives the layout back.
-        self._menu_actions[COMPACT].setChecked(self._compact)
-        self._menu_actions[FIT_TO_SONG].setChecked(self._fit_to_song)
-        self._menu_actions[ALBUM_COLOUR].setChecked(self._album_colour)
-        self._menu_actions[ALL_DESKTOPS].setChecked(self._all_desktops)
-        self._menu_actions[MENUBAR_ANIMATION].setChecked(self._menubar_animation)
-        self._menu_actions[YIELD_NOTIFICATIONS].setChecked(
-            self._yield_to_notifications
-        )
-        self._menu_actions[REMEMBER_POSITION].setChecked(self._remember_position)
+        self._menu.set_checked(COMPACT, self._compact)
+        self._menu.set_checked(FIT_TO_SONG, self._fit_to_song)
+        self._menu.set_checked(ALBUM_COLOUR, self._album_colour)
+        self._menu.set_checked(ALL_DESKTOPS, self._all_desktops)
+        self._menu.set_checked(MENUBAR_ANIMATION, self._menubar_animation)
+        self._menu.set_checked(YIELD_NOTIFICATIONS, self._yield_to_notifications)
+        self._menu.set_checked(REMEMBER_POSITION, self._remember_position)
         # The system's answer, not ours: the tick follows what macOS says,
         # so flipping it in System Settings shows up here rather than the
         # two quietly disagreeing.
-        login_action = self._menu_actions[OPEN_AT_LOGIN]
-        login_action.setChecked(login_item.is_enabled(self._login_status))
-        login_action.setText(login_item.label_for(self._login_status))
-        for wpm, action in self._rate_actions.items():
-            action.setChecked(wpm == self._speech_rate)
-        for size_px, action in self._compact_size_actions.items():
-            action.setChecked(size_px == self._compact_text_size)
+        self._menu.set_checked(
+            OPEN_AT_LOGIN, login_item.is_enabled(self._login_status)
+        )
+        self._menu.set_label(OPEN_AT_LOGIN, login_item.label_for(self._login_status))
+        self._menu.set_chosen(SPEECH_RATE, self._speech_rate)
+        self._menu.set_chosen(COMPACT_SIZE, self._compact_text_size)
+        self._menu.sync()
         self._refresh_tray_icon()
 
     def _build_tray(self) -> None:
-        """The menu bar item. Its glyph is drawn rather than loaded, and it
-        is a template image, so macOS tints it for light and dark menu bars
-        instead of us shipping two of each."""
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            logger.info("no system tray: menu bar item unavailable")
+        """The menu bar item. Ours rather than Qt's, and that is what buys
+        the native menu: Qt owns the NSStatusItem it makes, so the item
+        that carries one NSMenu has to be an item this app made.
+
+        Its glyph is drawn rather than loaded, and it is a template image,
+        so macOS tints it for light and dark menu bars instead of us
+        shipping two of each.
+        """
+        self._tray = nsmenu.StatusItem()
+        if not self._tray.create("SottoVoce"):
+            logger.info("no menu bar: the item is unavailable")
             self._tray = None
             return
-        self._tray_icons = {}
-        spec = self._tray_spec_now()
-        self._tray = QSystemTrayIcon(self._tray_icon_for(spec), self)
-        self._tray_state = spec
-        self._tray.setToolTip("SottoVoce")
-        self._tray.setContextMenu(self._menu)
-        self._tray.show()
+        self._tray_state = self._tray_spec_now()
+        self._tray.set_image(
+            self._tray_png_for(self._tray_state), menubar.GLYPH_UNITS
+        )
+        if self._menu.view is not None:
+            self._tray.set_menu(self._menu.view)
 
-    def _tray_icon_for(self, spec) -> QIcon:
+    def _tray_png_for(self, spec) -> bytes:
         """One drawing per combination, kept.
 
         Brightness, shape and dot compose into eight states, and the optional
         animation multiplies the shape by four — so drawing on demand and
         caching by spec is what keeps a line change to a dictionary lookup
-        after the first time it is seen. Each icon is painted once for the
+        after the first time it is seen. Each glyph is painted once for the
         life of the process.
         """
-        icon = self._tray_icons.get(spec)
-        if icon is None:
-            icon = symbols.menubar_icon(spec)
-            self._tray_icons[spec] = icon
+        png = self._tray_pngs.get(spec)
+        if png is None:
+            png = symbols.menubar_png(spec, menubar.GLYPH_UNITS)
+            self._tray_pngs[spec] = png
             logger.debug("menu bar glyph drawn: %r", spec)
-        return icon
+        return png
 
     def _tray_spec_now(self):
         """What the item should be showing, from the app's current state."""
@@ -4208,7 +4053,7 @@ class LyricsWindow(QWidget):
         if spec == self._tray_state:
             return
         self._tray_state = spec
-        self._tray.setIcon(self._tray_icon_for(spec))
+        self._tray.set_image(self._tray_png_for(spec), menubar.GLYPH_UNITS)
         logger.debug("menu bar glyph: %r", spec)
 
     def _advance_menubar_step(self, index: int) -> None:
@@ -4265,8 +4110,22 @@ class LyricsWindow(QWidget):
             logger.info("continuing without the global hotkey")
 
     def contextMenuEvent(self, event) -> None:
-        self._refresh_menu()
-        self._menu.exec(event.globalPos())
+        """The second way into the one menu, and the reason it is native.
+
+        The point makes one trip across the coordinate line: Qt measures
+        down from the top left of the primary screen and AppKit measures up
+        from its bottom left. Modal while the menu is up, exactly as
+        ``QMenu.exec`` was, and it does not activate the app.
+        """
+        self._on_menu_opening()
+        primary = QApplication.primaryScreen()
+        if primary is None:
+            return
+        point = event.globalPos()
+        x, y = cocoa_point_from_qt(
+            point.x(), point.y(), primary.geometry().height()
+        )
+        self._menu.popup(x, y)
 
     # -- settings -----------------------------------------------------------
 
@@ -4308,20 +4167,24 @@ class LyricsWindow(QWidget):
     def _menubar_item_rect(self) -> Optional[tuple]:
         """Where the menu bar item is, or None.
 
-        Qt's answer, and it is the status item's own window: measured
-        against ``NSStatusBarWindow.frame()`` in the same process, the two
-        agree exactly once Cocoa's bottom-left origin is taken out
-        (1159,1073 38x38 in Cocoa is 1159,0 38x38 here). So this is the
-        button window's frame, asked for through the one object that
-        already owns the item — a pyobjc route beside it would be a second
-        source of truth for one rectangle.
+        The status item's own button window, flipped into Qt's
+        coordinates. It used to be ``QSystemTrayIcon.geometry()``, and the
+        two were measured against each other in the same process while both
+        existed: they agree exactly once Cocoa's bottom-left origin is
+        taken out (1159,1073 38x34 in Cocoa is 1159,0 38x34 here). With the
+        item now ours, this IS the one source of truth for the rectangle
+        rather than a second one beside Qt's.
         """
-        if self._tray is None or not self._tray.isVisible():
+        if self._tray is None:
             return None
-        geometry = self._tray.geometry()
-        if geometry.isNull() or geometry.isEmpty():
+        frame = self._tray.frame()
+        primary = QApplication.primaryScreen()
+        if frame is None or primary is None:
             return None
-        return (geometry.x(), geometry.y(), geometry.width(), geometry.height())
+        rect = qt_rect_from_cocoa(frame, primary.geometry().height())
+        if rect[2] <= 0 or rect[3] <= 0:
+            return None
+        return rect
 
     def _flight_destination(self) -> Optional[tuple]:
         """The rectangle to fly to, or None for a plain fade in place.
@@ -5383,6 +5246,14 @@ class LyricsWindow(QWidget):
         # matters is that nothing outside can still reach in, not which of
         # ours it reaches.
         self._announcer.stop()
+        # The fourth, and the only one that is ours rather than the
+        # system's: the menu bar item holds a menu whose items point back
+        # at a helper that calls into this window. Qt used to own that item
+        # and destroy it with the widget; an item this app made is one this
+        # app has to give back, or it outlives the window that answers it.
+        if self._tray is not None:
+            self._tray.release()
+            self._tray = None
         self._settle_timer.stop()
         self._hover_timer.stop()
         self._stop_reveal()

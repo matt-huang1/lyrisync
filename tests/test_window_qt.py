@@ -18,6 +18,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -47,17 +48,11 @@ from PySide6.QtCore import (  # noqa: E402
     QTimer,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QAction,
     QCursor,
     QFontMetricsF,
     QMouseEvent,
 )
-from PySide6.QtWidgets import (  # noqa: E402
-    QApplication,
-    QLabel,
-    QSystemTrayIcon,
-    QWidgetAction,
-)
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 try:
     APP = QApplication.instance() or QApplication([])
@@ -158,6 +153,16 @@ def no_real_world(monkeypatch):
     # rate exists for. The conftest guard stays armed for anything that
     # reaches around it.
     monkeypatch.setattr(player_events, "_distributed_center", lambda: None)
+    # Answered rather than blocked for the fifth time, and the fifth reason
+    # is the same one: every window built here builds a menu and asks the
+    # menu bar for an item, and handing back None is the branch a machine
+    # without AppKit takes — so the real NativeMenu and StatusItem run
+    # their real code, find nothing to draw with, and the window carries on
+    # with a menu that is pure state. The conftest guard stays armed for
+    # anything that reaches around it, and it is the loudest of the lot:
+    # unblocked, a suite run leaves a glyph in the developer's menu bar per
+    # window and a modal menu tracking loop in the middle of the run.
+    monkeypatch.setattr(w.nsmenu, "_appkit", lambda: None)
 
 
 @pytest.fixture
@@ -308,62 +313,129 @@ def land(window):
 
 def visible_keys(window):
     """The menu's visible entries, in menu order, as menu.py keys."""
-    by_action = {id(a): key for key, a in window._menu_actions.items()}
-    return tuple(
-        by_action[id(action)]
-        for action in window._menu.actions()
-        if action.isVisible()
-    )
+    return tuple(key for key in m.MENU_ORDER if window._menu.is_visible(key))
 
 
 # -- one menu, two ways in ------------------------------------------------
 
 
-@pytest.fixture
-def with_tray(monkeypatch):
-    """Force the menu bar item into existence.
+class FakeStatusItem:
+    """The far side of nsmenu.StatusItem, so the menu bar item's whole life
+    can be watched without putting a glyph on the developer's menu bar.
 
-    The offscreen platform reports no system tray, so the real one would
-    never be built and the test would skip everywhere, testing nothing. A
-    QSystemTrayIcon still constructs and holds its menu here; what is being
-    checked is that _build_tray hands over the shared menu and a template
-    icon, not whether this platform can draw a menu bar.
+    A fake rather than the real thing under a stubbed door, because what
+    every test here is about is what the WINDOW does with the item: which
+    menu it hands over, when it redraws the glyph, and that it gives the
+    item back at shutdown.
     """
 
-    class AlwaysAvailable(QSystemTrayIcon):
-        @staticmethod
-        def isSystemTrayAvailable():
-            return True
+    frame_rect = (1159.0, 1073.0, 38.0, 34.0)
 
-    monkeypatch.setattr(w, "QSystemTrayIcon", AlwaysAvailable)
+    def __init__(self):
+        self.tooltip = None
+        self.images = []
+        self.menu = None
+        self.released = 0
+
+    def create(self, tooltip=""):
+        self.tooltip = tooltip
+        return True
+
+    def set_menu(self, menu):
+        self.menu = menu
+
+    def set_image(self, png, points):
+        self.images.append((png, points))
+
+    def frame(self):
+        return self.frame_rect
+
+    def release(self):
+        self.released += 1
 
 
-def test_menu_bar_and_right_click_are_literally_the_same_menu(with_tray, make_window):
+@pytest.fixture
+def with_tray(monkeypatch):
+    """Force the menu bar item into existence, as a fake.
+
+    Nothing native can be built here: the door is answered with None for
+    every window in this file, and the conftest guard would fail any test
+    that reached around it. So the item the window builds is this one, and
+    what is being checked is the window's half of the arrangement.
+    """
+    items = []
+
+    def make_item():
+        item = FakeStatusItem()
+        items.append(item)
+        return item
+
+    monkeypatch.setattr(w.nsmenu, "StatusItem", make_item)
+    return items
+
+
+def right_click_at(window, x=10, y=10):
+    """A context-menu event, as Qt would deliver one. Only the global
+    position is read, which is the point that crosses into Cocoa."""
+
+    class Event:
+        def globalPos(self):
+            return QPoint(x, y)
+
+    return Event()
+
+
+class FakeMenuView:
+    """The far side of nsmenu.NativeMenu: what a drawn menu would be told."""
+
+    def __init__(self):
+        self.applied = 0
+        self.rows = {}
+        self.popups = []
+
+    def apply(self, menu):
+        self.applied += 1
+
+    def set_rows(self, key, rows):
+        self.rows[key] = rows
+
+    def popup(self, x, y):
+        self.popups.append((x, y))
+        return True
+
+
+def test_the_menu_bar_item_and_the_right_click_share_one_menu(with_tray, make_window):
+    """The whole point of the milestone: one model, one drawing of it, two
+    ways in. The item is handed the same view object the window pops up."""
     window = make_window()
-    assert window._tray is not None
-    assert window._tray.contextMenu() is window._menu
+    view = FakeMenuView()
+    window._menu.attach(view)
+    window._tray.set_menu(window._menu.view)
+
+    assert window._tray.menu is view
+    window.contextMenuEvent(right_click_at(window))
+    assert view.popups, "the right-click did not open the shared menu"
 
 
-def test_the_menu_bar_icon_is_a_template_image(with_tray, make_window):
-    """A mask icon is what macOS tints for light and dark menu bars; ship a
-    coloured one and it stays black on a dark menu bar."""
+def test_the_menu_bar_item_is_given_the_menu_and_a_glyph(with_tray, make_window):
     window = make_window()
-    icon = window._tray.icon()
-    assert not icon.isNull()
-    assert icon.isMask() is True
+    assert window._tray.tooltip == "SottoVoce"
+    assert window._tray.images, "no glyph was ever drawn"
+    png, points = window._tray.images[0]
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert points == mb.GLYPH_UNITS
 
 
-def test_no_system_tray_is_survivable(monkeypatch, make_window):
+def test_no_menu_bar_is_survivable(monkeypatch, make_window):
     """Nothing else may depend on the menu bar item existing. Forced rather
     than relying on the platform, so the path is exercised wherever the
     suite runs."""
 
-    class NeverAvailable(QSystemTrayIcon):
-        @staticmethod
-        def isSystemTrayAvailable():
+    class NoMenuBar(FakeStatusItem):
+        def create(self, tooltip=""):
             return False
 
-    monkeypatch.setattr(w, "QSystemTrayIcon", NeverAvailable)
+    monkeypatch.setattr(w.nsmenu, "StatusItem", NoMenuBar)
     window = make_window()
     assert window._tray is None
     assert window._menu is not None
@@ -373,15 +445,39 @@ def test_no_system_tray_is_survivable(monkeypatch, make_window):
     assert window.isVisible() is False
 
 
-def test_the_menu_is_built_once_and_never_rebuilt(make_window):
-    """Structure is fixed; only visibility, check marks and the sync label
-    move. A rebuilt native menu bar item would flicker under the user."""
+def test_the_item_is_given_back_at_shutdown(with_tray, make_window):
+    """Qt used to own the item and destroy it with the widget. An item this
+    app made is one this app has to remove, or it outlives the window that
+    answers its menu."""
     window = make_window()
-    before = list(window._menu.actions())
+    item = window._tray
+    window._shutdown()
+    assert item.released == 1
+    assert window._tray is None
+
+
+def test_where_the_item_is_comes_back_in_qt_coordinates(with_tray, make_window):
+    """The flight aims at the item, and the flight thinks in Qt rectangles.
+    Cocoa measures up from the bottom of the primary screen; this is the one
+    place that subtraction happens."""
+    window = make_window()
+    height = APP.primaryScreen().geometry().height()
+    assert window._menubar_item_rect() == (1159, height - 1073 - 34, 38, 34)
+
+
+def test_the_menu_is_built_once_and_never_rebuilt(make_window):
+    """Structure is fixed; only visibility, check marks, chosen presets and
+    two labels move. A rebuilt native menu bar item would flicker under the
+    user while they were reading it."""
+    window = make_window()
+    view = FakeMenuView()
+    window._menu.attach(view)
     load(window, SYNCED)
     load(window, PLAIN, track_id="t2")
     window._refresh_menu()
-    assert list(window._menu.actions()) == before
+    assert window._menu.entries is m.MENU
+    assert view.applied > 1, "the state was never pushed at the drawing"
+    assert view.rows == {}, "something rebuilt a submenu without being asked"
 
 
 def test_menu_visibility_follows_the_pure_gating(make_window):
@@ -416,11 +512,15 @@ def test_bare_menu_when_every_layer_is_dormant(make_window):
         m.SEPARATOR_AFTER_SHOW,
         m.COMPACT,
         m.ALBUM_COLOUR,
-        m.ALL_DESKTOPS,
-        m.MENUBAR_ANIMATION,
-        m.YIELD_NOTIFICATIONS,
+        m.SEPARATOR_AFTER_WINDOW,
+        m.POSITION_MENU,
         m.DOCK_TOP,
+        m.SEPARATOR_AFTER_DOCK,
         m.REMEMBER_POSITION,
+        m.SYSTEM_MENU,
+        m.ALL_DESKTOPS,
+        m.YIELD_NOTIFICATIONS,
+        m.MENUBAR_ANIMATION,
         m.SEPARATOR_BEFORE_QUIT,
         m.QUIT,
     )
@@ -429,12 +529,12 @@ def test_bare_menu_when_every_layer_is_dormant(make_window):
 def test_sync_entry_label_switches_once_a_user_sync_exists(make_window):
     window = make_window()
     load(window, PLAIN)
-    assert window._menu_actions[m.SYNC].isVisible()
-    assert window._menu_actions[m.SYNC].text() == "Sync this song"
+    assert window._menu.is_visible(m.SYNC)
+    assert window._menu.label(m.SYNC) == "Sync this song"
 
     window._provider.save_user_sync("t1", "[00:01.00] first line\n")
     window._refresh_menu()
-    assert window._menu_actions[m.SYNC].text() == "Re-sync this song"
+    assert window._menu.label(m.SYNC) == "Re-sync this song"
 
 
 def test_quit_is_visible_in_every_state(make_window):
@@ -443,7 +543,7 @@ def test_quit_is_visible_in_every_state(make_window):
         if lyrics is not None:
             load(window, lyrics)
         window._refresh_menu()
-        assert window._menu_actions[m.QUIT].isVisible()
+        assert window._menu.is_visible(m.QUIT)
 
 
 # -- toggles drive the same state from the menu ---------------------------
@@ -453,15 +553,15 @@ def test_toggling_from_the_menu_updates_state_and_settings(make_window):
     window = make_window()
     load(window, KOREAN_SYNCED)
 
-    window._menu_actions[m.ROMANISATION].trigger()
+    window._menu.trigger(m.ROMANISATION)
     assert window._view_model.romanisation_enabled is True
     assert window._settings.value("lyrics/romanisation", type=bool) is True
 
-    window._menu_actions[m.ECHO].trigger()
+    window._menu.trigger(m.ECHO)
     assert window._echo_enabled is True
     assert window._loop.echo is True
 
-    window._rate_actions[160].trigger()
+    window._menu.trigger(m.SPEECH_RATE, 160)
     assert window._speech_rate == 160
     assert window._settings.value("lyrics/speech_rate", type=int) == 160
 
@@ -490,7 +590,7 @@ def test_hiding_the_lyrics_leaves_everything_else_running(make_window):
     window._on_tap()
     stamped = window._view_model.sync_session.index
 
-    window._menu_actions[m.SHOW_LYRICS].trigger()  # unchecks -> hide
+    window._menu.trigger(m.SHOW_LYRICS)  # unchecks -> hide
     land(window)
     assert window.isVisible() is False
     assert window._monitor_thread.isRunning() is True
@@ -542,7 +642,7 @@ def test_show_lyrics_is_persisted_and_restored(make_window):
     assert reopened._lyrics_visible is False
     reopened.apply_saved_visibility()
     assert reopened.isVisible() is False
-    assert reopened._menu_actions[m.SHOW_LYRICS].isChecked() is False
+    assert reopened._menu.is_checked(m.SHOW_LYRICS) is False
 
     reopened._set_lyrics_visible(True)
     reopened._settings.sync()
@@ -735,8 +835,8 @@ def test_there_is_no_appearance_setting(make_window):
     """Following the system is the whole feature. A toggle would be a
     second source of truth for something macOS already answers."""
     window = make_window()
-    assert not any("appearance" in key for key in window._menu_actions)
-    assert not any("theme" in key for key in window._menu_actions)
+    assert not any("appearance" in key for key in m.MENU_ORDER)
+    assert not any("theme" in key for key in m.MENU_ORDER)
     window._save_settings()
     keys = window._settings.allKeys()
     assert not any("appearance" in k or "theme" in k for k in keys)
@@ -1537,7 +1637,7 @@ def test_the_layer_is_off_by_default(make_window):
     not observing anything."""
     window = make_window()
     assert window._remember_position is False
-    assert window._menu_actions[m.REMEMBER_POSITION].isChecked() is False
+    assert window._menu.is_checked(m.REMEMBER_POSITION) is False
     assert not window._watcher.active
 
 
@@ -1774,7 +1874,7 @@ def test_forgetting_clears_the_map_and_the_setting(make_window):
     end_a_drag(window, 400, 300)
     assert m.FORGET_POSITIONS in visible_keys(window)
 
-    window._menu_actions[m.FORGET_POSITIONS].trigger()
+    window._menu.trigger(m.FORGET_POSITIONS)
 
     assert len(window._positions) == 0
     assert m.FORGET_POSITIONS not in visible_keys(window)
@@ -1790,7 +1890,7 @@ def test_the_layer_and_the_map_are_persisted_and_restored(make_window):
     reopened = make_window()
     assert reopened._remember_position is True
     assert reopened._positions.recall(VSCODE) == (300, 200)
-    assert reopened._menu_actions[m.REMEMBER_POSITION].isChecked() is True
+    assert reopened._menu.is_checked(m.REMEMBER_POSITION) is True
 
 
 def test_a_corrupt_stored_map_does_not_stop_the_app_starting(make_window):
@@ -1878,14 +1978,13 @@ def test_the_menu_says_what_has_been_learned_and_where_we_are(make_window):
     window = remembering(make_window)
     window._refresh_menu()  # what opening the menu does
     assert m.POSITION_STATUS in visible_keys(window)
-    status = window._menu_actions[m.POSITION_STATUS]
-    assert "No positions remembered" in status.text()
-    assert "Code not placed yet" in status.text()
+    assert "No positions remembered" in window._menu.label(m.POSITION_STATUS)
+    assert "Code not placed yet" in window._menu.label(m.POSITION_STATUS)
 
     end_a_drag(window, 300, 200)
 
-    assert "1 app remembered" in status.text()
-    assert "Code is placed" in status.text()
+    assert "1 app remembered" in window._menu.label(m.POSITION_STATUS)
+    assert "Code is placed" in window._menu.label(m.POSITION_STATUS)
 
 
 def test_the_readout_names_an_app_it_only_knows_from_the_map(make_window):
@@ -1898,7 +1997,7 @@ def test_the_readout_names_an_app_it_only_knows_from_the_map(make_window):
 
     window._refresh_menu()
 
-    assert "Safari is placed" in window._menu_actions[m.POSITION_STATUS].text()
+    assert "Safari is placed" in window._menu.label(m.POSITION_STATUS)
 
 
 def test_the_readout_falls_back_to_the_identifier_with_no_name(make_window):
@@ -1909,23 +2008,29 @@ def test_the_readout_falls_back_to_the_identifier_with_no_name(make_window):
 
     window._refresh_menu()
 
-    assert "com.unknown.app" in window._menu_actions[m.POSITION_STATUS].text()
+    assert "com.unknown.app" in window._menu.label(m.POSITION_STATUS)
 
 
 def test_the_readout_is_a_readout_and_not_a_control(make_window):
+    """It is the one entry in the model that is neither a switch nor a
+    command, and the kind is what nsmenu.py disables it from. Asserted on
+    the model rather than on a menu item, because the claim is about what
+    the entry IS."""
     window = remembering(make_window)
-    assert not window._menu_actions[m.POSITION_STATUS].isEnabled()
+    assert m.ENTRIES[m.POSITION_STATUS].kind == m.READOUT
+    assert window._menu.has_handler(m.POSITION_STATUS) is False
+    window._menu.trigger(m.POSITION_STATUS)  # lands nowhere, and does not raise
 
 
-def test_the_readout_cannot_be_relocated_by_its_own_text(make_window):
+def test_the_readout_carries_another_apps_name_and_stays_where_it_is(make_window):
     """The only entry whose text the app does not write: it carries another
     app's name — "System Settings" now that names are shown, and the
-    identifier when there is no name. Qt's default text heuristic matches
-    substrings either way, and would move this item into the application
-    menu: a diagnostic that disappears when you go to read it."""
+    identifier when there is no name. It used to need QAction.MenuRole.NoRole
+    to survive that, because Qt's text heuristic matches substrings and
+    would have moved "com.apple.systempreferences" into the application
+    menu: a diagnostic that disappears when you go to read it. A native
+    NSMenuItem has no such heuristic, so the hazard went with the QMenu."""
     window = remembering(make_window)
-    status = window._menu_actions[m.POSITION_STATUS]
-    assert status.menuRole() == QAction.MenuRole.NoRole
 
     for bundle_id, name in (
         ("com.apple.systempreferences", None),
@@ -1933,8 +2038,7 @@ def test_the_readout_cannot_be_relocated_by_its_own_text(make_window):
     ):
         window._frontmost, window._frontmost_name = bundle_id, name
         window._refresh_menu()
-        assert status.menuRole() == QAction.MenuRole.NoRole
-        assert (name or bundle_id) in status.text()
+        assert (name or bundle_id) in window._menu.label(m.POSITION_STATUS)
 
 
 def test_the_readout_follows_the_frontmost_app(make_window):
@@ -1944,7 +2048,7 @@ def test_the_readout_follows_the_frontmost_app(make_window):
     activate(window, SAFARI)
     window._refresh_menu()
 
-    status = window._menu_actions[m.POSITION_STATUS].text()
+    status = window._menu.label(m.POSITION_STATUS)
     assert "Safari not placed yet" in status
     assert "1 app remembered" in status  # what is known has not changed
 
@@ -1978,27 +2082,12 @@ def test_the_learned_name_reaches_the_map(make_window):
 
 def readout_rows(window):
     """The app rows, which are all of them: the list is a readout."""
-    return [
-        action
-        for action in window._positions_menu.actions()
-        if not action.isSeparator()
-    ]
+    return list(window._menu.rows(m.POSITION_LIST))
 
 
-def row_text(action):
-    """The name a row shows.
-
-    The rows are QWidgetActions since 15.1 — a disabled QAction is drawn grey
-    by macOS, which made a list of remembered apps read as a list of
-    unavailable ones — so the text lives in a QLabel inside the row rather
-    than on the action.
-    """
-    widget = action.defaultWidget()
-    labels = [
-        child.text()
-        for child in widget.findChildren(QLabel)
-        if child.text()
-    ]
+def row_text(row):
+    """The name a row shows."""
+    labels = [row.label]
     return labels[0] if labels else ""
 
 
@@ -2046,46 +2135,38 @@ def test_the_list_is_a_readout_with_nothing_to_click(make_window):
     rows = readout_rows(window)
     assert rows
     for row in rows:
-        assert isinstance(row, QWidgetAction)
-        assert row.defaultWidget() is not None
-    # Triggering every row must leave the map exactly as it was. That is the
-    # property, rather than the wiring: clicking a row cannot forget an app,
-    # which is what per-app forget being removed MEANS. Measured in a real
-    # menu besides — a click leaves the menu open, and hovering never selects
-    # the row because the widget takes the mouse itself.
+        assert isinstance(row, m.Row)
+    # A row is DATA and carries no handler, which is what per-app forget
+    # being removed MEANS: there is nothing for a click to reach. The map is
+    # untouched by anything the list can do.
     before = window._positions.listed()
-    for row in rows:
-        row.trigger()
+    assert window._menu.has_handler(m.POSITION_LIST) is False
     assert window._positions.listed() == before
     assert m.FORGET_POSITIONS in visible_keys(window)
 
 
 def test_the_rows_are_not_disabled_so_macos_draws_them_normally(make_window):
-    """THE 15.1 FIX. They were disabled QActions when per-app forget was
-    removed, and macOS greys a disabled item — so four remembered apps read
-    as four things that were unavailable rather than as four facts.
+    """THE 15.1 FIX, carried into the native menu. They were disabled
+    QActions when per-app forget was removed, and macOS greys a disabled
+    item — so four remembered apps read as four things that were unavailable
+    rather than as four facts.
 
-    Enabled, but not a control: a QWidgetAction's own widget swallows the
-    mouse, so hovering never selects the row and it never lights up. Measured
-    in a real menu on both routes this menu takes; the brightness itself is a
-    question about pixels and is verified by hand.
+    The answer was a QWidgetAction and is now an NSMenuItem with a view, for
+    exactly the same reason: an attributed title with an explicit labelColor
+    does NOT help, because AppKit dims a disabled item when it draws it
+    whatever the string asked for (measured, on a real menu). The kind is
+    what carries the claim, so it is what is asserted here; the brightness
+    itself is a question about pixels and is verified by hand.
     """
     window = remembering(make_window)
     end_a_drag(window, 300, 200)
     window._rebuild_positions_menu()
 
-    rows = readout_rows(window)
-    assert rows
-    for row in rows:
-        assert row.isEnabled() is True, "a disabled row is a grey row"
-        widget = row.defaultWidget()
-        assert widget.isEnabled() is True
-        # Mouse-transparency is the instinct and it is WRONG: with the mouse
-        # passing through, the menu selects the row on hover and it starts
-        # behaving like a control. Measured.
-        assert not widget.testAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents
-        )
+    assert readout_rows(window)
+    assert m.ENTRIES[m.POSITION_LIST].kind == m.ROWS
+    # The one entry that is neither: a readout the app disables on purpose,
+    # because one grey line among ticked entries reads as a note.
+    assert m.ENTRIES[m.POSITION_STATUS].kind == m.READOUT
 
 
 def test_forgetting_everything_takes_the_list_away_with_it(make_window):
@@ -2093,7 +2174,7 @@ def test_forgetting_everything_takes_the_list_away_with_it(make_window):
     end_a_drag(window, 300, 200)
     assert m.POSITION_LIST in visible_keys(window)
 
-    window._menu_actions[m.FORGET_POSITIONS].trigger()
+    window._menu.trigger(m.FORGET_POSITIONS)
 
     assert m.POSITION_LIST not in visible_keys(window)
     assert m.FORGET_POSITIONS not in visible_keys(window)
@@ -2107,11 +2188,9 @@ def test_an_app_with_no_icon_is_still_listed(make_window):
 
     window._rebuild_positions_menu()
 
-    entry = next(a for a in readout_rows(window) if row_text(a) == "Code")
-    labels = entry.defaultWidget().findChildren(QLabel)
-    # No icon label, only the name: the offscreen platform has no AppKit.
-    assert [label.text() for label in labels if label.text()] == ["Code"]
-    assert all(label.pixmap().isNull() for label in labels)
+    entry = next(row for row in readout_rows(window) if row.label == "Code")
+    # No icon at all: the offscreen platform has no AppKit to ask for one.
+    assert entry.icon is None
 
 
 def test_the_readout_asks_for_an_icon_only_when_the_app_changes(make_window):
@@ -2331,7 +2410,7 @@ def test_album_colour_is_off_by_default(make_window):
     """The layers principle: the plain window is what the app is."""
     window = make_window()
     assert window._album_colour is False
-    assert window._menu_actions[m.ALBUM_COLOUR].isChecked() is False
+    assert window._menu.is_checked(m.ALBUM_COLOUR) is False
     assert painted_background(window) == ap.DARK.solid
 
 
@@ -2348,7 +2427,7 @@ def test_enabling_it_asks_for_the_current_track(make_window, artwork_tasks):
     window._on_track_change(art_snapshot())
     assert artwork_tasks == []
 
-    window._menu_actions[m.ALBUM_COLOUR].trigger()
+    window._menu.trigger(m.ALBUM_COLOUR)
     assert window._album_colour is True
     assert artwork_tasks == [("t1", "http://cover")]
 
@@ -2376,11 +2455,11 @@ def test_switching_it_off_restores_the_previous_look_exactly(make_window):
     settle_tint(window)
     assert painted_background(window) != ap.DARK.solid
 
-    window._menu_actions[m.ALBUM_COLOUR].trigger()  # off
+    window._menu.trigger(m.ALBUM_COLOUR)  # off
     settle_tint(window)
     assert window._album_colour is False
     assert painted_background(window) == ap.DARK.solid
-    assert window._menu_actions[m.ALBUM_COLOUR].isChecked() is False
+    assert window._menu.is_checked(m.ALBUM_COLOUR) is False
 
 
 def test_a_cover_landing_after_the_layer_is_off_changes_nothing(make_window):
@@ -2424,7 +2503,7 @@ def test_the_setting_is_persisted_and_restored(make_window):
 
     reopened = make_window()
     assert reopened._album_colour is True
-    assert reopened._menu_actions[m.ALBUM_COLOUR].isChecked() is True
+    assert reopened._menu.is_checked(m.ALBUM_COLOUR) is True
 
 
 def test_the_tint_cross_fades_rather_than_snapping(make_window):
@@ -2878,14 +2957,13 @@ def test_the_glyph_is_set_only_when_it_changes(with_tray, make_window):
     window.apply_saved_visibility()
     window._on_position_update(snapshot(state=PlaybackState.PLAYING))
 
-    sets = []
-    window._tray.setIcon = lambda icon: sets.append(icon)
+    before = len(window._tray.images)
     for _ in range(5):
         window._on_position_update(snapshot(state=PlaybackState.PLAYING))
-    assert sets == []
+    assert len(window._tray.images) == before
 
     window._on_position_update(snapshot(state=PlaybackState.PAUSED))
-    assert len(sets) == 1
+    assert len(window._tray.images) == before + 1
 
 
 def test_each_glyph_is_drawn_once_and_kept(with_tray, make_window):
@@ -2895,17 +2973,25 @@ def test_each_glyph_is_drawn_once_and_kept(with_tray, make_window):
     window.apply_saved_visibility()
     window._on_position_update(snapshot(state=PlaybackState.PLAYING))
     playing = window._tray_state
-    assert playing in window._tray_icons
-    first = window._tray_icons[playing]
+    assert playing in window._tray_pngs
+    first = window._tray_pngs[playing]
 
     window._on_position_update(snapshot(state=PlaybackState.PAUSED))
     window._on_position_update(snapshot(state=PlaybackState.PLAYING))
-    assert window._tray_icons[playing] is first
+    assert window._tray_pngs[playing] is first
 
 
-def test_every_glyph_is_a_mask_so_macos_owns_the_colour(with_tray, make_window):
+def test_every_glyph_is_a_template_so_macos_owns_the_colour(with_tray, make_window):
     """A coloured menu bar icon stops following the menu bar, which is why
-    practice is a DOT and not a hue."""
+    practice is a DOT and not a hue.
+
+    Two halves, and both are here because either alone would pass while the
+    icon came out black on a dark bar: the pixels have to be black with the
+    shape in the ALPHA channel, and the image has to be told it is a
+    template. The first is a property of the drawing and is measured; the
+    second is one call inside the one door and is asserted structurally,
+    the way everything native in this suite is.
+    """
     window = make_window()
     window.apply_saved_visibility()
     for playing in (True, False):
@@ -2916,15 +3002,24 @@ def test_every_glyph_is_a_mask_so_macos_owns_the_colour(with_tray, make_window):
                     lyrics_visible=visible,
                     practising=practising,
                 )
-                icon = window._tray_icon_for(spec)
-                assert not icon.isNull(), spec
-                assert icon.isMask() is True, spec
+                image = w.symbols.menubar_pixmap(spec, mb.GLYPH_UNITS).toImage()
+                colours = {
+                    image.pixelColor(x, y).getRgb()[:3]
+                    for x in range(image.width())
+                    for y in range(image.height())
+                    if image.pixelColor(x, y).alpha() > 0
+                }
+                assert colours == {(0, 0, 0)}, spec
+    source = (
+        Path(w.nsmenu.__file__).read_text(encoding="utf-8")
+    )
+    assert "setTemplate_(True)" in source
 
 
 def test_the_drawn_glyphs_are_not_all_the_same_pixels(with_tray, make_window):
     """Eight specs that happened to render identically would pass every test
     above and say nothing on the menu bar."""
-    window = make_window()
+    make_window()
     seen = set()
     for playing in (True, False):
         for visible in (True, False):
@@ -2932,9 +3027,7 @@ def test_the_drawn_glyphs_are_not_all_the_same_pixels(with_tray, make_window):
                 spec = mb.icon_spec(
                     playing=playing, lyrics_visible=visible, practising=practising
                 )
-                icon = window._tray_icon_for(spec)
-                image = icon.pixmap(mb.GLYPH_UNITS, mb.GLYPH_UNITS).toImage()
-                seen.add(pixels_of(image))
+                seen.add(w.symbols.menubar_png(spec, mb.GLYPH_UNITS))
     # practice forces bright and a dot, so hidden-vs-shown collapses there
     assert len(seen) == 6
 
@@ -2945,7 +3038,7 @@ def test_the_drawn_glyphs_are_not_all_the_same_pixels(with_tray, make_window):
 def test_the_animation_is_off_by_default(with_tray, make_window):
     window = make_window()
     assert window._menubar_animation is False
-    assert window._menu_actions[m.MENUBAR_ANIMATION].isChecked() is False
+    assert window._menu.is_checked(m.MENUBAR_ANIMATION) is False
 
 
 def test_off_means_the_shape_never_moves(with_tray, make_window):
@@ -3042,19 +3135,18 @@ def test_the_animation_setting_survives_a_restart(with_tray, make_window):
 
     second = make_window()
     assert second._menubar_animation is True
-    assert second._menu_actions[m.MENUBAR_ANIMATION].isChecked() is True
+    assert second._menu.is_checked(m.MENUBAR_ANIMATION) is True
 
 
 def test_no_menu_bar_item_is_not_a_crash(monkeypatch, make_window):
     """Everything about the glyph has to survive there being nowhere to
     put it — the same rule the rest of the menu bar code follows."""
 
-    class NeverAvailable:
-        @staticmethod
-        def isSystemTrayAvailable():
+    class NoMenuBar(FakeStatusItem):
+        def create(self, tooltip=""):
             return False
 
-    monkeypatch.setattr(w, "QSystemTrayIcon", NeverAvailable)
+    monkeypatch.setattr(w.nsmenu, "StatusItem", NoMenuBar)
     window = make_window()
     window._last_state = PlaybackState.PLAYING
     window._refresh_menu()  # must not raise
@@ -3084,19 +3176,19 @@ def test_the_tick_matches_whichever_of_the_two_was_used(make_window):
     the tick describing the window."""
     window = make_window()
     window.apply_saved_visibility()
-    show = window._menu_actions[m.SHOW_LYRICS]
+    from_menu = lambda: window._menu.trigger(m.SHOW_LYRICS)
 
     for act in (
         window._toggle_lyrics_visible,        # hotkey hides
-        show.trigger,                          # menu shows
+        from_menu,                             # menu shows
         window._toggle_lyrics_visible,        # hotkey hides again
         window._toggle_lyrics_visible,        # hotkey shows
-        show.trigger,                          # menu hides
+        from_menu,                             # menu hides
     ):
         act()
         land(window)
-        assert show.isChecked() is window.isVisible()
-        assert show.isChecked() is window._lyrics_visible
+        assert window._menu.is_checked(m.SHOW_LYRICS) is window.isVisible()
+        assert window._menu.is_checked(m.SHOW_LYRICS) is window._lyrics_visible
 
 
 def test_the_hotkey_persists_the_same_setting_the_menu_does(make_window):
@@ -3160,7 +3252,7 @@ def test_a_refused_hotkey_leaves_the_app_fully_working(make_window, caplog):
     assert window._hotkey.registered is False
     assert "continuing without the global hotkey" in caplog.text
 
-    window._menu_actions[m.SHOW_LYRICS].trigger()
+    window._menu.trigger(m.SHOW_LYRICS)
     land(window)
     assert window.isVisible() is False
 
@@ -3168,11 +3260,12 @@ def test_a_refused_hotkey_leaves_the_app_fully_working(make_window, caplog):
 def test_the_menu_entry_never_advertises_the_combination(make_window):
     """Two mechanisms firing one action is the drift this app designs
     away, and a label printing ⇧⌘J while another app holds it would be a
-    menu claiming something untrue. Qt's shortcut is deliberately unset."""
+    menu claiming something untrue. No entry in the model carries a key
+    equivalent and nsmenu.py never asks for one, so there is nowhere for a
+    combination to be printed."""
     window = make_window()
-    show = window._menu_actions[m.SHOW_LYRICS]
-    assert show.shortcut().isEmpty()
-    assert "⌘" not in show.text()
+    assert "⌘" not in window._menu.label(m.SHOW_LYRICS)
+    assert not any("⌘" in m.ENTRIES[key].label for key in m.MENU_ORDER)
 
 
 class RecordingCarbon:
@@ -3231,7 +3324,7 @@ def test_a_real_press_toggles_the_window(carbon, make_window):
     carbon.press()
     land(window)
     assert window.isVisible() is False
-    assert window._menu_actions[m.SHOW_LYRICS].isChecked() is False
+    assert window._menu.is_checked(m.SHOW_LYRICS) is False
 
 
 def test_shutdown_leaves_no_registration_behind(carbon, make_window):
@@ -3270,7 +3363,7 @@ def test_quit_from_the_menu_bar_runs_the_clean_shutdown(make_window):
     rescue.setSingleShot(True)
     rescue.timeout.connect(lambda: (timed_out.append(True), APP.quit()))
     rescue.start(5000)
-    QTimer.singleShot(0, window._menu_actions[m.QUIT].trigger)
+    QTimer.singleShot(0, lambda: window._menu.trigger(m.QUIT))
     APP.exec()
     rescue.stop()
 
@@ -3394,11 +3487,11 @@ def test_the_entry_follows_the_system_not_the_stored_preference(make_window):
 
     window._login_status = login_item.LoginItemStatus.NOT_REGISTERED  # what is true
     window._refresh_menu()
-    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is False
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is False
 
     window._login_status = login_item.LoginItemStatus.ENABLED
     window._refresh_menu()
-    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is True
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is True
 
 
 def test_awaiting_approval_stays_unchecked_and_says_why(make_window):
@@ -3410,9 +3503,8 @@ def test_awaiting_approval_stays_unchecked_and_says_why(make_window):
     window._login_status = login_item.LoginItemStatus.REQUIRES_APPROVAL
     window._refresh_menu()
 
-    action = window._menu_actions[m.OPEN_AT_LOGIN]
-    assert action.isChecked() is False
-    assert "System Settings" in action.text()
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is False
+    assert "System Settings" in window._menu.label(m.OPEN_AT_LOGIN)
 
 
 def test_the_label_returns_to_normal_once_approved(make_window):
@@ -3422,7 +3514,7 @@ def test_the_label_returns_to_normal_once_approved(make_window):
     window._refresh_menu()
     window._login_status = login_item.LoginItemStatus.ENABLED
     window._refresh_menu()
-    assert window._menu_actions[m.OPEN_AT_LOGIN].text() == login_item.MENU_LABEL
+    assert window._menu.label(m.OPEN_AT_LOGIN) == login_item.MENU_LABEL
 
 
 def test_toggling_registers_and_records_what_was_asked(make_window, monkeypatch):
@@ -3443,11 +3535,11 @@ def test_toggling_registers_and_records_what_was_asked(make_window, monkeypatch)
     window._set_open_at_login(True)
     assert asked == [True]
     assert window._settings.value("window/open_at_login", type=bool) is True
-    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is True
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is True
 
     window._set_open_at_login(False)
     assert asked == [True, False]
-    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is False
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is False
 
 
 def test_a_failed_registration_leaves_the_entry_unchecked(make_window, monkeypatch, caplog):
@@ -3463,9 +3555,8 @@ def test_a_failed_registration_leaves_the_entry_unchecked(make_window, monkeypat
     with caplog.at_level(logging.WARNING, logger="sottovoce.window"):
         window._set_open_at_login(True)
 
-    action = window._menu_actions[m.OPEN_AT_LOGIN]
-    assert action.isChecked() is False
-    assert "System Settings" in action.text()
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is False
+    assert "System Settings" in window._menu.label(m.OPEN_AT_LOGIN)
     assert "Open at Login stays off" in caplog.text
 
 
@@ -3479,10 +3570,10 @@ def test_opening_the_menu_rereads_the_system(make_window, monkeypatch):
     )
     monkeypatch.setattr(login_item, "status", lambda: next(answers))
 
-    window._menu.aboutToShow.emit()
-    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is True
-    window._menu.aboutToShow.emit()
-    assert window._menu_actions[m.OPEN_AT_LOGIN].isChecked() is False
+    window._menu.opening()
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is True
+    window._menu.opening()
+    assert window._menu.is_checked(m.OPEN_AT_LOGIN) is False
 
 
 def test_a_source_run_never_asks_the_system(make_window, monkeypatch):
@@ -3497,7 +3588,7 @@ def test_a_source_run_never_asks_the_system(make_window, monkeypatch):
         "status",
         lambda: asked.append(True) or login_item.LoginItemStatus.ENABLED,
     )
-    window._menu.aboutToShow.emit()
+    window._menu.opening()
     assert asked == []
 
 
@@ -3585,7 +3676,7 @@ def test_yielding_to_notifications_is_off_by_default(make_window):
     window = make_window()
     assert window._yield_to_notifications is False
     assert window._yield_timer.isActive() is False
-    assert window._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is False
+    assert window._menu.is_checked(m.YIELD_NOTIFICATIONS) is False
 
 
 def test_the_layer_being_off_asks_nothing(make_window, monkeypatch):
@@ -3602,11 +3693,11 @@ def test_switching_it_on_starts_watching_and_off_stops(make_window):
     window = make_window()
     window._set_yield_to_notifications(True)
     assert window._yield_timer.isActive() is True
-    assert window._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is True
+    assert window._menu.is_checked(m.YIELD_NOTIFICATIONS) is True
 
     window._set_yield_to_notifications(False)
     assert window._yield_timer.isActive() is False
-    assert window._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is False
+    assert window._menu.is_checked(m.YIELD_NOTIFICATIONS) is False
 
 
 def test_switching_it_on_fades_nothing_by_itself(make_window, monkeypatch):
@@ -3823,7 +3914,7 @@ def test_the_setting_survives_a_restart(make_window):
     second = make_window()
     assert second._yield_to_notifications is True
     assert second._yield_timer.isActive() is True
-    assert second._menu_actions[m.YIELD_NOTIFICATIONS].isChecked() is True
+    assert second._menu.is_checked(m.YIELD_NOTIFICATIONS) is True
 
 
 def test_a_restored_hidden_window_does_not_start_watching(make_window):
@@ -4518,7 +4609,7 @@ def test_compact_is_off_until_it_is_asked_for(make_window):
     window = make_window()
     assert window._compact is False
     assert window._compact_applied is False
-    assert window._menu_actions[m.COMPACT].isChecked() is False
+    assert window._menu.is_checked(m.COMPACT) is False
 
 
 def test_compact_shows_the_sung_line_and_nothing_else(make_window):
@@ -4691,7 +4782,7 @@ def test_a_sync_pass_borrows_the_full_layout_and_gives_it_back(make_window):
     assert window.height() > strip
     # The setting is untouched: the tick describes what was asked for.
     assert window._compact is True
-    assert window._menu_actions[m.COMPACT].isChecked() is True
+    assert window._menu.is_checked(m.COMPACT) is True
 
     window._cancel_sync()
     window._render()
@@ -5387,7 +5478,7 @@ def test_a_manual_resize_turns_the_fitting_off(make_window):
     press(window, QPoint(2, 40))  # the left edge: inside the resize margin
     assert window._fit_to_song is False
     assert window._settings.value("window/fit_to_song", type=bool) is False
-    assert window._menu_actions[m.FIT_TO_SONG].isChecked() is False
+    assert window._menu.is_checked(m.FIT_TO_SONG) is False
 
 
 def test_dragging_the_window_does_not_turn_the_fitting_off(make_window):
@@ -5428,7 +5519,7 @@ def test_the_setting_survives_a_restart(make_window):
 
     reopened = make_window()
     assert reopened._fit_to_song is False
-    assert reopened._menu_actions[m.FIT_TO_SONG].isChecked() is False
+    assert reopened._menu.is_checked(m.FIT_TO_SONG) is False
 
 
 def test_reduce_motion_changes_the_size_without_travelling(make_window):
@@ -5699,8 +5790,7 @@ def test_the_size_survives_a_restart(make_window):
     reopened = make_window()
     assert reopened._compact_text_size == 28
     reopened._refresh_menu()
-    assert reopened._compact_size_actions[28].isChecked() is True
-    assert reopened._compact_size_actions[20].isChecked() is False
+    assert reopened._menu.chosen(m.COMPACT_SIZE) == 28
 
 
 def test_a_stored_size_that_is_not_a_preset_falls_back(make_window):
@@ -5718,11 +5808,11 @@ def test_a_stored_size_that_is_not_a_preset_falls_back(make_window):
 def test_the_size_menu_appears_only_inside_the_strip(make_window):
     window = make_window()
     window._refresh_menu()
-    assert window._menu_actions[m.COMPACT_SIZE].isVisible() is False
+    assert window._menu.is_visible(m.COMPACT_SIZE) is False
 
     go_compact(window)
     window._refresh_menu()
-    assert window._menu_actions[m.COMPACT_SIZE].isVisible() is True
+    assert window._menu.is_visible(m.COMPACT_SIZE) is True
 
 
 def test_changing_the_size_refits_the_window_to_the_song(make_window):

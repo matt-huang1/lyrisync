@@ -112,49 +112,72 @@ def test_the_glyph_box_leaves_room_inside_the_button():
 # -- the menu bar glyph ----------------------------------------------------
 
 
-def test_the_glyph_reports_the_size_the_menu_bar_wants():
-    """THE CLIPPING BUG, pinned.
+def test_the_glyph_is_drawn_at_the_screens_scale_and_labelled_in_points():
+    """THE CLIPPING BUG, pinned, in the form it takes now.
 
     Handing QSystemTrayIcon a 44-pixel pixmap at devicePixelRatio 2 —
     logically 22x22, which is what the SVG it replaced was — put a CLIPPED
     glyph on the menu bar: two of the three bars and no practice dot.
-    ``availableSizes()`` reports RAW PIXELS and does not fold the ratio in, so
-    the status item took a 44-point image for a 22-point slot and drew its top
-    two thirds.
+    ``QIcon.availableSizes()`` reported RAW PIXELS and did not fold the ratio
+    in, so the status item took a 44-point image for a 22-point slot and drew
+    its top two thirds. Four constructions were photographed on a real status
+    item before an icon engine was chosen.
 
-    Four constructions were photographed on a real status item before this one
-    was chosen; the number below is the one they turned on.
+    The item is an NSStatusItem this app makes now, so there is no QIcon in
+    the way: the glyph is PIXELS at the screen's own scale, and nsmenu.py
+    labels the image with the point size the menu bar wants. This is the
+    pixel half — that the drawing is at ``points * ratio`` and not at
+    ``points`` — and it is the half the bug turned on.
     """
-    from PySide6.QtCore import QSize
-
     from sottovoce import menubar
 
     spec = menubar.icon_spec(playing=True, lyrics_visible=True, practising=True)
-    icon = symbols.menubar_icon(spec)
-    assert icon.availableSizes() == [QSize(menubar.GLYPH_UNITS, menubar.GLYPH_UNITS)]
+    ratio = max(1, int(round(symbols.device_pixel_ratio())))
+    png = symbols.menubar_png(spec, menubar.GLYPH_UNITS)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+    pixmap = QPixmap()
+    assert pixmap.loadFromData(png)
+    assert pixmap.width() == pixmap.height() == menubar.GLYPH_UNITS * ratio
 
 
-def test_the_glyph_is_drawn_at_whatever_size_is_asked_for():
-    """An engine rather than a pixmap, which is what the SVG engine had been
-    doing all along — and the only construction of the five tried that came
-    out both whole and crisp."""
+def test_the_glyph_is_drawn_whole_at_whatever_size_is_asked_for():
+    """Rendered on demand at the size actually wanted, which is what the SVG
+    engine had been doing all along. Whole, meaning the dot in the far corner
+    is present: it is the first thing a clipped glyph loses."""
     from sottovoce import menubar
 
-    spec = menubar.icon_spec(playing=True, lyrics_visible=True, practising=False)
-    icon = symbols.menubar_icon(spec)
+    spec = menubar.icon_spec(playing=True, lyrics_visible=True, practising=True)
     for side in (16, 18, 22, 44, 64):
-        pixmap = icon.pixmap(side, side)
-        assert not pixmap.isNull()
-        assert max(pixmap.width(), pixmap.height()) >= side * 0.9, side
+        image = symbols.menubar_pixmap(spec, side).toImage()
+        assert image.width() == image.height() == side
+        corner = image.pixelColor(
+            round(menubar.DOT_CENTRE[0] * side / menubar.GLYPH_UNITS),
+            round(menubar.DOT_CENTRE[1] * side / menubar.GLYPH_UNITS),
+        )
+        assert corner.alpha() > 0, side
 
 
 def test_the_glyph_is_a_template_image():
     """macOS owns the colour, which is why the practice mark is a DOT and not
-    a hue: a coloured menu bar icon stops following the menu bar."""
+    a hue: a coloured menu bar icon stops following the menu bar.
+
+    Two halves. The pixels are black with the shape in the ALPHA channel,
+    which is measured here; and the image is told it is a template, which is
+    one call inside nsmenu.py's one door and is asserted where that door is
+    tested.
+    """
     from sottovoce import menubar
 
     spec = menubar.icon_spec(playing=False, lyrics_visible=True, practising=False)
-    assert symbols.menubar_icon(spec).isMask() is True
+    image = symbols.menubar_pixmap(spec, 44).toImage()
+    colours = {
+        image.pixelColor(x, y).getRgb()[:3]
+        for y in range(image.height())
+        for x in range(image.width())
+        if image.pixelColor(x, y).alpha() > 0
+    }
+    assert colours == {(0, 0, 0)}
 
 
 def test_a_dimmed_glyph_carries_less_ink_than_a_bright_one():

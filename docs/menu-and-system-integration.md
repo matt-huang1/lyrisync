@@ -2,19 +2,123 @@
 
 ## One menu, two ways in
 
-The menu bar item's menu and the window's right-click menu are **literally
-the same `QMenu` object**. Two menus could drift apart; one cannot.
+*Milestone 21.* The menu bar item's menu and the window's right-click menu
+were **literally the same `QMenu` object**, on the argument that two menus
+could drift apart and one cannot. The object was one; the **appearance was
+two**. Qt hands a system tray's menu to macOS, which converts it into a
+real `NSMenu`, so the menu bar item got the system's own drawing: its font,
+its check marks, its separators, its submenu timing. The same object popped
+up under the pointer is drawn by Qt's widget style instead. Same entries,
+same order, two different menus depending on how you opened it.
+
+So the menu is now a **model**, and one native `NSMenu` drawn from it serves
+both routes:
+
+| | |
+|---|---|
+| `menu.py` | the model: the entry tree, the labels, the gating, the live state, and the one place a click lands. Pure — no Qt, no Cocoa. |
+| `nsmenu.py` | the drawing: the only place in the app that says `NSMenu`, `NSMenuItem` or `NSStatusItem`. One door, `_appkit()`. |
+| `window.py` | the wiring: which handler each entry has, and what the state is. |
+
+`setMenu:` on the status item covers the first route.
+`popUpMenuPositioningItem:atLocation:inView:` covers the second, and it
+works **from an accessory app that never activates** — verified by
+screenshot before any of it was written, because a menu that needed the app
+to come forward would have been the end of the idea. The point makes one
+trip across the coordinate line on the way (`geometry.cocoa_point_from_qt`):
+Qt measures down from the top left of the primary screen and AppKit up from
+its bottom left.
+
+**The menu bar item is ours now.** Qt owns the `NSStatusItem` it makes and
+there is no supported way to hand it a menu of your own, so the item that
+carries one `NSMenu` has to be an item this app made. That also means it is
+one this app has to **give back**: `_shutdown` removes it, where Qt used to
+destroy it with the widget.
 
 Its structure is built once and never rebuilt. Refreshing only flips
-visibility, check marks and labels — rebuilding would make the native menu
-bar item flicker every time anything changed.
+hidden, check marks, chosen presets and two labels — rebuilding would make
+the native menu bar item flicker every time anything changed. The one
+exception is the remembered-apps list, whose entries **are** data, and which
+is assembled only while somebody is looking at it (`menuWillOpen:`).
 
-Checkable entries connect to `triggered`, not `toggled`, because refresh
-calls `setChecked` on all of them and `toggled` would feed those
-programmatic changes straight back into the setters as if the user had
-clicked.
+**Nothing checks or unchecks an entry from a click.** The handler changes
+the app's state and the refresh that follows says what the state now is, so
+`Menu.trigger` hands a toggle the state it is moving *to*. That is the same
+rule the `QMenu` followed by connecting to `triggered` rather than
+`toggled`, stated where it now lives: a tick that moved itself would be a
+second answer to what the setting is.
 
-Which entries are visible is pure logic in `menu.py`, tested without Qt.
+Which entries are visible is still pure logic in `menu.py`, tested without
+Qt — and so, now, is everything else about the menu except its pixels.
+
+## The shape of it
+
+Seventeen entries in one flat column had become a list to read rather than
+a menu to use. They are grouped by what they are *about*:
+
+```
+Show lyrics                     ✓
+────────────────────────
+Compact                         ✓      what is on screen
+   Compact text size      ▸             (inside the strip only)
+   Fit the width to the song    ✓       (inside the strip only)
+Album colour                    ✓
+────────────────────────
+Romanisation                    ✓      this song
+Spoken reference                ✓
+   Speech rate           ▸
+Echo practice                   ✓
+Sync this song
+────────────────────────
+Position                 ▸             where the window goes
+System                   ▸             how the app sits in the system
+────────────────────────
+Quit
+```
+
+With every layer dormant that is **four rows and two submenus**, against
+eight entries and a separator before.
+
+Two rules hold it together:
+
+- **Nothing that comes and goes with the song is buried in a submenu.** An
+  entry that has just appeared because it can now act is one somebody is
+  looking for, and a submenu is one more click and one more place to look.
+  So the learning layers stay at the top level and hide themselves, exactly
+  as they did.
+- **A setting's detail sits directly under its own switch.** Compact text
+  size and the fit follow Compact; Speech rate follows Spoken reference.
+  Grouping them elsewhere would separate a switch from the thing it
+  switches.
+
+`Position` is *Dock to top*, then per-app memory: the toggle, the readout,
+the remembered apps and forget-all. One submenu, one question — where does
+this window sit. `System` is Spaces, the notification yield, the menu bar
+animation, then Open at Login: how the app behaves in somebody's machine
+rather than in their song.
+
+A submenu with nothing visible inside it is **hidden**, like any other entry
+that cannot act, and separators collapse inside a submenu exactly as they
+do outside one.
+
+## A row can state a fact without being a control
+
+The remembered-apps list is a list of things that *have* been learned. When
+per-app forget was removed the rows became disabled `QAction`s, and macOS
+greys a disabled item — so four remembered apps read as four things that
+were *unavailable* rather than as four facts. A `QWidgetAction` fixed it.
+
+The native menu needed the same fix again, and the obvious route does not
+work: an **attributed title with an explicit `labelColor` is still drawn
+grey**, because AppKit dims a disabled item when it draws it whatever the
+string asked for. Measured, on a real menu. So the rows are `NSMenuItem`s
+with a **view** — an icon well and a label — which AppKit draws at the
+ordinary text colour, does not highlight, and does not treat as a control.
+The same answer in the native idiom.
+
+The position readout above them stays a plain disabled item, and that is not
+an inconsistency: one grey line among ticked entries reads as a note, and
+four of them read as a broken feature.
 
 ## Entries appear only where they apply
 
@@ -36,13 +140,16 @@ now would offer it for five seconds at a time, which is not a way to find a
 setting.
 
 [Compact and Dock to top](compact-and-docking.md) are the same argument a
-fifth and sixth time, and they sit together for it: one is a standing
-choice about the window's shape, the other a command about where it goes,
-and both are answerable with nothing playing. Docking in particular is
-what somebody reaches for while setting the window up, which is before
-there is a song to gate it on. Dock to top is the one entry here that is
-**not checkable** — it puts the window somewhere once, and nothing holds
-it there, so there is no state for a tick to describe.
+fifth and sixth time: one is a standing choice about the window's shape,
+the other a command about where it goes, and both are answerable with
+nothing playing. Docking in particular is what somebody reaches for while
+setting the window up, which is before there is a song to gate it on. They
+no longer sit next to each other — milestone 21 put docking with the rest
+of "where does the window go" — and that argument is untouched by the
+move: it was about visibility, and both are still always visible. Dock to
+top is the one entry that is **not checkable** — it puts the window
+somewhere once, and nothing holds it there, so there is no state for a
+tick to describe.
 
 **Fit the width to the song** follows the compact layout, because that is
 the only place it means anything: the full layout's width is the user's
@@ -95,12 +202,13 @@ Two things cannot travel with it and are put away for the journey:
   channel and caches, so it would keep the silhouette of a full-size panel
   around a small one.
 
-**Where the item is** comes from `QSystemTrayIcon.geometry()`, and that is
-the status item's own button window: measured against
-`NSStatusBarWindow.frame()` in the same process, the two agree exactly
-once Cocoa's bottom-left origin is taken out — `(1159, 1073, 38×34)` in
-Cocoa is `(1159, 0, 38×34)` here. A pyobjc route beside it would be a
-second source of truth for one rectangle.
+**Where the item is** is the status item's own button window, flipped into
+Qt's coordinates by `geometry.qt_rect_from_cocoa`. It used to come from
+`QSystemTrayIcon.geometry()`, and the two were measured against each other
+in the same process while both existed: they agree exactly once Cocoa's
+bottom-left origin is taken out — `(1159, 1073, 38×34)` in Cocoa is
+`(1159, 0, 38×34)` here. With the item now ours this *is* the one source of
+truth for the rectangle rather than a second one beside Qt's.
 
 **When there is no item to fly to** — behind the notch, in an overflow, on
 a display that has just been unplugged, or no menu bar at all — the window
@@ -255,6 +363,14 @@ glyph on the menu bar: two of the three bars and no dot.
 so the status item took a 44-point image for a 22-point slot and drew its top
 two thirds.
 
+*Milestone 21 removed the `QIcon` from the path and kept the lesson.* The
+glyph is PNG bytes at `points × ratio` pixels, and `nsmenu.py` labels the
+`NSImage` with the point size the menu bar wants. Read back off a real
+status item: `image.size()` is `22.0 × 22.0` and its representation is
+`44 × 44` pixels, in a button of `38 × 22` points. Photographed from the
+button's own drawing — three bars, short / long / short, nothing clipped,
+tinted white by macOS because it is still a template image.
+
 Four constructions were put on a real status item and photographed:
 
 | construction | result |
@@ -266,8 +382,9 @@ Four constructions were put on a real status item and photographed:
 | a `QIconEngine` drawing on demand | whole, and the crispest of the five |
 
 Which is what the SVG engine had been doing all along: rendering at the size
-actually wanted. `test_the_glyph_reports_the_size_the_menu_bar_wants` pins the
-number the bug turned on.
+actually wanted.
+`test_the_glyph_is_drawn_at_the_screens_scale_and_labelled_in_points` pins
+the number the bug turned on.
 
 ## Open at Login
 

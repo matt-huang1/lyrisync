@@ -23,8 +23,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QIconEngine, QPainter, QPixmap
+from PySide6.QtCore import QBuffer, QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from sottovoce import menubar
@@ -170,31 +170,6 @@ def symbol_icon(
     return icon
 
 
-def icon_from_tiff(data: bytes, points: int) -> Optional[QIcon]:
-    """An icon decoded from TIFF bytes, labelled with the scale it came at.
-
-    For application icons, which arrive from ``frontmost.app_icon_tiff``
-    as bytes rather than as an NSImage — nothing pyobjc-shaped crosses out
-    of that module, so this end needs no AppKit and the test suite can
-    hand over a file's worth of bytes.
-
-    Not a template image, unlike everything else here: an app's icon is
-    its own artwork and colouring it would be defacing somebody's brand.
-    The device pixel ratio is derived from what actually decoded rather
-    than from the screen — the drawing was done by macOS at whatever scale
-    it chose, and dividing pixels by points is what that scale IS.
-    """
-    if not data or points <= 0:
-        return None
-    pixmap = QPixmap()
-    if not pixmap.loadFromData(data):
-        logger.debug("an application icon did not decode")
-        return None
-    ratio = max(1.0, pixmap.width() / points)
-    pixmap.setDevicePixelRatio(ratio)
-    return QIcon(pixmap)
-
-
 def draw_menubar_glyph(painter: QPainter, side: float, spec: menubar.IconSpec) -> None:
     """Paint the glyph into a ``side``x``side`` square, from menubar's geometry.
 
@@ -238,71 +213,37 @@ def menubar_pixmap(spec: menubar.IconSpec, side: int) -> QPixmap:
     return pixmap
 
 
-class _MenubarIconEngine(QIconEngine):
-    """Renders the glyph at whatever size it is asked for.
-
-    An engine rather than a pixmap, and that was MEASURED rather than
-    preferred. Handing QSystemTrayIcon a 44-pixel pixmap at
-    devicePixelRatio 2 — logically 22x22, exactly what the SVG it replaced
-    was — put a CLIPPED glyph on the menu bar: two of the three bars and no
-    practice dot. ``QIcon.availableSizes()`` reports raw pixels and does not
-    fold the ratio in, so the status item took a 44-point image for a
-    22-point slot and showed its top two thirds.
-
-    Four constructions were put on a real status item and photographed:
-
-    - 44px at ratio 2 — clipped
-    - 36px at ratio 2 — clipped
-    - both 22px and 44px in one icon — clipped, Qt takes the larger
-    - 22px at ratio 1 — whole, but upscaled by the compositor and soft
-    - this engine — whole, and the crispest of the five
-
-    Which is what the SVG engine had been doing all along: rendering on
-    demand at the size actually wanted. Nothing else here needs an engine
-    because nothing else is handed to a status item.
-    """
-
-    def __init__(self, spec: menubar.IconSpec) -> None:
-        super().__init__()
-        self._spec = spec
-
-    def paint(self, painter, rect, mode, state) -> None:
-        side = max(1, min(rect.width(), rect.height()))
-        painter.drawPixmap(rect, menubar_pixmap(self._spec, side))
-
-    def pixmap(self, size, mode, state) -> QPixmap:
-        return menubar_pixmap(self._spec, min(size.width(), size.height()))
-
-    def clone(self) -> QIconEngine:
-        return _MenubarIconEngine(self._spec)
-
-    def availableSizes(self, mode=None, state=None) -> list:
-        # The size the menu bar actually wants. Reported honestly, because
-        # this is the number the clipping bug turned on.
-        return [QSize(menubar.GLYPH_UNITS, menubar.GLYPH_UNITS)]
-
-
-# QIcon takes ownership of an engine on the C++ side, but the Python object
-# has to outlive it or the icon is left painting through a collected wrapper.
-# Bounded by the number of specs that exist — eight, or eighteen with the
-# optional animation — because the window asks for each one once.
-_ENGINES: list = []
-
-
-def menubar_icon(spec: menubar.IconSpec) -> QIcon:
-    """The menu bar glyph for one spec, drawn rather than loaded.
+def menubar_png(spec: menubar.IconSpec, points: int) -> bytes:
+    """The menu bar glyph for one spec, as PNG bytes at the screen's scale.
 
     Three SVG files became eight combinations of brightness, shape and dot in
     milestone 15.1, and eighteen once the optional animation is counted — so
     the glyph is painted from ``menubar``'s geometry instead of shipped as
-    images. Nothing about the shape changed in the move: the bar thicknesses,
-    centres and the dot are the numbers the SVGs carried.
+    images. Nothing about the shape changed in either move: the bar
+    thicknesses, centres and the dot are the numbers the SVGs carried.
+
+    Bytes rather than a QIcon, because the item that carries it is an
+    NSStatusItem this app makes rather than one Qt makes — and bytes are
+    what keeps nsmenu.py from needing Qt and this from needing AppKit.
+
+    ``points * ratio`` pixels, handed over with the point size beside it so
+    the image can be LABELLED 22 points and drawn from 44 pixels. That
+    labelling is the whole of what milestone 15.1 measured: a 44-pixel
+    image taken for a 44-POINT one is drawn into a 22-point slot with its
+    top two thirds showing. Four constructions were put on a real status
+    item and photographed then — 44px at ratio 2, 36px at ratio 2, both
+    sizes in one icon, 22px at ratio 1 — and only the last was whole, at
+    the cost of being upscaled and soft. Pixels at the screen's own scale,
+    labelled with the size the menu bar wants, is the same answer without
+    the QIcon in the way.
     """
-    engine = _MenubarIconEngine(spec)
-    _ENGINES.append(engine)
-    icon = QIcon(engine)
-    icon.setIsMask(True)  # a template image: macOS owns the colour
-    return icon
+    ratio = max(1, int(round(device_pixel_ratio())))
+    pixmap = menubar_pixmap(spec, points * ratio)
+    buffer = QBuffer()
+    buffer.open(QBuffer.OpenModeFlag.WriteOnly)
+    pixmap.save(buffer, "PNG")
+    buffer.close()
+    return bytes(buffer.data())
 
 
 def icon_size(button_side: int) -> QSize:

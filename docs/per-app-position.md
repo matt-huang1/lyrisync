@@ -199,11 +199,18 @@ Two answers, for two different questions.
 the menu says so, in words, whenever it is opened:
 
 ```
-Remember position per app            ✓
-🧭 4 apps remembered · Safari is placed
-Remembered apps                      ▸
-Forget remembered positions
+Position                             ▸
+    Dock to top
+    ──────────
+    Remember position per app        ✓
+    🧭 4 apps remembered · Safari is placed
+    Remembered apps                  ▸
+    Forget remembered positions
 ```
+
+*Since milestone 21 the whole layer lives inside the **Position** submenu,
+with the docking command it shares a question with: where does this window
+sit.*
 
 A count and the app in front, because there are two ways to doubt an
 implicit feature: whether anything has been learned at all, and whether
@@ -231,18 +238,22 @@ comparing them with something. A detail toggle to put them back was
 considered and rejected — an extra entry for a fact already on screen, in
 a menu whose problem was never too little information.
 
-The readout is disabled, because it is a readout and not a control, and
-its `menuRole` is `NoRole` rather than Qt's default
-`TextHeuristicRole`: it is the one entry whose text the app does not
-write, and the heuristic that relocates "Preferences…" into the
-application menu matches substrings — "System Settings", or
-`com.apple.systempreferences` before it has a name, would trip it. A
-diagnostic that moves itself depending on which app you switched to would
-vanish exactly when read.
+The readout is disabled, because it is a readout and not a control. It
+used also to carry `menuRole = NoRole`: it is the one entry whose text the
+app does not write, and Qt's default `TextHeuristicRole` relocates
+"Preferences…" into the application menu by matching substrings, which
+"System Settings" — or `com.apple.systempreferences` before it has a name
+— would have tripped. A diagnostic that moves itself depending on which
+app you switched to would vanish exactly when read. A native `NSMenuItem`
+has no such heuristic, so that workaround went with the `QMenu` in
+milestone 21.
 
 **Remembered apps** lists what has been learned, most recently used
-first, each with its icon and name. It is a **readout**: the rows are
-disabled and there is nothing to click. Clicking one used to forget it,
+first, each with its icon and name. It is a **readout**: there is nothing
+to click, and the rows are drawn at the ordinary text colour rather than
+greyed, because grey means "you cannot have this" and these are facts. See
+[the menu](menu-and-system-integration.md#a-row-can-state-a-fact-without-being-a-control)
+for what that costs in a native menu. Clicking one used to forget it,
 and that control was removed rather than kept — re-dragging the window in
 an app overwrites its position, so per-app forget can only ever express
 *stop moving the window for this one app*, which is not a thing anybody

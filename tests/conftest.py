@@ -184,6 +184,24 @@ def _no_real_world():
 
     patch.setattr(login_item, "_main_app_service", guard_service)
 
+    # -- the developer's own menu bar -------------------------------------
+    # The menu bar item is this app's own NSStatusItem now, not Qt's, and
+    # every window built here creates one: unblocked, a suite run puts a
+    # glyph in the developer's menu bar for as long as the process lives
+    # and leaves however many of them behind as windows were made. The
+    # NSMenu behind it is the same door and the same hazard one step
+    # milder — a menu popped up from a test would take the pointer and
+    # block the run on a modal tracking loop. One door, shut here.
+    from sottovoce import nsmenu
+
+    def guard_appkit_menu():
+        raise _violation(
+            "NSStatusItem/NSMenu — a test may not put an item in the "
+            "developer's menu bar or a menu on their screen"
+        )
+
+    patch.setattr(nsmenu, "_appkit", guard_appkit_menu)
+
     # -- the developer's own keyboard -------------------------------------
     # RegisterEventHotKey claims a combination system-wide for as long as
     # the process lives, so a stray registration here takes ⇧⌘J away from

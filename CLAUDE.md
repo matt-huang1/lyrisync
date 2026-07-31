@@ -57,7 +57,7 @@ seek, pause/resume). Full map in
 
 ## The testing guards
 
-`tests/conftest.py` shuts twelve doors for the whole session. They are the
+`tests/conftest.py` shuts thirteen doors for the whole session. They are the
 alarm, not the fix — the seams are the fix.
 
 | guard | catches |
@@ -70,6 +70,7 @@ alarm, not the fix — the seams are the fix.
 | `ArtworkProvider()` on its default | the real `.artwork_cache/`, and the CDN |
 | `QSettings("sottovoce", "sottovoce")` | the real preferences plist |
 | `login_item._main_app_service()` | a real login item on the developer's Mac |
+| `nsmenu._appkit()` | an icon in the developer's menu bar, and a menu on their screen |
 | `hotkey._carbon()` | claiming ⇧⌘J from whoever is running the suite |
 | `frontmost._workspace()` | watching the developer switch apps |
 | `notifications._quartz()` | reading every window open on the machine |
@@ -342,10 +343,37 @@ Rules that come with them:
 - Qt defaults windows to `FullScreenPrimary`; Primary and Auxiliary are
   mutually exclusive, so the all-desktops toggle must clear Primary.
   **Native state is verified by readback.**
-- **One `QMenu` serves the menu bar item and the window's right-click
-  menu.** Its structure is built once; refresh only flips visibility,
-  checks and labels, or the native item flickers. Checkable entries
-  connect to `triggered`, not `toggled`.
+- **One MODEL serves the menu bar item and the window's right-click
+  menu, and one native NSMenu draws it.** "One menu" used to mean one
+  `QMenu`, which was one object and two appearances: Qt converts a tray
+  menu into a real NSMenu and draws a popup itself. The model is
+  `menu.py` and is pure; `nsmenu.py` is the only place that says NSMenu,
+  NSMenuItem or NSStatusItem. Its structure is built once; refresh only
+  flips visibility, checks, chosen presets and labels, or the native item
+  flickers.
+- **Nothing checks or unchecks an entry from a click.** The handler
+  changes the app's state and the refresh that follows says what the
+  state is: `Menu.trigger` hands a toggle the state it is moving TO. It
+  is why the QMenu entries were connected to `triggered` rather than
+  `toggled`, and a tick that moved itself would be a second answer to
+  what the setting is.
+- **The menu bar item is this app's own NSStatusItem**, not
+  `QSystemTrayIcon`'s: Qt owns the item it makes and there is no
+  supported way to hand it a menu, so the item that carries one NSMenu
+  has to be an item this app made. It is removed in `_shutdown` rather
+  than destroyed with the widget, and the glyph is PNG bytes drawn by
+  `symbols.py` and labelled with the point size the menu bar wants.
+- **The long tail of standing preferences lives in two submenus**
+  (Position, System) and nothing that comes and goes with the song may
+  be buried in one: an entry that appears because it can now act is one
+  somebody is looking for, and a submenu is one more click and one more
+  place to look. A submenu with nothing visible inside it is hidden, like
+  any other entry that cannot act.
+- **A row that states a fact is not a control and may not be drawn
+  grey.** macOS dims a disabled item when it draws it, whatever an
+  attributed title's `labelColor` asked for (measured), so the
+  remembered-apps rows are NSMenuItems with a VIEW. That was a
+  `QWidgetAction` before and is the same answer in the native idiom.
 - **Quit is visible in every state**, and hiding leaves the monitor, the
   loop and any sync pass running.
 - The login item's tick **follows macOS**, never the stored preference,

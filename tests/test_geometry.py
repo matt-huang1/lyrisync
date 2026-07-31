@@ -648,3 +648,41 @@ def test_a_resize_agrees_with_the_paint_about_being_docked():
     assert not is_docked(floating, PLAIN_SCREEN, PLAIN_AVAILABLE)
     moved = resized_position(floating, 700, PLAIN_SCREEN, PLAIN_AVAILABLE)
     assert not is_docked((*moved, 700, 79), PLAIN_SCREEN, PLAIN_AVAILABLE)
+
+
+# -- Cocoa's coordinates, and ours ----------------------------------------
+
+
+def test_a_cocoa_rectangle_comes_back_where_qt_expects_it():
+    """The measurement this is written from: the menu bar item's own button
+    window read (1159, 1073, 38x34) from AppKit and (1159, 0, 38x34) from
+    QSystemTrayIcon.geometry() in the same process, on a 1107-point screen.
+    An item flush against the top of the screen is at y=0 in Qt."""
+    from sottovoce.geometry import qt_rect_from_cocoa
+
+    assert qt_rect_from_cocoa((1159.0, 1073.0, 38.0, 34.0), 1107) == (
+        1159, 0, 38, 34
+    )
+
+
+def test_the_flip_is_its_own_inverse_on_the_thing_it_is_about():
+    """A rectangle sent down and brought back is where it started, which is
+    the property that makes one subtraction safe to write once."""
+    from sottovoce.geometry import cocoa_point_from_qt, qt_rect_from_cocoa
+
+    height = 1107
+    for y in (0, 25, 500, 1073):
+        x_back, y_back = cocoa_point_from_qt(
+            *qt_rect_from_cocoa((10.0, float(y), 4.0, 0.0), height)[:2], height
+        )
+        assert (x_back, y_back) == (10.0, float(y))
+
+
+def test_a_point_crosses_the_other_way_for_the_right_click():
+    """Qt measures down from the top of the primary screen and AppKit up
+    from its bottom. A click at the top left of the screen is at the top of
+    Cocoa's."""
+    from sottovoce.geometry import cocoa_point_from_qt
+
+    assert cocoa_point_from_qt(0, 0, 1107) == (0.0, 1107.0)
+    assert cocoa_point_from_qt(300, 400, 1107) == (300.0, 707.0)

@@ -407,3 +407,44 @@ def clamped_position(
         max(min_x, min(max_x, x)),
         max(min_y, min(max_y, y)),
     )
+
+
+# -- Cocoa's coordinates, and ours ----------------------------------------
+#
+# Qt measures down from the top left of the primary screen; Cocoa measures
+# up from its bottom left. Two things now cross that line and both are one
+# subtraction, kept here rather than beside either of them because a flip
+# spelled twice is a flip that will disagree with itself once.
+
+
+def qt_rect_from_cocoa(
+    rect: tuple[float, float, float, float], primary_height: float
+) -> tuple[int, int, int, int]:
+    """A Cocoa screen rectangle in Qt's coordinates.
+
+    The menu bar item's own window is the one that makes this trip: the
+    flight aims at it, and the flight thinks in Qt rectangles. Measured
+    against ``QSystemTrayIcon.geometry()`` in the same process while both
+    existed, the two agree exactly once the origin is taken out
+    (1159,1073 38x34 in Cocoa is 1159,0 38x34 here, on a 1107-point
+    screen).
+    """
+    x, y, width, height = rect
+    return (
+        int(round(x)),
+        int(round(primary_height - y - height)),
+        int(round(width)),
+        int(round(height)),
+    )
+
+
+def cocoa_point_from_qt(
+    x: float, y: float, primary_height: float
+) -> tuple[float, float]:
+    """A point in Qt's global coordinates, in Cocoa's.
+
+    The other direction, and the other crossing: a right-click arrives from
+    Qt and the menu that answers it is opened at a point AppKit
+    understands.
+    """
+    return (float(x), float(primary_height - y))

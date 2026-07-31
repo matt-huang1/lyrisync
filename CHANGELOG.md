@@ -6,6 +6,34 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Milestone 21 — one menu, natively drawn, and grouped
+
+**The same menu looked like two menus.** The menu bar item and the window's
+right-click share one object and always have, but Qt converts a tray menu
+into a real `NSMenu` and draws a popup itself: one route got the system's
+own font, check marks and separators, the other got Qt's widget style.
+
+So the menu is a **model** now (`menu.py`, pure) and one native `NSMenu`
+drawn from it serves both routes (`nsmenu.py`, one door onto AppKit). That
+cost the Qt tray icon: Qt owns the `NSStatusItem` it makes and will not
+take a menu, so **the menu bar item is this app's own** and is removed at
+shutdown rather than destroyed with the window. The glyph still comes off
+`symbols.py` at the screen's scale, and the sizing lesson milestone 15.1
+paid for is stated directly instead of through a `QIconEngine`.
+
+**Seventeen entries in one column became four rows and two submenus.**
+Show/hide, then what is on screen, then what is about this song, then
+**Position** (docking and per-app memory) and **System** (Spaces,
+notifications, the menu bar item, login), then quit. Nothing that comes and
+goes with the song was buried: an entry that has just appeared because it
+can now act is one somebody is looking for.
+
+Two measurements on the way: a background app really can put a native menu
+on screen without coming forward (verified before anything was built), and
+an attributed `labelColor` does **not** stop AppKit greying a disabled
+item, so the remembered-apps rows are view-based items — the answer
+`QWidgetAction` gave, in the native idiom.
+
 ## Milestone 20 — the strip gets a type size, the dock gets a shape
 
 **Long lines in the compact strip no longer elide for no reason.** The bug

@@ -28,7 +28,7 @@ Everything that can be logic rather than widget is:
 | `sync.py`, `sync_session.py` | which line is current; a tap-to-sync pass |
 | `transition.py` | which line change is in flight (the dedupe) |
 | `loop.py` | line looping and echo-practice phases |
-| `menu.py` | which entries are visible, and their labels |
+| `menu.py` | the whole settings menu: the entry tree, the labels, which are visible, and where a click lands |
 | `geometry.py` | the type scale, minimum height (full and compact), button boxes, drag clamping, rect intersection, the dock position, the fitted width |
 | `flight.py` | the journey to and from the menu bar item |
 | `app_positions.py` | the per-app position map, the settling rule, the gates |
@@ -42,6 +42,7 @@ Everything that can be logic rather than widget is:
 | `http_client.py` | connections to one host, kept alive between requests |
 | `failure.py` | why a lookup could not be answered, in words |
 | `accessibility.py` | the three macOS display settings the window follows — plus one native door |
+| `nsmenu.py` | *not* pure, and the only module here that is all door: the one native NSMenu drawn from `menu.py`, and the menu bar item that carries it |
 
 None of them imports Qt. That is why the contrast floor, the type scale
 and the state machine can all be tested on a Linux runner with no display,
@@ -52,11 +53,19 @@ entries above that are not purely pure: their rules are, and one function
 each — `_quartz()`, `_legacy_settings()` and `_workspace()` — is the
 single door to the window list, to the preferences the old name left
 behind, and to how the developer's Mac is configured. Same shape as
-`frontmost._workspace()`, `hotkey._carbon()` and
-`login_item._main_app_service()`. Each of those six doors is shut by
-`tests/conftest.py`, so a test can never reach the developer's keyboard,
-workspace, login items, windows, saved settings or accessibility
-preferences.
+`frontmost._workspace()`, `hotkey._carbon()`,
+`login_item._main_app_service()` and `nsmenu._appkit()`. Each of those
+seven doors is shut by `tests/conftest.py`, so a test can never reach the
+developer's keyboard, workspace, login items, windows, saved settings,
+accessibility preferences or menu bar.
+
+`nsmenu.py` is the odd one out and is listed with the pure modules on
+purpose: it holds no rules at all. Everything the menu *is* lives in
+`menu.py` and is asserted there; this only draws it. Its door opens on the
+`NSStatusItem` as well as the `NSMenu`, because the item exists to carry
+the menu, the two are created and released together, and a test that may
+not put a menu on screen may certainly not leave an icon in somebody's
+menu bar.
 
 `frontmost` and `accessibility` both stand on NSWorkspace and still have
 separate doors: one is an opt-in layer that unsubscribes when it is

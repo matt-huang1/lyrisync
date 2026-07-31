@@ -1,3 +1,5 @@
+import pytest
+
 from sottovoce import menu as m
 
 
@@ -25,6 +27,11 @@ NO_LAYERS = dict(
 
 def entries(**overrides):
     return m.visible_entries(**{**NO_LAYERS, **overrides})
+
+
+def children(key):
+    """The keys inside a submenu, in the order they are declared."""
+    return tuple(entry.key for entry in m.ENTRIES[key].children)
 
 
 def without_separators(keys):
@@ -57,19 +64,25 @@ def test_quit_is_last_and_show_lyrics_first():
 
 
 def test_bare_menu_with_every_layer_dormant():
-    """Layers off must equal the original core app: show/hide, the three
-    standing choices about how the window looks and where it lives, and
-    quit. Forgetting learned positions is not among them — there is
-    nothing to forget until something has been learned."""
+    """Layers off must equal the original core app: show/hide, the two
+    standing choices about how the window looks, the two submenus and quit.
+    Forgetting learned positions is not among them — there is nothing to
+    forget until something has been learned.
+
+    Four rows and two submenus at the top level, which is what the grouping
+    is for: the same set of standing preferences that used to be eight
+    entries in one column."""
     assert without_separators(entries()) == (
         m.SHOW_LYRICS,
         m.COMPACT,
         m.ALBUM_COLOUR,
-        m.ALL_DESKTOPS,
-        m.MENUBAR_ANIMATION,
-        m.YIELD_NOTIFICATIONS,
+        m.POSITION_MENU,
         m.DOCK_TOP,
         m.REMEMBER_POSITION,
+        m.SYSTEM_MENU,
+        m.ALL_DESKTOPS,
+        m.YIELD_NOTIFICATIONS,
+        m.MENUBAR_ANIMATION,
         m.QUIT,
     )
 
@@ -136,25 +149,47 @@ def test_open_at_login_defaults_to_hidden():
     )
 
 
-def test_open_at_login_sits_with_the_window_behaviour_entries():
-    """Grouped with the other entries about how the app behaves rather
-    than about the song: Spaces, how the menu bar item behaves, how it treats
-    a notification, where the window goes when docked and where it lives per
-    app, then login. None of them belongs among the learning layers."""
-    shown = without_separators(m.visible_entries(**ALL_LAYERS))
-    behaviour = (
-        m.ALL_DESKTOPS,
-        m.MENUBAR_ANIMATION,
-        m.YIELD_NOTIFICATIONS,
+def test_the_standing_preferences_live_in_the_two_submenus():
+    """The grouping, stated as the property it is for: everything about how
+    the app behaves rather than about the song is inside one of two
+    submenus, and nothing about the song is.
+
+    Position answers "where does the window go and where does it live";
+    System answers "how does the app sit in the system". They are the long
+    tail, and the top level is what is reached for.
+    """
+    assert children(m.POSITION_MENU) == (
         m.DOCK_TOP,
+        m.SEPARATOR_AFTER_DOCK,
         m.REMEMBER_POSITION,
         m.POSITION_STATUS,
         m.POSITION_LIST,
         m.FORGET_POSITIONS,
+    )
+    assert children(m.SYSTEM_MENU) == (
+        m.ALL_DESKTOPS,
+        m.YIELD_NOTIFICATIONS,
+        m.MENUBAR_ANIMATION,
+        m.SEPARATOR_BEFORE_LOGIN,
         m.OPEN_AT_LOGIN,
     )
-    positions = [shown.index(key) for key in behaviour]
-    assert positions == list(range(positions[0], positions[0] + len(behaviour)))
+
+
+def test_nothing_about_the_song_is_buried_in_a_submenu():
+    """The half of the grouping that is a promise rather than a layout: an
+    entry that comes and goes with the song is one somebody is looking for
+    NOW, and a submenu is one more click and one more place to look."""
+    top = tuple(entry.key for entry in m.MENU)
+    for key in (m.ROMANISATION, m.SPOKEN, m.ECHO, m.SYNC, m.SHOW_LYRICS):
+        assert key in top
+
+
+def test_a_submenu_goes_when_everything_inside_it_has():
+    """A submenu holding nothing is an entry that cannot act, which is the
+    same rule its contents follow."""
+    assert m.POSITION_MENU in m._with_separators({m.DOCK_TOP})
+    assert m.POSITION_MENU not in m._with_separators({m.QUIT})
+    assert m.SYSTEM_MENU not in m._with_separators({m.QUIT})
 
 
 def test_forgetting_is_offered_only_once_there_is_something_to_forget():
@@ -285,3 +320,206 @@ def test_the_size_sits_with_the_layout_it_belongs_to():
     order = m.MENU_ORDER
     assert order.index(m.COMPACT) + 1 == order.index(m.COMPACT_SIZE)
     assert order.index(m.COMPACT_SIZE) + 1 == order.index(m.FIT_TO_SONG)
+
+
+# -- the model itself -----------------------------------------------------
+
+
+def test_every_entry_is_reachable_and_named_once():
+    """A key that appears twice in the tree would be two entries the window
+    could only address one of, and the flattening would hide which."""
+    assert len(m.MENU_ORDER) == len(set(m.MENU_ORDER))
+    assert set(m.ENTRIES) == set(m.MENU_ORDER)
+
+
+def test_every_entry_a_person_reads_has_something_to_read():
+    """Except the readout, whose text the app writes on every refresh, and
+    the separators, which are not entries so much as gaps."""
+    for key, entry in m.ENTRIES.items():
+        if entry.kind in (m.SEPARATOR, m.READOUT):
+            continue
+        assert entry.label, key
+
+
+def test_the_presets_come_from_where_they_are_defined():
+    """One definition: the sizes belong to typography and the rates to
+    speech, and a second copy here is how a menu comes to offer a preset
+    the app does not have."""
+    from sottovoce.speech import SPEECH_RATE_PRESETS
+    from sottovoce.typography import COMPACT_TEXT_SIZES
+
+    assert m.ENTRIES[m.COMPACT_SIZE].options == COMPACT_TEXT_SIZES
+    assert m.ENTRIES[m.SPEECH_RATE].options == SPEECH_RATE_PRESETS
+    assert m.ENTRIES[m.COMPACT_SIZE].option_label.format(20) == "20 pt"
+    assert m.ENTRIES[m.SPEECH_RATE].option_label.format(120) == "120 wpm"
+
+
+def test_the_login_label_is_the_login_modules_own():
+    from sottovoce import login_item
+
+    assert m.ENTRIES[m.OPEN_AT_LOGIN].label == login_item.MENU_LABEL
+
+
+# -- what a click does ----------------------------------------------------
+
+
+def test_a_toggle_is_handed_the_state_it_is_moving_to():
+    """Not the state it is in, and not a tick that moved itself. The handler
+    changes the app and the refresh that follows says what the app now is,
+    which is the same rule the QMenu entries followed by connecting to
+    triggered rather than toggled."""
+    menu = m.Menu()
+    seen = []
+    menu.on(m.COMPACT, seen.append)
+
+    menu.trigger(m.COMPACT)
+    assert seen == [True]
+
+    menu.set_checked(m.COMPACT, True)
+    menu.trigger(m.COMPACT)
+    assert seen == [True, False]
+
+
+def test_a_click_never_moves_the_tick_by_itself():
+    """The whole of why toggled was wrong: a refresh sets every check mark,
+    and an entry that also set its own would be a second answer to what the
+    setting is."""
+    menu = m.Menu()
+    menu.on(m.COMPACT, lambda enabled: None)
+    menu.trigger(m.COMPACT)
+    assert menu.is_checked(m.COMPACT) is False
+
+
+def test_a_choice_is_handed_the_preset_that_was_clicked():
+    menu = m.Menu()
+    seen = []
+    menu.on(m.SPEECH_RATE, seen.append)
+    menu.trigger(m.SPEECH_RATE, 160)
+    assert seen == [160]
+
+
+def test_a_command_is_handed_nothing():
+    menu = m.Menu()
+    seen = []
+    menu.on(m.DOCK_TOP, lambda: seen.append("docked"))
+    menu.trigger(m.DOCK_TOP)
+    assert seen == ["docked"]
+
+
+def test_a_click_with_nothing_wired_to_it_lands_nowhere():
+    """The readout and the rows are facts rather than controls, so this is
+    the case that has to be quiet rather than the case that has to raise."""
+    m.Menu().trigger(m.POSITION_STATUS)
+
+
+def test_wiring_a_key_that_does_not_exist_is_an_error():
+    """A typo in a handler name is otherwise a setting that silently stops
+    working."""
+    menu = m.Menu()
+    with pytest.raises(KeyError):
+        menu.on("no_such_entry", lambda: None)
+    with pytest.raises(KeyError):
+        menu.on_open("no_such_entry", lambda: None)
+
+
+# -- state, and what is drawn from it -------------------------------------
+
+
+def test_a_label_is_the_entrys_own_until_something_changes_it():
+    menu = m.Menu()
+    assert menu.label(m.SYNC) == "Sync this song"
+    menu.set_label(m.SYNC, "Re-sync this song")
+    assert menu.label(m.SYNC) == "Re-sync this song"
+
+
+def test_visibility_arrives_whole_rather_than_one_entry_at_a_time():
+    """It is decided in one place by pure logic, and handing it over whole
+    is what stops the model and that logic disagreeing."""
+    menu = m.Menu()
+    assert menu.is_visible(m.QUIT) is False
+    menu.show_only(m.visible_entries(**NO_LAYERS))
+    assert menu.is_visible(m.QUIT) is True
+    assert menu.is_visible(m.ECHO) is False
+
+
+def test_a_view_is_told_the_moment_it_is_attached():
+    """Or the first opening would be the first refresh, and a menu bar item
+    would be right only after somebody had already read it wrong."""
+
+    class View:
+        def __init__(self):
+            self.applied = 0
+
+        def apply(self, menu):
+            self.applied += 1
+
+        def set_rows(self, key, rows):
+            pass
+
+        def popup(self, x, y):
+            return True
+
+    view = View()
+    menu = m.Menu()
+    menu.attach(view)
+    assert view.applied == 1
+    assert menu.view is view
+
+
+def test_rows_reach_the_view_as_they_are_set():
+    """The one part of the menu that is data rather than structure, so the
+    one part that is rebuilt rather than relabelled."""
+
+    class View:
+        def __init__(self):
+            self.rows = None
+
+        def apply(self, menu):
+            pass
+
+        def set_rows(self, key, rows):
+            self.rows = (key, rows)
+
+        def popup(self, x, y):
+            return False
+
+    view = View()
+    menu = m.Menu()
+    menu.attach(view)
+    menu.set_rows(m.POSITION_LIST, [m.Row("Safari", b"tiff")])
+    assert menu.rows(m.POSITION_LIST) == (m.Row("Safari", b"tiff"),)
+    assert view.rows == (m.POSITION_LIST, (m.Row("Safari", b"tiff"),))
+
+
+def test_a_row_carries_bytes_or_nothing():
+    """Nothing pyobjc-shaped and nothing Qt-shaped crosses into the model,
+    which is what lets a row be built and asserted on a machine with
+    neither."""
+    assert m.Row("Safari").icon is None
+    assert m.Row("Safari", b"tiff").icon == b"tiff"
+
+
+def test_opening_a_menu_reaches_the_handler_for_that_menu():
+    """Two things need this and neither can be done honestly on a timer:
+    what macOS says about the login item, and a list that is data."""
+    menu = m.Menu()
+    opened = []
+    menu.on_open(None, lambda: opened.append("root"))
+    menu.on_open(m.POSITION_LIST, lambda: opened.append("rows"))
+
+    menu.opening()
+    menu.opening(m.POSITION_LIST)
+    menu.opening(m.SYSTEM_MENU)  # nothing wired to it, and that is quiet
+
+    assert opened == ["root", "rows"]
+
+
+def test_an_entry_with_nothing_wired_to_it_says_so():
+    """The readout and the rows state facts. That there is nothing for a
+    click on them to reach is a claim about the app, not about the wiring:
+    per-app forget was REMOVED, it was not left unconnected."""
+    menu = m.Menu()
+    menu.on(m.QUIT, lambda: None)
+    assert menu.has_handler(m.QUIT) is True
+    assert menu.has_handler(m.POSITION_STATUS) is False
+    assert menu.has_handler(m.POSITION_LIST) is False
