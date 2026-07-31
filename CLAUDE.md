@@ -111,6 +111,16 @@ Rules that come with them:
 - **`QSettings` is injected, never configured globally.**
   `setDefaultFormat`/`setPath` are process-wide and silently do nothing on
   macOS.
+- **A control is proved by a press, and the press goes to the WINDOW.**
+  Calling a slot, calling `click()`, and asking `isVisibleTo` all name the
+  receiver, which is the one thing a hit-testing bug gets wrong: 1483
+  tests passed against a report that every control on the window was
+  dead, and none of them could have failed. A press delivered to
+  `windowHandle()` lets Qt pick the receiver, at the control's centre
+  taken from its live geometry, asserting both halves — the control
+  acted, AND the drag handler did not. Both, because neither implies the
+  other. A guard test presses bare chrome and asserts the opposite, or
+  the second half passes in a suite where nothing is pressable at all.
 
 ## Constraints that must not be reintroduced
 

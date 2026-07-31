@@ -6,6 +6,30 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Fix 22.1 — the press nobody was sending
+
+**A report that every control on the window was dead**: the loop button,
+the spoken reference, the echo done button and the tap bar each doing
+nothing, with the press reaching the window's drag handler instead.
+
+**It did not reproduce.** Real `CGEvent` clicks at each control's actual
+screen position, with the accessory activation policy in force and the app
+inactive, which is the only state it is ever in: every control acted and
+the drag handler saw none of them. The same probe run at the two commits
+before this one says the same thing, so there is no breaking change to
+name.
+
+**What the report was right about is the suite.** 1483 tests passed, and
+not one of them would have failed if the controls had been dead: every
+test of an overlay control called its slot, called its `click()`, or asked
+whether it was visible. All three name the receiver, which is exactly what
+a hit-testing bug gets wrong.
+
+So a press is now sent to the **window** rather than to a widget, at each
+control's own position, in both layouts, asserting the control acted and
+the drag handler did not. Proven to go red against three separate ways of
+breaking it.
+
 ## Milestone 22 — getting out of the pointer's way
 
 **The opacity gesture works and is never used.** Option and a scroll over
