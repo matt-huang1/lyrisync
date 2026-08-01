@@ -6,6 +6,26 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## The app keeps its files where it can write them
+
+**In the built app, tap-to-sync could not keep anything.** The cache, the
+album colours and your hand-made syncs went into directories named
+relative to wherever the app was started, and macOS starts an app from a
+directory nothing may write to. So every tap in a pass failed to be
+written down, the counter row was replaced by *taps are not being saved*
+from the first tap onward, every song was fetched from LRCLIB again from
+scratch, and a finished sync would have had nowhere to go. Running from a
+checkout was fine, which is why it took this long to see.
+
+**They now live in `~/Library/Application Support/SottoVoce/`**, under the
+same names as before, whichever way the app was started. Syncs sitting
+beside a checkout are copied in on the next launch — copied, never moved,
+and never over the top of a file already there.
+
+**The counter no longer disappears when something is wrong.** A warning
+about the pass is added to the count rather than put in its place: how many
+lines you have timed is the one thing you are watching while you tap.
+
 ## A tap-to-sync pass you cannot lose
 
 **Every tap is written down as you make it.** A pass costs minutes of

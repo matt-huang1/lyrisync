@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-1844 tests, run on every push. The interesting part is not the count — it
+1858 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -43,6 +43,24 @@ Fourteen doors are shut for the whole session:
 | `notifications._quartz()` | reading every window open on the machine |
 | `accessibility._workspace()` | how the developer's Mac is set up, and an observer left sitting on it |
 | `settings._legacy_settings()` | the plist the LyriSync name left behind |
+
+### A guard is a blind spot as well as a wall
+
+The provider guard is the one that taught this, and it cost a shipped
+release. Nothing may build a `LyricsProvider` on its defaults, so nothing
+in 1844 tests ever evaluated those defaults — and one of them was
+`Path(".user_syncs")`, a relative path, which is not a location at all
+but a location plus whoever started the process. macOS starts an app
+bundle in `/`, so the built app could not write a sync, a cache entry, or
+the journal that keeps a tap-to-sync pass you are part way through. The
+suite was structurally incapable of seeing it.
+
+The guard was right and it stays. What was missing is that a value the
+suite may not USE still has properties it can be ASKED about, and those
+are the two it needed: the directory is absolute, and it is the same
+answer from any working directory. Both assertions fail against the code
+that shipped. Where a guard puts something out of reach, that is the
+place to ask what must be true of it.
 
 The subprocess guard used to cover Spotify too, and that is worth writing
 down rather than editing out: the app asked by launching `osascript`, so
@@ -207,7 +225,7 @@ Worth knowing rather than worth fixing all at once. A `qt` test that calls
 question the test wrote down; only an `integration` test asks the question
 the app is actually asked.
 
-**Driven all the way in** (the ninety-nine):
+**Driven all the way in** (the hundred):
 
 - **The loop's wrap seek, echo practice, and the position a seek lands
   at** — a fake Spotify and a fake clock under the real `PlayerMonitor`,
@@ -273,7 +291,12 @@ the app is actually asked.
   coming back and the pass being offered and resumed at the last stamp;
   the compact setting flipped in both directions mid-pass; a partial kept
   and refused for publication; a journal that cannot be written; and both
-  refusals a tap can meet.
+  refusals a tap can meet. And, since the report below, the whole of what
+  a person actually does in one test: "Sync this song" chosen from the
+  real menu — the selector Cocoa fires, the tag `_arm` wrote — and then
+  the bar pressed on the window, with the count on screen and the record
+  on disk checked after each press. Those were two files that had never
+  met.
 - **The global hotkey** — the callback Carbon was handed is the one that
   hides the lyrics.
 

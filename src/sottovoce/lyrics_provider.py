@@ -30,6 +30,7 @@ import http.client
 import json
 import logging
 import re
+import shutil
 import threading
 import time
 import urllib.parse
@@ -58,6 +59,7 @@ from sottovoce.failure import (
 )
 from sottovoce.http_client import ConnectionPool
 from sottovoce.player_monitor import PlayerSnapshot
+from sottovoce import storage
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +70,16 @@ LRCLIB_SEARCH_URL = f"https://{LRCLIB_HOST}/api/search"
 # because "where this app talks to LRCLIB" has one list and this is it.
 LRCLIB_CHALLENGE_URL = f"https://{LRCLIB_HOST}/api/request-challenge"
 LRCLIB_PUBLISH_URL = f"https://{LRCLIB_HOST}/api/publish"
-DEFAULT_CACHE_DIR = Path(".lyrics_cache")
+# Absolute, and from storage.py, which is the one thing in this app that
+# answers where its files go. Both were relative until the bundle was
+# measured, which meant the answer was "wherever the app was launched
+# from" and, for a bundle macOS launches, a read-only directory. See
+# storage.py.
+DEFAULT_CACHE_DIR = storage.CACHE_DIR
 # Hand-made syncs. Deliberately NOT under the cache directory: clearing the
 # cache is a documented reset, and it must never cost the user a sync they
 # tapped out themselves.
-DEFAULT_USER_SYNC_DIR = Path(".user_syncs")
+DEFAULT_USER_SYNC_DIR = storage.USER_SYNC_DIR
 # Lyrics fetched ahead of being needed, for tracks that have not played.
 # INSIDE the cache directory, deliberately and for the mirror of the reason
 # above: this is the one thing here nobody made, so clearing the cache must
@@ -651,6 +658,52 @@ class Lookup:
     @property
     def from_service(self) -> bool:
         return self.source == FROM_SERVICE
+
+
+def carry_user_syncs(
+    legacy: Path = storage.LEGACY_USER_SYNC_DIR,
+    current: Path = DEFAULT_USER_SYNC_DIR,
+) -> storage.Carry:
+    """Copy hand-made syncs from where a checkout used to keep them into
+    where this app keeps them now.
+
+    Copied and never moved, and a file already in ``current`` is left
+    exactly as it is: both directories hold work somebody tapped out by
+    hand, and a carry that overwrote would be this app choosing between
+    two versions of the same song on their behalf. The old directory is
+    left whole, for the reason ``settings.migrate`` leaves the LyriSync
+    plist whole.
+
+    In this module rather than in ``storage`` because this is the
+    directory this module owns, and a second module putting files in it
+    would be a second module that could take one out. That claim is
+    asserted in tests/test_user_sync_safety.py, which is where a new
+    writer has to argue for itself.
+    """
+    legacy, current = Path(legacy), Path(current)
+    if legacy.resolve() == current.resolve():
+        return storage.Carry.SAME_DIRECTORY
+    if not legacy.is_dir():
+        return storage.Carry.NOTHING_TO_CARRY
+    copied = []
+    for path in sorted(legacy.iterdir()):
+        if not path.is_file():
+            continue
+        destination = current / path.name
+        if destination.exists():
+            continue
+        current.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+        copied.append(path.name)
+    if not copied:
+        return storage.Carry.ALREADY_CARRIED
+    logger.info(
+        "carried %d hand-made syncs into %s, and %s is left as it is",
+        len(copied),
+        current,
+        legacy,
+    )
+    return storage.Carry.COPIED
 
 
 class LyricsProvider:

@@ -48,6 +48,7 @@ except Exception as exc:  # pragma: no cover - platform plugin missing
 from sottovoce import accessibility  # noqa: E402
 from sottovoce import frontmost  # noqa: E402
 from sottovoce import menu as m  # noqa: E402
+from sottovoce import nsmenu  # noqa: E402
 from sottovoce import player_monitor as pmon  # noqa: E402
 from sottovoce import proximity  # noqa: E402
 from sottovoce import window as w  # noqa: E402
@@ -713,3 +714,294 @@ def play(window, spotify, position=None):
         monitor.tick()
         APP.processEvents()
     return monitor
+
+
+# -- AppKit, with the drawing left out -------------------------------------
+#
+# The stand-in a menu is really built against. It lived in
+# test_window_menu_clicks.py until a second file needed a click that
+# arrives the way Cocoa delivers one: a pass entered from the MENU and
+# then tapped out on the window is one story, and it was two files that
+# never met. See that file's own docstring for what this buys.
+
+# -- AppKit, with the drawing left out -------------------------------------
+
+
+class Cocoa:
+    """Base for the stand-ins: ``alloc()``/``init()`` the way pyobjc spells
+    a constructor, so nsmenu's own code is what builds these."""
+
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def init(self):
+        return self
+
+
+class Size:
+    def __init__(self, width=0.0, height=0.0):
+        self.width, self.height = width, height
+
+
+class Rect:
+    def __init__(self, x=0.0, y=0.0, width=0.0, height=0.0):
+        self.origin = Size(x, y)
+        self.origin.x, self.origin.y = x, y
+        self.size = Size(width, height)
+
+
+class FakeItem(Cocoa):
+    """One NSMenuItem: its title, its tag, its tick and whether it is
+    hidden. Everything a refresh writes, kept so it can be read back."""
+
+    def __init__(self):
+        self.title_text = ""
+        self.tag_value = -1
+        self.submenu_menu = None
+        self.state = nsmenu.STATE_OFF
+        self.hidden = False
+        self.enabled = True
+        self.image = None
+        self.view = None
+        self.target = None
+        self.action = None
+        self.separator = False
+
+    @classmethod
+    def separatorItem(cls):
+        item = cls()
+        item.separator = True
+        return item
+
+    def initWithTitle_action_keyEquivalent_(self, title, action, key):
+        self.title_text = title
+        return self
+
+    def setTitle_(self, text):
+        self.title_text = text
+
+    def setTag_(self, tag):
+        self.tag_value = tag
+
+    def tag(self):
+        return self.tag_value
+
+    def setSubmenu_(self, submenu):
+        self.submenu_menu = submenu
+
+    def submenu(self):
+        return self.submenu_menu
+
+    def setState_(self, state):
+        self.state = state
+
+    def setHidden_(self, hidden):
+        self.hidden = hidden
+
+    def setEnabled_(self, enabled):
+        self.enabled = enabled
+
+    def setImage_(self, image):
+        self.image = image
+
+    def setView_(self, view):
+        self.view = view
+
+    def setTarget_(self, target):
+        self.target = target
+
+    def setAction_(self, action):
+        self.action = action
+
+
+class FakeMenu(Cocoa):
+    def __init__(self):
+        self.items = []
+        self.delegate = None
+        self.autoenables = True
+        self.popups = []
+
+    def setAutoenablesItems_(self, value):
+        self.autoenables = value
+
+    def addItem_(self, item):
+        self.items.append(item)
+
+    def itemAtIndex_(self, index):
+        return self.items[index]
+
+    def removeAllItems(self):
+        self.items = []
+
+    def setDelegate_(self, delegate):
+        self.delegate = delegate
+
+    def popUpMenuPositioningItem_atLocation_inView_(self, item, point, view):
+        self.popups.append(point)
+
+
+class FakeImage(Cocoa):
+    def __init__(self):
+        self.data = None
+        self.size = None
+        self.template = False
+
+    def initWithData_(self, data):
+        self.data = data
+        return self
+
+    def setSize_(self, size):
+        self.size = size
+
+    def setTemplate_(self, value):
+        self.template = value
+
+
+class FakeLabel(Cocoa):
+    def __init__(self, text=""):
+        self.text = text
+        self._frame = Rect(0, 0, 80, 16)
+
+    @classmethod
+    def labelWithString_(cls, text):
+        return cls(text)
+
+    def setFont_(self, font):
+        self.font = font
+
+    def setTextColor_(self, colour):
+        self.colour = colour
+
+    def sizeToFit(self):
+        pass
+
+    def frame(self):
+        return self._frame
+
+    def setFrame_(self, rect):
+        self._frame = rect
+
+
+class FakeView(Cocoa):
+    def __init__(self):
+        self.subviews = []
+        self.image = None
+
+    def initWithFrame_(self, rect):
+        self.rect = rect
+        return self
+
+    def addSubview_(self, view):
+        self.subviews.append(view)
+
+    def setImage_(self, image):
+        self.image = image
+
+
+class FakeButton:
+    def __init__(self):
+        self.tooltip = None
+        self.image = None
+
+    def setToolTip_(self, text):
+        self.tooltip = text
+
+    def setImage_(self, image):
+        self.image = image
+
+    def window(self):
+        return self
+
+    def frame(self):
+        return Rect(1159.0, 1073.0, 38.0, 34.0)
+
+
+class FakeStatusItem:
+    def __init__(self):
+        self._button = FakeButton()
+        self.menu = None
+
+    def button(self):
+        return self._button
+
+    def setMenu_(self, menu):
+        self.menu = menu
+
+
+class FakeStatusBar:
+    def __init__(self):
+        self.items = []
+        self.removed = []
+
+    def statusItemWithLength_(self, length):
+        item = FakeStatusItem()
+        self.items.append(item)
+        return item
+
+    def removeStatusItem_(self, item):
+        self.removed.append(item)
+
+
+STATUS_BAR = FakeStatusBar()
+
+
+class FakeObjc:
+    @staticmethod
+    def selector(function, signature=None):
+        return function
+
+
+def fake_kit():
+    """What ``_appkit()`` hands back on a Mac, with the pixels taken out."""
+    return {
+        "objc": FakeObjc,
+        "NSColor": type("NSColor", (), {"labelColor": staticmethod(lambda: "label")}),
+        "NSData": type(
+            "NSData",
+            (),
+            {"dataWithBytes_length_": staticmethod(lambda data, length: bytes(data))},
+        ),
+        "NSFont": type(
+            "NSFont", (), {"menuFontOfSize_": staticmethod(lambda size: "menu font")}
+        ),
+        "NSImage": FakeImage,
+        "NSImageView": FakeView,
+        "NSMakePoint": lambda x, y: (x, y),
+        "NSMakeRect": lambda x, y, width, height: Rect(x, y, width, height),
+        "NSMakeSize": lambda width, height: Size(width, height),
+        "NSMenu": FakeMenu,
+        "NSMenuItem": FakeItem,
+        "NSObject": Cocoa,
+        "NSStatusBar": type(
+            "NSStatusBar", (), {"systemStatusBar": staticmethod(lambda: STATUS_BAR)}
+        ),
+        "NSTextField": FakeLabel,
+        "NSView": FakeView,
+    }
+
+
+def item_for(window, key, value=None):
+    """The NSMenuItem a user would click, found the way a click finds it.
+
+    A CHOICE entry has no item of its own to click: its row lives in the
+    submenu built from the preset list, and which row is which is the order
+    that list is in.
+    """
+    view = window._menu.view
+    if value is None:
+        return view._items[key]
+    options = m.ENTRIES[key].options
+    return view._items[key].submenu().itemAtIndex_(options.index(value))
+
+
+def click(window, key, value=None):
+    """Fire the one selector every menu click arrives through.
+
+    ``fire_`` is the whole of what Cocoa calls: it reads the tag off the
+    sender and hands it to the view, which looks up what that tag stands
+    for and triggers it. Nothing here names the handler, the key or the
+    value — all three come out of the tag table the real ``_arm`` built.
+    """
+    window._menu.view._helper.fire_(item_for(window, key, value))
+    APP.processEvents()

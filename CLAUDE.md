@@ -22,7 +22,8 @@ can be logic rather than widget is a **Qt-free pure module** —
 `flight.py`, `app_positions.py`, `gestures.py`, `romanize.py`,
 `menubar.py`, `http_client.py`, `settings.py`, `notifications.py`,
 `proximity.py`, `failure.py`, `player_events.py`, `hit_test.py`,
-`placement.py`, `backoff.py`, `challenge.py`, `publish.py`. That is
+`placement.py`, `backoff.py`, `challenge.py`, `publish.py`,
+`storage.py`. That is
 why the contrast floor is a test rather than a judgement, and why the
 whole suite runs headless on Linux.
 
@@ -184,11 +185,23 @@ Rules that come with them:
 
 ### Lyrics and the user's work
 
+- **Where the app's files go is one absolute answer** (`storage.py`), the
+  same one from any working directory. A relative default is not a
+  location: macOS starts a bundle in `/`, which is read-only, so the
+  shipped app could not write a pass journal, a cache entry or a finished
+  sync — measured as `Errno 30` on every tap. Anything already beside a
+  checkout is **copied** in, never moved, never over the top of a file
+  already there, by the one function in `lyrics_provider.py` that may.
 - `.user_syncs/` is **the user's work, not cache**. It is consulted before
   cache and network, never invalidated, and nothing in the app or its docs
   may delete it — clearing `.lyrics_cache/` must stay a safe reset. Only
   `lyrics_provider.py` and `artwork.py` may write in the package, and
   `artwork.py` may not so much as mention the user-sync directory.
+- **A test cannot see what the guards forbid it to touch.** Nothing may
+  build a provider on its defaults, so nothing evaluated them, and that is
+  how a directory nobody could write to shipped. Where a value is out of
+  the suite's reach, assert the PROPERTIES it must have — absolute, and
+  unchanged by the working directory.
 - **Only genuine 404s are cached negatively.** An error's outcome is
   unknown; it surfaces as a retry state and re-attempts on a **growing**
   interval: 30s, then doubling to a 300s ceiling (`backoff.py`, measured —
@@ -277,6 +290,12 @@ Rules that come with them:
   writes a forty line song makes); the pool would only let two writes of
   one file land out of order. A write that FAILS is put on screen, because
   the promise is the whole point.
+- **A warning about the pass may not replace the COUNT of it.** Only the
+  armed exit prompt has that row to itself; everything else keeps the
+  count and adds to it. The failed-journal warning took the row over, so
+  the number saying the taps were landing vanished at the first tap, and
+  "my taps are not being saved" reached this project as "the tap bar does
+  nothing".
 - **Nothing that merely ENDS a pass may take its stamps.** `_leave_sync`
   drops the session and keeps the journal; a track change, a stop and the
   ✕ all go through `_end_pass`, which names the reason and shows the

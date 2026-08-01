@@ -285,6 +285,24 @@ def test_only_save_user_sync_ever_writes_to_the_directory():
         "user_sync_text",
     }
 
+    # And the one way a file gets in there without being written: the
+    # carry from where a checkout used to keep them, which had to argue
+    # for itself here before it existed. It COPIES — it may never move,
+    # because a move is a delete wearing a friendlier name, and it is in
+    # this module for the reason the rest of this test states: a second
+    # module putting files in that directory is a second module that
+    # could take one out.
+    copiers = {
+        function.name
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute) and node.attr.startswith(("copy", "move"))
+    }
+    assert copiers == {"carry_user_syncs"}
+    assert "shutil.move" not in source
+    assert "copytree" not in source  # whole-directory copies, over the top of what?
+
 
 def test_the_artwork_cache_cannot_reach_the_user_sync_directory():
     """The cover-colour cache is cache: its own directory, its own name,

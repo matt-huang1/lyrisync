@@ -114,7 +114,12 @@ from sottovoce import frontmost
 from sottovoce import hit_test
 from sottovoce import hotkey
 from sottovoce.loop import LineLoop, LoopPhase
-from sottovoce.lyrics_provider import LyricsError, LyricsProvider, close_connections
+from sottovoce.lyrics_provider import (
+    LyricsError,
+    LyricsProvider,
+    carry_user_syncs,
+    close_connections,
+)
 from sottovoce.macspaces import (
     ACTIVATION_POLICY_ACCESSORY,
     STATUS_WINDOW_LEVEL,
@@ -952,6 +957,13 @@ class LyricsWindow(QWidget):
         artwork_provider: Optional[ArtworkProvider] = None,
     ) -> None:
         super().__init__()
+        if provider is None:
+            # The one launch path that resolves where this app's files
+            # actually live, so it is the one place the carry from a
+            # checkout's own directory belongs. An injected provider
+            # arrives complete and knows its own directories, exactly as
+            # an injected QSettings does below.
+            logger.info("files: %s", carry_user_syncs().value)
         self._provider = provider or LyricsProvider()
         self._artwork = artwork_provider or ArtworkProvider()
         self._view_model = LyricsViewModel()
@@ -2762,16 +2774,22 @@ class LyricsWindow(QWidget):
     def _progress_text(self, display) -> str:
         """What the row says during a pass, in priority order.
 
-        The armed prompt first, because it is a question waiting on an
-        answer. Then the journal failing, because it is the one thing that
-        makes the count a lie. Then a refused tap, because somebody has
-        just pressed something and nothing happened. The count last: it is
-        true whenever nothing else is, which is nearly always.
+        The armed prompt first, and it is the only thing here that may
+        have the row to itself: it is a question waiting on an answer, and
+        the count is not part of the question.
+
+        Everything else keeps the COUNT and adds to it. That is the whole
+        of what the last fix got wrong: a journal that could not be
+        written took the row over, so the one number telling somebody
+        their taps were landing vanished on the first tap and never came
+        back, and "my taps are not being saved" reached this project as
+        "the tap bar does nothing". The two facts are not alternatives.
+        The refusal already worked this way and now the warning does too.
         """
         if self._exit_armed:
             return self._warned(_EXIT_CONFIRM_TEXT)
         if self._pass_unsaved:
-            return self._warned(_PASS_UNSAVED_TEXT)
+            return f"{display.progress} · {self._warned(_PASS_UNSAVED_TEXT)}"
         if self._tap_refusal:
             return f"{display.progress} · {self._tap_refusal}"
         return display.progress

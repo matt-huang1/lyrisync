@@ -37,10 +37,14 @@ from typing import Optional
 # distribution's metadata — the same string the lyrics fetch sends, so
 # the two cannot introduce themselves differently.
 from sottovoce import USER_AGENT
+from sottovoce import storage
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ARTWORK_CACHE_DIR = Path(".artwork_cache")
+# Absolute, from the one module that knows where this app's files go. A
+# relative default put this directory wherever the app was launched from,
+# which for the bundle is a read-only one: see storage.py.
+DEFAULT_ARTWORK_CACHE_DIR = storage.ARTWORK_CACHE_DIR
 
 _REQUEST_TIMEOUT = 10.0
 # Covers are a few hundred KB; anything wildly bigger is not a cover and

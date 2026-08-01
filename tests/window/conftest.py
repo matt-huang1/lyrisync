@@ -16,6 +16,7 @@ import pytest
 from PySide6.QtCore import QSettings
 
 from sottovoce import lyrics_provider as lp
+from sottovoce import nsmenu
 from sottovoce import player_events
 from sottovoce import player_monitor as pmon
 from sottovoce import window as w
@@ -23,7 +24,7 @@ from sottovoce.artwork import ArtworkProvider
 from sottovoce.http_client import ConnectionPool
 from sottovoce.lyrics_provider import LyricsProvider
 
-from helpers import APP, REAL_FETCH_RUN, FakeLrclib, FakeSpotify
+from helpers import APP, REAL_FETCH_RUN, FakeLrclib, FakeSpotify, fake_kit
 
 
 @pytest.fixture(autouse=True)
@@ -202,3 +203,20 @@ def spotify(monkeypatch):
 def fetching(monkeypatch):
     """Give ``FetchTask`` its body back for the length of one test."""
     monkeypatch.setattr(w.FetchTask, "run", REAL_FETCH_RUN)
+
+
+@pytest.fixture
+def drawn(monkeypatch):
+    """Open the door onto the AppKit stand-in, for the length of one test.
+
+    Applied after ``no_real_world`` has answered it with None, so this wins
+    for every window built inside the test. The session guard one directory
+    up stays armed for anything that reaches around both.
+
+    ``_HELPER_CLASS`` is reset because nsmenu caches the one Objective-C
+    class it defines (defining it twice raises) and the cached one would
+    otherwise be built against whichever kit came first and outlive the
+    test that made it.
+    """
+    monkeypatch.setattr(nsmenu, "_HELPER_CLASS", None)
+    monkeypatch.setattr(w.nsmenu, "_appkit", fake_kit)

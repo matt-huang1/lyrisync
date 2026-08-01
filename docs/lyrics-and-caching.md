@@ -354,6 +354,9 @@ cancelling lands.
 
 ## Files
 
+They live in `~/Library/Application Support/SottoVoce/`, whichever way
+the app was started:
+
 ```
 .lyrics_cache/    derived — JSON per track ID, including definitive "no lyrics"
 .artwork_cache/   derived — the album colour, three integers per track
@@ -363,6 +366,18 @@ cancelling lands.
 
 The two derived directories can be thrown away at any time: everything in
 them can be fetched again. The third cannot.
+
+Those names begin with a dot, so Finder hides them until you press
+⇧⌘. — they kept the names they have always had, because everything
+written about them elsewhere is still true.
+
+Until they had a home of their own, these three were relative paths, which
+meant they landed beside whatever directory the app was started in. That
+is fine for a run from a checkout and wrong for an app you launch: macOS
+starts one in `/`, which is read-only, so the built app could not write a
+cache entry, a sync, or the journal that keeps a pass you are part way
+through. Syncs sitting beside a checkout are copied in on the next launch
+— copied, never moved, and never over the top of a file already there.
 
 ## Why a lookup failed
 

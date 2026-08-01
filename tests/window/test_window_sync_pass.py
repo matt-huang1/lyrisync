@@ -31,6 +31,7 @@ from sottovoce import window as w
 from helpers import (
     APP,
     SONG,
+    click,
     go_compact,
     play,
     pressing,
@@ -119,6 +120,47 @@ def stamped(window):
 def about(*seconds):
     """The stamps a pass should be carrying, to within a hundredth."""
     return [pytest.approx(value, abs=0.01) for value in seconds]
+
+
+# -- the whole story, from the menu to the file -----------------------------
+
+
+def test_a_pass_chosen_from_the_menu_takes_its_presses_and_writes_them_down(
+    drawn, playing, spotify
+):
+    """The report, end to end, and the two halves that had never met.
+
+    Every other pass in this file starts at ``_begin_sync``, and every
+    menu click in test_window_menu_clicks.py ends at ``_on_tap`` with a
+    position set by hand. Between the two was the whole of what a user
+    does: choose "Sync this song" from the menu that is really there, and
+    then press the bar on the window. Both are real here — the click is
+    delivered to the selector Cocoa delivers one to, with the tag the real
+    ``_arm`` wrote, and every stamp comes from a press Qt routed to the
+    bar's live centre.
+
+    And it ends at the FILE, because that is where this broke: the taps
+    were landing and nothing was keeping them.
+    """
+    window, monitor = playing()
+    assert window._menu.view is not None, "the menu was not built"
+
+    click(window, m.SYNC)
+    assert window._syncing is True, "the menu did not start a pass"
+
+    for index, position in enumerate((2.0, 5.0)):
+        record = tap(window, monitor, spotify, position)
+        assert record.acted == 1, f"the tap bar took no press at line {index}"
+        assert record.dragged == 0, "the press reached the window's drag handler"
+        # After each one, not at the end: the count on screen and the
+        # record on disk are what the user is promised, and both are
+        # checked while the pass is still running.
+        assert stamped(window) == (index + 1, len(LINES))
+        assert f"{index + 1} / {len(LINES)} lines" in window._progress.text()
+        assert len(journal(window)["stamps"]) == index + 1
+
+    assert journal(window)["stamps"] == about(1.75, 4.75)
+    assert journal(window)["lines"] == LINES
 
 
 # -- the pass that finishes -------------------------------------------------
@@ -416,6 +458,15 @@ def test_a_journal_that_cannot_be_written_is_said_out_loud(playing, spotify, mon
     # The stamp itself still happened — the pass carries on, it is only
     # the keeping of it that failed.
     assert window._view_model.sync_session.stamps == about(1.75)
+    # And the COUNT is still on screen beside the warning, which is the
+    # half this cost a user a whole report: the warning used to take the
+    # row over, so the one number saying "your taps are landing" vanished
+    # at the first tap and never came back. "My taps are not being saved"
+    # and "the tap bar does nothing" are not the same sentence.
+    assert f"1 / {len(LINES)} lines" in window._progress.text()
+    tap(window, monitor, spotify, 5.0)
+    assert f"2 / {len(LINES)} lines" in window._progress.text()
+    assert "not being saved" in window._progress.text()
 
 
 # -- what a kept pass is, and is not ----------------------------------------
