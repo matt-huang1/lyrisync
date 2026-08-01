@@ -582,7 +582,7 @@ def test_a_429_stops_every_request_including_the_one_the_user_asked_for(
     assert 590.0 < window._view_model.retry_interval() <= 600.0
 
 
-# -- the rest of the album, before anyone asks for it ----------------------
+# -- the album, fetched before anyone asks for it --------------------------
 
 
 @pytest.fixture
@@ -601,8 +601,20 @@ def warming(monkeypatch):
     monkeypatch.setattr(lp, "WARM_REQUEST_GAP_SECONDS", 0.01)
 
 
-def album_search(*names):
-    return (200, json.dumps([{"trackName": name} for name in names]).encode())
+def album_search(*names, duration=214.0):
+    """A search response naming tracks and carrying their lyrics, which is
+    what LRCLIB's really does."""
+    return (200, json.dumps([
+        {
+            "trackName": name,
+            "artistName": SONG["artist"],
+            "albumName": SONG["album"],
+            "duration": duration,
+            "syncedLyrics": SYNCED_LRC,
+            "plainLyrics": None,
+        }
+        for name in names
+    ]).encode())
 
 
 def track(title, duration=214.0):
@@ -616,69 +628,77 @@ def track(title, duration=214.0):
     }).encode())
 
 
+def searched(window, seconds=5.0):
+    """Pump the loop until stage one has been and gone."""
+    settle(window, lambda: window._provider.album_is_searched(window._current_snapshot),
+           seconds, "the album was never searched")
+
+
 def warmed(window, seconds=5.0):
-    """Pump the loop until the album warm has finished its work."""
+    """Pump the loop until the per-track stage has finished its work."""
+    settle(window, lambda: window._provider.album_is_warm(window._current_snapshot),
+           seconds, "the album was never warmed")
+
+
+def settle(window, done, seconds, complaint):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         APP.processEvents()
-        if window._provider.album_is_warm(window._current_snapshot):
+        if done():
             APP.processEvents()
             return
         time.sleep(0.005)
-    raise AssertionError("the album was never warmed")
+    raise AssertionError(complaint)
 
 
-def test_a_song_starting_quietly_fetches_the_rest_of_its_album(
+def second_track(window, spotify, title="Second Song", uri="spotify:track:9Zz"):
+    """The same album, a different song. This is the whole signal the
+    per-track stage waits for."""
+    spotify.song = {**SONG, "uri": uri, "title": title}
+    monitor_for(window).tick()
+    APP.processEvents()
+    settled(window)
+
+
+def test_a_song_from_a_new_album_costs_one_request(
     make_window, lrclib, spotify, fetching, warming
 ):
-    """The whole point of warming, driven from the only place it can start:
-    a song began, its own lookup landed, and some seconds later the app
-    asks LRCLIB about the tracks it has not been asked for yet.
+    """Stage one, driven from the only place it can start: a song began,
+    its own lookup landed, and some seconds later the app asks LRCLIB what
+    else is on the album — once.
 
-    One search for the names and one request per name, which is the shape
-    LRCLIB's own guidance for batch work asks for.
+    Nineteen requests for a song somebody skipped past is exactly what the
+    two stages exist to stop, so the assertion that nothing per-track went
+    out is the point of the test rather than a detail of it.
     """
-    # Track routes first, because first match wins and every warm request
-    # carries album_name= too: the album match is the LEAST specific of
-    # these, not the most.
     service = lrclib(
-        ("track_name=Second+Song", track("Second Song")),
-        ("track_name=Third+Song", track("Third Song")),
         ("api/search", album_search("Blue Hour", "Second Song", "Third Song")),
         ("album_name=", (200, SYNCED_BODY)),
     )
     window = make_window()
     play(window, spotify)
     assert window._view_model.display().mode is Mode.SYNCED
+    own = len(service.asked)
 
-    warmed(window)
+    searched(window)
 
-    assert len(service.asked_for("api/search")) == 1, "the names were not asked for"
-    # The song that is playing is not asked about again: its own lookup has
-    # just run, and warming is for the tracks nobody has asked for. One
-    # request for it, and that one is its own — the warm's requests carry
-    # no duration, because the duration of a track nobody has played is
-    # exactly what this app does not know.
-    assert len(service.asked_for("track_name=Blue+Hour&")) == 1
-    assert len(service.asked_for("track_name=Second+Song")) == 1
-    assert len(service.asked_for("track_name=Third+Song")) == 1
+    assert len(service.asked_for("api/search")) == 1
+    assert len(service.asked) == own + 1, "the album cost more than one request"
+    assert window._provider.album_is_warm(window._current_snapshot) is False
 
 
-def test_a_warmed_track_plays_with_nothing_on_the_wire(
+def test_the_search_alone_answers_a_later_track(
     make_window, lrclib, spotify, fetching, warming
 ):
-    """What an outage would look like afterwards. The second track's lyrics
-    are already on disk, so the window fills without a request at all.
-    """
+    """What that one request buys. The second track's lyrics came back
+    inside the search, so the window fills with nothing on the wire."""
     service = lrclib(
-        ("track_name=Second+Song&artist_name=Someone&album_name=",
-         track("Second Song")),
         ("api/search", album_search("Blue Hour", "Second Song")),
         ("album_name=", (200, SYNCED_BODY)),
     )
     window = make_window()
     play(window, spotify)
-    warmed(window)
+    searched(window)
     asked = len(service.asked)
 
     second = make_window()
@@ -688,6 +708,53 @@ def test_a_warmed_track_plays_with_nothing_on_the_wire(
     assert second._view_model.display().mode is Mode.SYNCED
     assert second._current.text() == "first line"
     assert len(service.asked) == asked, "a warmed track went to the network"
+
+
+def test_a_second_track_from_the_album_buys_the_per_track_pass(
+    make_window, lrclib, spotify, fetching, warming
+):
+    """The intent the expensive stage waits for. A second track is the
+    difference between a song somebody heard and an album somebody is
+    listening to, and it is the only signal there is."""
+    service = lrclib(
+        ("track_name=Third+Song", track("Third Song")),
+        ("api/search", album_search("Blue Hour", "Second Song", "Third Song")),
+        ("album_name=", (200, SYNCED_BODY)),
+    )
+    window = make_window()
+    play(window, spotify)
+    searched(window)
+    assert service.asked_for("track_name=Third+Song") == []
+
+    second_track(window, spotify)
+    warmed(window)
+
+    # One per name the search returned, and only now.
+    assert len(service.asked_for("track_name=Third+Song")) == 1
+    assert len(service.asked_for("api/search")) == 1
+
+
+def test_playing_the_same_song_twice_is_not_a_second_track(
+    make_window, lrclib, spotify, fetching, warming
+):
+    """Otherwise a song on repeat would buy the whole album."""
+    service = lrclib(
+        ("api/search", album_search("Blue Hour", "Second Song")),
+        ("album_name=", (200, SYNCED_BODY)),
+    )
+    window = make_window()
+    play(window, spotify)
+    searched(window)
+    asked = len(service.asked)
+
+    second = make_window()  # the same song again, on the same cache
+    play(second, spotify)
+    for _ in range(40):
+        APP.processEvents()
+        time.sleep(0.005)
+
+    assert len(service.asked) == asked
+    assert window._provider.album_is_warm(window._current_snapshot) is False
 
 
 def test_nothing_is_warmed_while_the_service_is_failing(

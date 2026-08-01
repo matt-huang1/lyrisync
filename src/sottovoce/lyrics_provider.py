@@ -674,28 +674,41 @@ class LyricsProvider:
     # of them. The rest of the album is the obvious guess: people play
     # albums in order, and the app is holding the album's name already.
     #
-    # ## Why it takes two rounds
+    # ## Two stages, because most albums get one track played
     #
     # Spotify's scripting dictionary describes the CURRENT track and
     # nothing else — there is no way to ask it what else is on the album.
-    # So the track list has to come from LRCLIB too, and that is round one:
-    # one /api/search for the album, whose records name tracks.
+    # So the track list has to come from LRCLIB too.
     #
-    # Round two asks /api/get per name, and it is not an optimisation to
-    # skip it. MEASURED over 4 real albums (47 tracks, ground truth from
-    # the iTunes catalogue): the search's own records would serve 19% of
-    # the album under a duration check tight enough to be trustworthy,
-    # because the durations in a search hit are frequently a different
-    # recording's. Asking /get per name instead reaches 47% of the album,
-    # and 17 of 20 answers agreed with the real duration within 2s — so
-    # roughly 40% of an album ends up warm and usable.
+    # **Stage one, on any track: one search.** It names the album's tracks
+    # and carries their lyrics with it, so whatever comes back is stored as
+    # it stands. One request, and it is the only one most albums ever cost.
     #
-    # It costs one search and about 19 gets per album, of which the
-    # measurement found 29% useful; the other names in the response are
-    # karaoke versions, medleys and mislabelled uploads, and nothing about
-    # them says so up front. That is the whole price of the feature, it is
-    # paid once per album ever, and it is spread at LRCLIB's own asking:
-    # sequentially, one at a time, WARM_REQUEST_GAP_SECONDS apart.
+    # **Stage two, when a SECOND track from the album plays: one /get per
+    # name.** A second track is the difference between a song somebody
+    # heard and an album somebody is listening to, and it is the only
+    # signal available for that. It is worth waiting for, because the two
+    # stages cost wildly different amounts.
+    #
+    # MEASURED over 4 real albums (47 tracks, ground truth from the iTunes
+    # catalogue), counted the way this code actually stores things:
+    #
+    # | | requests per album | of the album, warm and usable |
+    # |---|---|---|
+    # | stage one alone | 1 | 26% |
+    # | both stages | 20 | 34% |
+    #
+    # So the second stage buys another 8 points for nineteen more requests,
+    # which is a poor trade to make for every album and a fair one for an
+    # album somebody is playing through. That is the whole design of
+    # splitting them: an album with one track played costs ONE request.
+    #
+    # Stage two does not replace what stage one stored, it ADDS to it: a
+    # name keeps every record either stage found, and which one is right is
+    # decided when the track plays and its duration is finally known. That
+    # is not tidiness — a /get answer can be a different recording than the
+    # search's was, and replacing cost a track of the 16 in the
+    # measurement above (16 against 15).
     #
     # Filtering the names by album was measured too, and it is why there is
     # no filter: keeping only records whose albumName matches the one
@@ -704,7 +717,7 @@ class LyricsProvider:
     # spells them.
 
     def warm_path(self, artist: str, album: str, title: str) -> Path:
-        """Where one warmed track lives.
+        """Where one warmed name's records live.
 
         Keyed by what will be KNOWN when it plays — artist, album, title —
         because a Spotify track ID is exactly what this app does not have
@@ -717,27 +730,50 @@ class LyricsProvider:
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
         return self.warm_dir / f"{stem}-{digest}.json"
 
-    def album_marker_path(self, artist: str, album: str) -> Path:
-        """The note that says this album has been warmed once.
-
-        Written on completion only. An album whose warm was cut short by a
-        failure or by shutdown is left unmarked, so a later track from it
-        may try again; an album that finished is never asked about twice,
-        however many of its tracks the user plays.
-        """
+    def album_index_path(self, artist: str, album: str) -> Path:
+        """What is known about this album's warm: the names the search
+        returned, which of this album's tracks have been seen playing, and
+        whether the per-track stage has run."""
         key = "\n".join(part.strip().lower() for part in (artist, album))
         stem = _SAFE_FILENAME_RE.sub("_", album.strip().lower())[:48]
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
         return self.warm_dir / f"{stem}-{digest}.album"
 
-    def album_is_warm(self, snapshot: PlayerSnapshot) -> bool:
+    def album_index(self, snapshot: PlayerSnapshot) -> Optional[dict]:
+        """This album's index, or None when it has never been searched."""
         if not snapshot.artist or not snapshot.album:
-            return False
-        return self.album_marker_path(snapshot.artist, snapshot.album).is_file()
+            return None
+        try:
+            return json.loads(
+                self.album_index_path(
+                    snapshot.artist, snapshot.album
+                ).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+
+    def _write_album_index(self, artist: str, album: str, index: dict) -> None:
+        try:
+            self.warm_dir.mkdir(parents=True, exist_ok=True)
+            self.album_index_path(artist, album).write_text(
+                json.dumps(index, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError:
+            pass  # it will simply be warmed again another day
+
+    def album_is_searched(self, snapshot: PlayerSnapshot) -> bool:
+        return self.album_index(snapshot) is not None
+
+    def album_is_warm(self, snapshot: PlayerSnapshot) -> bool:
+        """Whether the per-track stage has run for this album. An album
+        whose stage two was cut short by a failure or by shutdown answers
+        False, so a later track from it may try again."""
+        index = self.album_index(snapshot)
+        return bool(index and index.get("warmed"))
 
     def read_warm(self, snapshot: PlayerSnapshot) -> Optional[TrackLyrics]:
-        """The warmed answer for this track, if there is one and it is
-        about this recording.
+        """The warmed answer for this track, if one of the records stored
+        under its name is about this recording.
 
         Two ways to answer None and they mean the same thing to the caller
         — ask LRCLIB — which is the whole design of this store: it can say
@@ -746,53 +782,87 @@ class LyricsProvider:
         guess is not allowed to write anything down that would stop the
         real question being asked.
 
-        The duration is what makes a yes trustworthy. It is checked against
-        the tolerance /api/get itself matches on, not the looser one search
-        results get, because this answer is standing in for the album match
-        rather than for the search.
+        SEVERAL records per name, because LRCLIB genuinely returns several:
+        a search for an album answers with the same title at three
+        different lengths, and which of them is this recording is a
+        question nobody could answer at the time they were stored. So they
+        are all kept and the duration decides here, where the track is
+        finally in hand.
+
+        The tolerance is the one /api/get itself matches on rather than the
+        looser one search results get, because this answer is standing in
+        for the album match rather than for the search.
         """
         if not snapshot.artist or not snapshot.album or not snapshot.title:
             return None
         if snapshot.duration_ms is None:
-            # Nothing to check the record against. "Prefer no lyrics to
+            # Nothing to check the records against. "Prefer no lyrics to
             # mismatched-duration lyrics" is the rule, and an unverifiable
             # warm entry is exactly the case it was written for.
             return None
+        entry = self._read_warm_entry(snapshot.artist, snapshot.album, snapshot.title)
+        if entry is None:
+            return None
+        wanted = snapshot.duration_ms / 1000
+        for record in entry.get("records", []):
+            stored = record.get("duration")
+            if stored is None:
+                continue
+            if abs(float(stored) - wanted) <= _WARM_DURATION_TOLERANCE:
+                return self._decode_cache_entry(record)
+        logger.info(
+            "nothing warmed for %r is %.0fs long", snapshot.title, wanted
+        )
+        return None
+
+    def _read_warm_entry(self, artist: str, album: str, title: str) -> Optional[dict]:
         try:
-            entry = json.loads(
-                self.warm_path(
-                    snapshot.artist, snapshot.album, snapshot.title
-                ).read_text(encoding="utf-8")
+            return json.loads(
+                self.warm_path(artist, album, title).read_text(encoding="utf-8")
             )
         except (OSError, ValueError):
             return None
-        stored = entry.get("duration")
-        if stored is None:
-            return None
-        if abs(float(stored) - snapshot.duration_ms / 1000) > _WARM_DURATION_TOLERANCE:
-            logger.info(
-                "warmed %r is a different recording (%.0fs against %.0fs)",
-                snapshot.title,
-                float(stored),
-                snapshot.duration_ms / 1000,
-            )
-            return None
-        return self._decode_cache_entry(entry)
 
-    def _write_warm(self, artist: str, album: str, title: str, record: dict) -> bool:
-        """Keep one warmed track. False when the record is not worth
-        keeping, which is a record with no lyrics in it or no duration to
-        recognise it by later."""
-        lyrics = self._decode_record(record)
-        duration = record.get("duration")
-        if lyrics is None or duration is None:
+    def _keep_warm(
+        self, artist: str, album: str, title: str, records: list, asked: bool
+    ) -> bool:
+        """Add records to what is known about one name, and say whether any
+        of them were worth keeping.
+
+        A record is worth keeping when it has lyrics in it AND a duration
+        to recognise it by later; one without a duration could never be
+        served, because there would be no way to tell whether it is this
+        recording.
+
+        ADDS rather than replaces. Stage two's answer is better sourced
+        than stage one's, so it goes first and wins a tie — but it can also
+        be a different recording than the search found, and throwing the
+        search's away would be losing a track to a request meant to gain
+        one.
+        """
+        keep = []
+        for record in records:
+            lyrics = self._decode_record(record)
+            duration = record.get("duration")
+            if lyrics is None or duration is None:
+                continue
+            keep.append(
+                {
+                    "found": True,
+                    "duration": float(duration),
+                    "synced": lyrics.synced,
+                    "plain": lyrics.plain,
+                }
+            )
+        existing = self._read_warm_entry(artist, album, title) or {}
+        known = list(existing.get("records", []))
+        merged = keep + [
+            record for record in known
+            if not any(record["duration"] == kept["duration"] for kept in keep)
+        ]
+        if not merged:
             return False
-        entry = {
-            "found": True,
-            "duration": float(duration),
-            "synced": lyrics.synced,
-            "plain": lyrics.plain,
-        }
+        entry = {"asked": bool(asked) or bool(existing.get("asked")), "records": merged}
         try:
             self.warm_dir.mkdir(parents=True, exist_ok=True)
             self.warm_path(artist, album, title).write_text(
@@ -800,57 +870,62 @@ class LyricsProvider:
             )
         except OSError:
             return False  # cache is best-effort, and this most of all
-        return True
+        return bool(keep)
 
-    def album_track_names(self, snapshot: PlayerSnapshot) -> list[str]:
-        """Round one: the names LRCLIB has under this album, in the order
-        it gave them, without the one that is playing.
+    def search_album(self, snapshot: PlayerSnapshot) -> int:
+        """Stage one: one search, and everything usable in it kept.
 
-        Deliberately unfiltered beyond de-duplication. See the note above:
-        filtering by album name reached none of 47 real tracks.
+        Returns how many names came back with something worth keeping. The
+        index is written whatever the answer, because "asked and got
+        nothing" is an answer too and is what stops this being asked again
+        on the next track of the same album.
         """
-        query = urllib.parse.urlencode({"q": f"{snapshot.album} {snapshot.artist}"})
+        artist, album = snapshot.artist, snapshot.album
+        query = urllib.parse.urlencode({"q": f"{album} {artist}"})
         records = _fetch_json(f"{LRCLIB_SEARCH_URL}?{query}") or []
-        playing = snapshot.title.strip().lower()
-        names: list[str] = []
-        seen = {playing}
+        by_name: dict = {}
         for record in records:
             name = str(record.get("trackName", "")).strip()
-            if not name or name.lower() in seen:
-                continue
-            seen.add(name.lower())
-            names.append(name)
-        return names
+            if name:
+                by_name.setdefault(name, []).append(record)
+        stored = 0
+        for name, found in by_name.items():
+            if self._keep_warm(artist, album, name, found, asked=False):
+                stored += 1
+        self._write_album_index(
+            artist,
+            album,
+            {
+                "names": list(by_name),
+                # The track that prompted the search. A SECOND id landing
+                # here is what says somebody is listening to the album
+                # rather than to a song, and it is the only signal there is.
+                "tracks": [snapshot.track_id] if snapshot.track_id else [],
+                "warmed": False,
+            },
+        )
+        logger.info(
+            "album search for %r: %d names, %d with lyrics to keep",
+            album,
+            len(by_name),
+            stored,
+        )
+        return stored
 
-    def warm_album(
+    def warm_album_tracks(
         self,
         snapshot: PlayerSnapshot,
+        index: dict,
         sleep=time.sleep,
         should_stop=None,
     ) -> int:
-        """Fetch the rest of this album into the warm store. Returns how
-        many tracks were stored.
+        """Stage two: one /get per name the search returned.
 
-        Raises nothing: every failure here is a failure of something
-        nobody is waiting for, so it is logged and abandoned. What it does
-        NOT do is swallow the pause — a 429 anywhere in here sets the same
-        module-level hold every other request obeys, and the next call to
-        _fetch_json refuses on its own.
-
-        ``sleep`` and ``should_stop`` are the caller's: the gap between
-        requests is real time on a worker thread, and shutdown has to be
-        able to end it without waiting out the album.
+        Sequential and spaced, which is LRCLIB's own instruction for work
+        like this. Returns how many names gained a record.
         """
-        if not snapshot.is_music_track or not snapshot.album or not snapshot.artist:
-            return 0
-        if self.album_is_warm(snapshot):
-            return 0
         artist, album = snapshot.artist, snapshot.album
-        try:
-            names = self.album_track_names(snapshot)
-        except LyricsError as exc:
-            logger.info("album warm gave up before it started: %s", exc)
-            return 0
+        names = [name for name in index.get("names", []) if name]
         stored = 0
         asked = 0
         for name in names:
@@ -860,12 +935,12 @@ class LyricsProvider:
             if asked >= _WARM_MAX_REQUESTS:
                 logger.info("album warm capped at %d requests", _WARM_MAX_REQUESTS)
                 break
-            if self.warm_path(artist, album, name).is_file():
-                continue
-            # Sequential and spaced, which is LRCLIB's own instruction for
-            # work like this. Before the request rather than after it, so
-            # the first one is spaced from whatever the playing track's own
-            # lookup was doing a moment ago.
+            entry = self._read_warm_entry(artist, album, name)
+            if entry is not None and entry.get("asked"):
+                continue  # a /get has been spent on this name already
+            # Before the request rather than after it, so the first one is
+            # spaced from whatever the playing track's own lookup was doing
+            # a moment ago.
             sleep(WARM_REQUEST_GAP_SECONDS)
             asked += 1
             try:
@@ -883,24 +958,68 @@ class LyricsProvider:
             except LyricsError as exc:
                 # One failure ends the album. Nothing is waiting on this,
                 # and a service that just refused one request is not one to
-                # keep asking nineteen more times.
+                # keep asking eighteen more times. The index is left
+                # unwarmed, so a later track may pick it up again.
                 logger.info("album warm stopped: %s", exc)
                 return stored
-            if record and self._write_warm(artist, album, name, record):
+            if self._keep_warm(artist, album, name, [record] if record else [], asked=True):
                 stored += 1
-        try:
-            self.warm_dir.mkdir(parents=True, exist_ok=True)
-            self.album_marker_path(artist, album).write_text("", encoding="utf-8")
-        except OSError:
-            pass  # it will simply be warmed again another day
+        self._write_album_index(artist, album, {**index, "warmed": True})
         logger.info(
             "album warm for %r: %d of %d names stored, %d requests",
             album,
             stored,
             len(names),
-            asked + 1,
+            asked,
         )
         return stored
+
+    def warm_album(
+        self,
+        snapshot: PlayerSnapshot,
+        sleep=time.sleep,
+        should_stop=None,
+    ) -> int:
+        """Whichever stage this album is owed, or nothing.
+
+        The decision lives here rather than in the caller because it is a
+        question about what is already on disk: has this album been
+        searched, has a second of its tracks been heard, has the per-track
+        stage already run. The window's job is only to say "a track from
+        this album is playing and the service is healthy".
+
+        Raises nothing: every failure here is a failure of something nobody
+        is waiting for, so it is logged and abandoned. What it does NOT do
+        is swallow the pause — a 429 anywhere in here sets the same
+        module-level hold every other request obeys, and the next call to
+        _fetch_json refuses on its own.
+
+        ``sleep`` and ``should_stop`` are the caller's: the gap between
+        requests is real time on a worker thread, and shutdown has to be
+        able to end it without waiting out the album.
+        """
+        if not snapshot.is_music_track or not snapshot.album or not snapshot.artist:
+            return 0
+        index = self.album_index(snapshot)
+        try:
+            if index is None:
+                return self.search_album(snapshot)
+            if index.get("warmed"):
+                return 0
+            seen = list(index.get("tracks", []))
+            if not snapshot.track_id or snapshot.track_id in seen:
+                return 0  # the same track again is not a second track
+            # A second track from this album. That is the intent the
+            # per-track stage waits for, and it is worth eighteen requests
+            # where one track was worth none.
+            index = {**index, "tracks": seen + [snapshot.track_id]}
+            self._write_album_index(snapshot.artist, snapshot.album, index)
+            return self.warm_album_tracks(
+                snapshot, index, sleep=sleep, should_stop=should_stop
+            )
+        except LyricsError as exc:
+            logger.info("album warm gave up: %s", exc)
+            return 0
 
     # -- user syncs --------------------------------------------------------
 

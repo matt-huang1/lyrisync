@@ -245,37 +245,57 @@ backoff.
 
 ## The rest of the album, before you get to it
 
-When a track starts and its own lookup has landed, the app quietly fetches
-lyrics for the other tracks on the same album, so that a later outage has
-less to be noticeable about. It never blocks anything: it runs on a worker
-five seconds later, and nothing waits for the result.
+While the network is up, the app quietly fetches lyrics for tracks you
+have not played yet, so a later outage has less to be noticeable about. It
+never blocks anything: it runs on a worker five seconds after the song's
+own lookup landed, and nothing waits for the result.
 
 Spotify's scripting dictionary describes the *current* track and nothing
-else, so the track list has to come from LRCLIB too. One `search` for the
-album gives the names; one `get` per name gives the lyrics.
+else, so the track list has to come from LRCLIB too. That makes this two
+stages, and which one runs depends on how much you have listened to.
 
-Measured against four real albums (47 tracks, with the track listings
-taken from the iTunes catalogue): about **40% of an album** ends up warm
-and usable, for one search and roughly nineteen small requests, paid once
-per album ever. Serving the search's own records instead would cost one
-request and cover 19%, because the durations in a search hit are
-frequently a different recording's.
+**Stage one, for any album a track was played from: one search.** It names
+the album's tracks and carries their lyrics with it, so whatever comes
+back is kept as it stands. One request, and it is the only one most albums
+ever cost.
 
-A warmed track is only used if its duration matches the track that
-actually plays, to within the two seconds LRCLIB's own exact endpoint
-matches on — it is standing in for the album match, so it has to be as
-precise as one. Three of twenty warmed tracks failed that check in the
-measurement, and those fall through to the normal chain.
+**Stage two, once a second track from the same album plays: one lookup per
+name.** A second track is the difference between a song you heard and an
+album you are listening to, and it is the only signal available for that.
+
+Measured over four real albums (47 tracks, with the track listings taken
+from the iTunes catalogue):
+
+| | requests per album | of the album, warm and usable |
+|---|---|---|
+| stage one alone | 1 | 26% |
+| both stages | 20 | 34% |
+
+The second stage buys another eight points for nineteen more requests,
+which is a poor trade for every album and a fair one for an album you are
+playing through. Splitting them is what makes that choice possible: an
+album you played one track from costs a single request.
+
+A name keeps **every** record either stage found, because LRCLIB genuinely
+answers with the same title at several lengths and nobody can say which is
+your recording until it plays. A warmed track is only served if one of
+those records matches the duration of the track that actually starts, to
+within the two seconds LRCLIB's own exact endpoint matches on — it is
+standing in for the album match, so it has to be as precise as one. Stage
+two therefore *adds* rather than replaces: its answer can be a different
+recording than the search found, and throwing the search's away cost a
+track in the measurement.
 
 The store can say *yes* and it can say *nothing*. It can never say "this
 track has no lyrics": it is a guess made without the track in hand, and a
 guess may not stop the real question being asked. It lives inside
 `.lyrics_cache/`, so clearing the cache clears it too.
 
-Warming is polite by construction. Requests go out one at a time with
-350ms between them, which is the middle of the band LRCLIB's documentation
-asks for; one album at a time; once per album ever; a single failure ends
-that album; and none of it runs at all while the service is failing.
+Warming is polite by construction. Stage two's requests go out one at a
+time with 350ms between them, which is the middle of the band LRCLIB's
+documentation asks for; one album at a time; once per album ever; a single
+failure ends that album; and neither stage runs at all while the service
+is failing.
 
 ## Your syncs are not cache
 

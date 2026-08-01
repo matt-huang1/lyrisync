@@ -881,24 +881,33 @@ def test_the_header_is_read_however_it_is_spelled(provider, monkeypatch):
 
 
 # -- the album, fetched before it is needed --------------------------------
+#
+# Two stages, and the tests are grouped by which one they are about,
+# because the split IS the design: one search for any album a track was
+# played from, and a request per track only for an album somebody is
+# listening through.
 
 
 ALBUM_SEARCH = [
-    {"trackName": "Song"},        # the one that is playing
-    {"trackName": "Second Song"},
-    {"trackName": "Third Song"},
-    {"trackName": "Second Song"},  # LRCLIB returns several per track
+    {"trackName": "Song", "duration": 225.0, "syncedLyrics": SYNCED_LRC},
+    {"trackName": "Second Song", "duration": 240.0, "syncedLyrics": SYNCED_LRC},
+    # The same name at a different length. LRCLIB really does answer like
+    # this, and which of the two is the recording nobody can say until the
+    # track plays.
+    {"trackName": "Second Song", "duration": 225.0, "syncedLyrics": SYNCED_LRC},
+    {"trackName": "Third Song", "duration": 300.0, "syncedLyrics": SYNCED_LRC},
     {"trackName": ""},
 ]
 
 
-def warm_fetcher(monkeypatch, **per_track):
-    """The two rounds an album warm makes: one search that names tracks,
-    then one /get per name. Each name may be routed to a record, to None (a
-    404) or to an exception."""
-    routes = [("api/search", ALBUM_SEARCH)]
+def warm_fetcher(monkeypatch, search=None, **per_track):
+    """The two stages: one search that names tracks and carries their
+    lyrics, then one /get per name. Each name may be routed to a record, to
+    None (a 404) or to an exception."""
+    routes = []
     for name, response in per_track.items():
         routes.append((f"track_name={name.replace('_', '+')}", response))
+    routes.append(("api/search", ALBUM_SEARCH if search is None else search))
     return use_fetcher(monkeypatch, *routes)
 
 
@@ -917,32 +926,164 @@ def record(duration=225.0, **fields):
     }
 
 
-def test_the_warm_asks_once_for_the_names_and_once_for_each(provider, monkeypatch):
+def playing(title="Second Song", track_id="t2"):
+    return snapshot(track_id=track_id, title=title)
+
+
+# -- stage one: one search, whatever it happens to carry --------------------
+
+
+def test_a_track_from_a_new_album_costs_exactly_one_request(provider, monkeypatch):
+    """The stage that runs for every album, and the only one most albums
+    ever cost. Nineteen requests for a song somebody skipped past is the
+    thing the split exists to stop."""
+    fake = warm_fetcher(monkeypatch)
+
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+
+    assert len(fake.asked("api/search")) == 1
+    assert fake.asked("api/get") == []
+    assert provider.album_is_searched(snapshot()) is True
+    assert provider.album_is_warm(snapshot()) is False
+
+
+def test_the_search_records_are_kept_and_can_answer(provider, monkeypatch):
+    """One request, and the album's second track already has lyrics."""
+    warm_fetcher(monkeypatch)
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+
+    fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
+    answer = provider.look_up(playing())
+
+    assert answer.source == lp.FROM_WARM
+    assert fake.count == 0
+
+
+def test_every_record_under_one_name_is_kept(provider, monkeypatch):
+    """The search answers with the same title at several lengths, and which
+    is this recording is a question nobody can answer at the time. So they
+    are all kept and the duration decides when the track is in hand."""
+    warm_fetcher(monkeypatch)
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+
+    entry = provider._read_warm_entry("Artist", "Album", "Second Song")
+    assert [r["duration"] for r in entry["records"]] == [240.0, 225.0]
+    # 225s is the one playing, so that is the one served.
+    assert provider.read_warm(playing()) is not None
+
+
+def test_the_search_is_asked_once_however_many_tracks_play(provider, monkeypatch):
+    fake = warm_fetcher(monkeypatch)
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+    asked = fake.count
+
+    provider.warm_album(snapshot(), sleep=lambda _: None)  # the same track
+
+    assert fake.count == asked
+
+
+# -- stage two: a second track is the intent --------------------------------
+
+
+def test_a_second_track_from_the_album_is_what_buys_the_per_track_pass(
+    provider, monkeypatch
+):
+    """A second track is the difference between a song somebody heard and
+    an album somebody is listening to, and it is the only signal there
+    is."""
     slept = []
     fake = warm_fetcher(
         monkeypatch, Second_Song=record(), Third_Song=record(duration=300.0)
     )
+    provider.warm_album(snapshot(), sleep=slept.append)
+    assert fake.asked("api/get") == []
 
-    stored = provider.warm_album(snapshot(), sleep=slept.append)
+    provider.warm_album(playing(), sleep=slept.append)
 
-    assert stored == 2
-    assert len(fake.asked("api/search")) == 1
-    assert len(fake.asked("api/get")) == 2
-    # Sequential and spaced, which is LRCLIB's own instruction for work
-    # like this: one wait per request, at the gap the module names.
-    assert slept == [lp.WARM_REQUEST_GAP_SECONDS] * 2
+    # One per name the search returned, the playing track's included: its
+    # own lookup answered a different question (this recording), and the
+    # name may cover other tracks the user has not reached.
+    assert len(fake.asked("api/get")) == 3
+    assert slept == [lp.WARM_REQUEST_GAP_SECONDS] * 3
+    assert provider.album_is_warm(playing()) is True
 
 
-def test_the_track_that_is_playing_is_not_asked_about_again(provider, monkeypatch):
-    """Its own lookup has just run. A duplicate name in the response is
-    dropped for the same reason: one request per track, not one per record.
-    """
-    fake = warm_fetcher(monkeypatch, Second_Song=record(), Third_Song=record())
+def test_the_per_track_answer_is_added_rather_than_substituted(
+    provider, monkeypatch
+):
+    """Stage two is better sourced and goes first, but it can also be a
+    different recording than the search found — throwing the search's away
+    would be losing a track to a request meant to gain one."""
+    warm_fetcher(monkeypatch, Second_Song=record(duration=180.0))
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+    provider.warm_album(playing(), sleep=lambda _: None)
 
+    entry = provider._read_warm_entry("Artist", "Album", "Second Song")
+    assert entry["records"][0]["duration"] == 180.0, "the /get answer is not first"
+    assert 225.0 in [r["duration"] for r in entry["records"]]
+    # And the track that actually plays is still served, from the record
+    # the search found.
+    assert provider.read_warm(playing()) is not None
+
+
+def test_the_same_track_again_is_not_a_second_track(provider, monkeypatch):
+    fake = warm_fetcher(monkeypatch, Second_Song=record())
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+    asked = fake.count
+
+    provider.warm_album(snapshot(track_id="track123"), sleep=lambda _: None)
+
+    assert fake.count == asked
+    assert provider.album_is_warm(snapshot()) is False
+
+
+def test_a_name_already_asked_about_is_not_asked_again(provider, monkeypatch):
+    """Stage two is once per album ever, and the note that says so is on
+    each name rather than only on the album."""
+    fake = warm_fetcher(monkeypatch, Second_Song=record())
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+    provider.warm_album(playing(), sleep=lambda _: None)
+    asked = len(fake.asked("api/get"))
+
+    provider.warm_album(playing(track_id="t3", title="Third Song"), sleep=lambda _: None)
+
+    assert len(fake.asked("api/get")) == asked, "the album was warmed twice"
+
+
+def test_one_failure_ends_the_album(provider, monkeypatch):
+    """Nothing is waiting on this, and a service that just refused one
+    request is not one to ask eighteen more times."""
+    fake = warm_fetcher(
+        monkeypatch,
+        Song=lp.LyricsError("nope"),
+        Second_Song=record(),
+    )
     provider.warm_album(snapshot(), sleep=lambda _: None)
 
-    assert fake.asked("track_name=Song&") == []
-    assert len(fake.asked("track_name=Second+Song")) == 1
+    assert provider.warm_album(playing(), sleep=lambda _: None) == 0
+    assert len(fake.asked("api/get")) == 1
+    # Left unwarmed, so a later track from the album may try again.
+    assert provider.album_is_warm(playing()) is False
+
+
+def test_a_pass_can_be_stopped_partway(provider, monkeypatch):
+    """Shutdown's half of it: this sleeps between requests by design, so
+    without a way to end it the pool would wait out the album."""
+    stop = []
+    fake = warm_fetcher(monkeypatch, Second_Song=record())
+    provider.warm_album(snapshot(), sleep=lambda _: None)
+
+    provider.warm_album(
+        playing(),
+        sleep=lambda _: None,
+        should_stop=lambda: bool(stop) or stop.append(1),
+    )
+
+    assert len(fake.asked("api/get")) <= 1
+    assert provider.album_is_warm(playing()) is False
+
+
+# -- what the store may and may not say -------------------------------------
 
 
 def test_a_warmed_track_is_served_before_the_network_and_says_so(
@@ -950,10 +1091,10 @@ def test_a_warmed_track_is_served_before_the_network_and_says_so(
 ):
     warm_fetcher(monkeypatch, Second_Song=record())
     provider.warm_album(snapshot(), sleep=lambda _: None)
+    provider.warm_album(playing(), sleep=lambda _: None)
 
-    playing = snapshot(track_id="t2", title="Second Song")
     fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
-    answer = provider.look_up(playing)
+    answer = provider.look_up(playing(track_id="t9"))
 
     assert answer.source == lp.FROM_WARM
     assert answer.from_service is False
@@ -964,12 +1105,11 @@ def test_a_warmed_track_is_served_before_the_network_and_says_so(
 def test_a_warm_hit_becomes_an_ordinary_cache_entry(provider, monkeypatch):
     """Promoted on the way past, so the second play takes the fast path and
     the duration is never checked twice."""
-    warm_fetcher(monkeypatch, Second_Song=record())
+    warm_fetcher(monkeypatch)
     provider.warm_album(snapshot(), sleep=lambda _: None)
-    playing = snapshot(track_id="t2", title="Second Song")
-    assert provider.look_up(playing).source == lp.FROM_WARM
+    assert provider.look_up(playing()).source == lp.FROM_WARM
 
-    assert provider.look_up(playing).source == lp.FROM_CACHE
+    assert provider.look_up(playing()).source == lp.FROM_CACHE
 
 
 def test_a_different_recording_of_the_same_name_is_refused(provider, monkeypatch):
@@ -978,12 +1118,15 @@ def test_a_different_recording_of_the_same_name_is_refused(provider, monkeypatch
     in for the album match: MEASURED, 3 of 20 warmed tracks across 4 real
     albums were a different recording, and those three land here.
     """
-    warm_fetcher(monkeypatch, Second_Song=record(duration=180.0))
+    warm_fetcher(
+        monkeypatch,
+        search=[{"trackName": "Second Song", "duration": 180.0,
+                 "syncedLyrics": SYNCED_LRC}],
+    )
     provider.warm_album(snapshot(), sleep=lambda _: None)
 
-    playing = snapshot(track_id="t2", title="Second Song")  # 225s
     fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
-    answer = provider.look_up(playing)
+    answer = provider.look_up(playing())  # 225s
 
     assert answer.source == lp.FROM_SERVICE, "a wrong recording was served"
     assert fake.count >= 1
@@ -996,11 +1139,11 @@ def test_a_track_the_warm_never_reached_falls_straight_through(
     never answer "this track has no lyrics" — it is a guess made without
     the track in hand, and a guess may not stop the real question being
     asked."""
-    warm_fetcher(monkeypatch, Second_Song=record())
+    warm_fetcher(monkeypatch)
     provider.warm_album(snapshot(), sleep=lambda _: None)
 
     fake = use_fetcher(monkeypatch, ("album_name", SYNCED_RESPONSE))
-    answer = provider.look_up(snapshot(track_id="t9", title="Never Warmed"))
+    answer = provider.look_up(playing(track_id="t9", title="Never Warmed"))
 
     assert answer.source == lp.FROM_SERVICE
     assert answer.lyrics.kind == "synced"
@@ -1011,57 +1154,34 @@ def test_a_record_with_no_duration_is_not_worth_keeping(provider, monkeypatch):
     """There would be no way to recognise the recording later, and an
     unverifiable warm entry is exactly what "prefer no lyrics to
     mismatched-duration lyrics" is about."""
-    warm_fetcher(monkeypatch, Second_Song=record(duration=None))
+    warm_fetcher(
+        monkeypatch,
+        search=[{"trackName": "Second Song", "syncedLyrics": SYNCED_LRC}],
+    )
 
     assert provider.warm_album(snapshot(), sleep=lambda _: None) == 0
+    assert provider.read_warm(playing()) is None
 
 
 def test_an_instrumental_record_is_not_worth_keeping(provider, monkeypatch):
     warm_fetcher(
-        monkeypatch, Second_Song=record(syncedLyrics=None, plainLyrics=None)
-    )
-
-    assert provider.warm_album(snapshot(), sleep=lambda _: None) == 0
-
-
-def test_one_failure_ends_the_album(provider, monkeypatch):
-    """Nothing is waiting on this, and a service that just refused one
-    request is not one to ask nineteen more times."""
-    fake = warm_fetcher(
         monkeypatch,
-        Second_Song=lp.LyricsError("nope"),
-        Third_Song=record(),
+        search=[{"trackName": "Second Song", "duration": 225.0}],
     )
 
     assert provider.warm_album(snapshot(), sleep=lambda _: None) == 0
-    assert len(fake.asked("api/get")) == 1
-    # And it is left unmarked, so a later track from the album may try again.
-    assert provider.album_is_warm(snapshot()) is False
+    assert provider.read_warm(playing()) is None
 
 
-def test_an_album_is_only_ever_warmed_once(provider, monkeypatch):
-    fake = warm_fetcher(monkeypatch, Second_Song=record(), Third_Song=record())
+def test_a_search_that_answered_nothing_is_still_an_answer(provider, monkeypatch):
+    """"Asked and got nothing" is what stops this being asked again on the
+    next track of the same album."""
+    fake = warm_fetcher(monkeypatch, search=[])
+
+    assert provider.warm_album(snapshot(), sleep=lambda _: None) == 0
+    assert provider.album_is_searched(snapshot()) is True
     provider.warm_album(snapshot(), sleep=lambda _: None)
-    assert provider.album_is_warm(snapshot()) is True
-    before = fake.count
-
-    provider.warm_album(snapshot(track_id="t2", title="Second Song"), sleep=lambda _: None)
-
-    assert fake.count == before, "the album was warmed twice"
-
-
-def test_a_warm_can_be_stopped_partway(provider, monkeypatch):
-    """Shutdown's half of it: this sleeps between requests by design, so
-    without a way to end it the pool would wait out the album."""
-    stop = []
-    fake = warm_fetcher(monkeypatch, Second_Song=record(), Third_Song=record())
-
-    provider.warm_album(
-        snapshot(), sleep=lambda _: None, should_stop=lambda: bool(stop) or stop.append(1)
-    )
-
-    assert len(fake.asked("api/get")) <= 1
-    assert provider.album_is_warm(snapshot()) is False
+    assert len(fake.asked("api/search")) == 1
 
 
 def test_nothing_is_warmed_for_an_item_with_no_album(provider, monkeypatch):

@@ -92,9 +92,10 @@ app runs, and one door could not be blocked without blocking the other.
 - **Worker pool** (`QThreadPool`) — one-shot tasks: lyrics fetch, artwork
   fetch, `say`, seek, pause/resume. The last three send Apple events,
   serialised against the monitor's behind one lock. The album warm runs
-  here too and is the one worker that lasts: it makes a request per track
-  with a deliberate gap between them, so it waits on a stop flag rather
-  than sleeping, and shutdown sets that flag before it drains the pool.
+  here too and is the one worker that can last: its second stage makes a
+  request per track with a deliberate gap between them, so it waits on a
+  stop flag rather than sleeping, and shutdown sets that flag before it
+  drains the pool.
 
 Shutdown drains them in a fixed order — hotkey, then monitor thread, then
 pool — with bounded waits. See

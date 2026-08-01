@@ -196,10 +196,10 @@ def test_only_save_user_sync_ever_writes_to_the_directory():
         and node.func.attr == "write_text"
     }
     assert writers == {
-        "save_user_sync",  # the user's own work, and the only one that is
-        "_write_cache",    # the cache entry for a track that played
-        "_write_warm",     # one track of an album fetched ahead of time
-        "warm_album",      # the note that says an album has been warmed
+        "save_user_sync",      # the user's own work, and the only one that is
+        "_write_cache",        # the cache entry for a track that played
+        "_keep_warm",          # what is known about one name on an album
+        "_write_album_index",  # which names, which tracks seen, warmed yet
     }
     # And the sharper half: exactly one of those four knows the path that
     # leads into .user_syncs/.

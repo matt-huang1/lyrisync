@@ -41,14 +41,17 @@ box — the lyrics window is unfocusable by design and a text field is the
 one thing that cannot live in it. Pasting an `.lrc` works: timestamps and
 metadata tags are stripped, your punctuation is not.
 
-**And the rest of the album is fetched before you get to it.** When a
-track starts, the app quietly looks up the other tracks on the same album,
-so a later outage has less to be noticeable about. Measured over four real
-albums: about **40%** of an album ends up cached and usable, for one
-search and roughly nineteen small requests, paid once per album ever.
-Requests go out one at a time with 350ms between them, which is what
-LRCLIB asks for; none of it runs while the service is failing, and nothing
-ever waits for it.
+**And the rest of the album is fetched before you get to it**, in two
+stages, because most albums get one track played. Any album a track was
+played from costs **one** search, which names its tracks and carries their
+lyrics: measured over four real albums, that alone leaves **26%** of the
+album cached and usable. Only when a *second* track from the same album
+plays — the difference between a song you heard and an album you are
+listening to — does the app spend a lookup per track, taking it to
+**34%** for twenty requests in total, once per album ever. Stage two's
+requests go out one at a time with 350ms between them, which is what
+LRCLIB asks for; neither stage runs while the service is failing, and
+nothing ever waits for either.
 
 ## Fix 22.3 — a measured lead, a traced press, two shapes
 

@@ -869,18 +869,19 @@ class FetchTask(QRunnable):
 
 
 class WarmTask(QRunnable):
-    """Fetches the rest of the album into the cache, off the UI thread and
-    off everybody's critical path.
+    """Fetches the album into the cache, off the UI thread and off
+    everybody's critical path.
 
     Nothing waits on this and nothing is told when it finishes: a warmed
     track is only ever noticed by a lookup that finds it there later. That
-    is what lets it sleep between requests, which it must — LRCLIB asks
-    that batch work go out sequentially with a gap, and a gap is real time
-    on a real thread.
+    is what lets it sleep between requests, which the per-track stage must
+    — LRCLIB asks that batch work go out sequentially with a gap, and a gap
+    is real time on a real thread.
 
-    ``stop`` is how shutdown gets its thread back. The album takes several
-    seconds by design, and ``_shutdown`` waits three; without a way to end
-    the sleep this would be the one worker that is always still running.
+    ``stop`` is how shutdown gets its thread back. The per-track stage
+    takes several seconds by design, and ``_shutdown`` waits three; without
+    a way to end the sleep this would be the one worker that is always
+    still running.
     """
 
     def __init__(
@@ -1406,12 +1407,13 @@ class LyricsWindow(QWidget):
         self._retry_timer.timeout.connect(self._tick_retry)
         self._retry_timer.start(_RETRY_TICK_MS)
 
-        # Fetching the rest of the album, quietly, so a later outage has
-        # less to be noticeable about. Which album has been asked for, the
-        # snapshot the next warm will run from, and the flag that ends one
-        # early: warming sleeps between its requests, and shutdown has to
-        # be able to interrupt that rather than wait out an album.
-        self._warmed_album: Optional[tuple] = None
+        # Fetching the album ahead of time, quietly, so a later outage has
+        # less to be noticeable about. Which (album, track) pairs have had
+        # their turn, the snapshot the next warm will run from, and the
+        # flag that ends one early: the per-track stage sleeps between its
+        # requests, and shutdown has to be able to interrupt that rather
+        # than wait out an album.
+        self._warm_considered: set = set()
         self._warm_pending: Optional[PlayerSnapshot] = None
         self._warm_stop = threading.Event()
         self._warm_timer = QTimer(self)
@@ -1853,7 +1855,15 @@ class LyricsWindow(QWidget):
     # -- the rest of the album, before it is needed -------------------------
 
     def _consider_warming(self) -> None:
-        """Whether to fetch the rest of this album, and every reason not to.
+        """Whether to look at this album, and every reason not to.
+
+        Once per TRACK rather than once per album, and that is the whole of
+        what the window contributes to the two stages: a second track from
+        an album is what says somebody is listening to the album rather
+        than to a song, and a guard that stopped at the first track would
+        be the guard that hides the signal. Which stage is owed — a search,
+        the per-track pass, or nothing at all — is decided in the provider,
+        from what is already on disk.
 
         Arming a timer rather than starting the work: the point of warming
         is that nobody is waiting for it, and the moment a lookup lands is
@@ -1862,9 +1872,9 @@ class LyricsWindow(QWidget):
         snapshot = self._current_snapshot
         if snapshot is None or not snapshot.album or not snapshot.artist:
             return
-        album = (snapshot.artist, snapshot.album)
-        if album == self._warmed_album:
-            return  # asked for already, this run
+        considered = (snapshot.artist, snapshot.album, snapshot.track_id)
+        if considered in self._warm_considered:
+            return  # this track has already had its turn
         if self._view_model.failures:
             # The service is failing. Speculative requests are the last
             # thing to send at a service that cannot answer the ones
@@ -1873,15 +1883,15 @@ class LyricsWindow(QWidget):
             return
         if self._view_model.display().mode in (Mode.ERROR, Mode.FETCHING):
             return
-        self._warmed_album = album
+        self._warm_considered.add(considered)
         self._warm_pending = snapshot
         self._warm_timer.start(_WARM_DELAY_MS)
 
     def _start_warm(self) -> None:
-        """Put the album warm on a worker. One at a time, for ever: this
-        sleeps between requests by design, and two of them would be two
-        albums interleaving their gaps into a stream of requests neither of
-        them agreed to."""
+        """Put whichever stage this album is owed on a worker. One at a
+        time, for ever: the per-track stage sleeps between requests by
+        design, and two of them would be two albums interleaving their gaps
+        into a stream of requests neither of them agreed to."""
         snapshot, self._warm_pending = self._warm_pending, None
         if snapshot is None or self._warm_stop.is_set():
             return

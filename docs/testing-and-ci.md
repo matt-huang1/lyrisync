@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-1694 tests, run on every push. The interesting part is not the count — it
+1702 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -128,8 +128,8 @@ tray, shutdown — is tested against a real Qt object tree on the
 
 | tier | what it is | what a failure means | count |
 |---|---|---|---|
-| `unit` | one Qt-free module's own logic, its collaborators stubbed | that module is wrong | 1198 |
-| `integration` | this app's real parts wired to each other, only the outside world faked, entered where a user's actions arrive | the parts disagree | 60 |
+| `unit` | one Qt-free module's own logic, its collaborators stubbed | that module is wrong | 1205 |
+| `integration` | this app's real parts wired to each other, only the outside world faked, entered where a user's actions arrive | the parts disagree | 62 |
 | `qt` | needs a Qt object to answer: the widget tree, a `QSettings` round trip, a painted image | the window is wrong | 435 |
 
 ```
@@ -207,7 +207,7 @@ Worth knowing rather than worth fixing all at once. A `qt` test that calls
 question the test wrote down; only an `integration` test asks the question
 the app is actually asked.
 
-**Driven all the way in** (the sixty):
+**Driven all the way in** (the sixty-two):
 
 - **The loop's wrap seek, echo practice, and the position a seek lands
   at** — a fake Spotify and a fake clock under the real `PlayerMonitor`,
@@ -233,10 +233,12 @@ the app is actually asked.
   request lands on the wire and the window changes its mind. And the
   refusal case, where a 429 has asked for a pause and the user's own press
   never opens a socket.
-- **The album warm** — a song starts, the timer fires, and the search and
-  the per-track requests arrive on the same fake connection; then a second
-  window plays one of the warmed tracks and asks nothing at all. Skipped
-  entirely while the service is failing.
+- **The album warm, both stages** — a song starts, the timer fires, and
+  exactly one search arrives on the fake connection; a later track is then
+  answered from it with nothing on the wire. A *second* track from the
+  same album is what brings the per-track requests, and the same song
+  played twice is not one. Skipped entirely while the service is
+  failing.
 - **Dragging and resizing** — a press, a move and a release routed by Qt,
   so which of the two a press means is Qt's answer and not the test's:
   learning at the end of a drag, learning nothing after a press that moved

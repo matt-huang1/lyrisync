@@ -215,15 +215,28 @@ Rules that come with them:
   lives beside the REASON rather than beside the message: "will retry"
   already promises the thing, so a control next to that sentence would be
   inviting people to do it themselves.
+- **The album warm is two stages, and the second one waits for intent.**
+  One search for any album a track was played from; a lookup per name only
+  once a **second** track from that album plays, which is the only signal
+  there is for "listening to an album" rather than "heard a song".
+  Measured over 4 real albums: 1 request for 26% of the album, 20 for 34%,
+  so the second stage is a poor trade for every album and a fair one for
+  an album somebody is playing through.
+- **A name keeps every record either stage found**, because LRCLIB answers
+  with one title at several lengths and which is the recording cannot be
+  known until it plays. Stage two ADDS rather than replaces: its answer
+  can be a different recording than the search's, and replacing cost a
+  track of 16 in the measurement.
 - **The album warm can say yes and it can say nothing.** Never "this
   track has no lyrics" — it is a guess made without the track in hand. A
   hit is checked against the **`/get`** duration tolerance rather than the
   looser search one, because it stands in for the album match; it is
   promoted to an ordinary cache entry on the way past; and the store lives
   INSIDE `.lyrics_cache/`, because it is the one thing there nobody made.
-  Requests go out **sequentially with a gap** (350ms, the middle of the
-  200-500ms band LRCLIB's docs ask for), one album at a time, once per
-  album ever, and **never while the service is failing**.
+  Stage two's requests go out **sequentially with a gap** (350ms, the
+  middle of the 200-500ms band LRCLIB's docs ask for), one album at a
+  time, once per album ever, and **neither stage runs while the service is
+  failing**.
 - **Tap-to-sync must not need the network.** Lyrics can be pasted in, and
   that entry point is offered exactly where "Sync this song" cannot be, so
   the two can never both be on screen.
