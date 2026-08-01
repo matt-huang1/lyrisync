@@ -6,6 +6,8 @@ re-fetching, so nothing in sottovoce may delete, clear, expire, or truncate
 it — and no documented cleanup step may point at it.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import re
 from pathlib import Path
 

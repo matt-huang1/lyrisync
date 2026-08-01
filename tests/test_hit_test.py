@@ -8,6 +8,8 @@ rules that name the gap when there is one, so a press trace can say
 whoever reads the log.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce.hit_test import (

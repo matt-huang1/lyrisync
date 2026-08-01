@@ -41,3 +41,13 @@ packages = ["src/sottovoce"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Three tiers, and every test is in exactly one of them, so each can be
+# run on its own: `pytest -m unit`, `-m integration`, `-m qt`. A module
+# declares its tier with a TIER line and a test overrides it with a
+# marker; tests/conftest.py resolves the two and refuses a test in no
+# tier.
+markers = [
+    "unit: one Qt-free module's own logic, its collaborators stubbed",
+    "integration: this app's real parts wired to each other, only the outside world faked, driven from the entry point a user's actions arrive at",
+    "qt: needs a Qt object to answer — the widget tree, a QSettings round trip, a painted image",
+]

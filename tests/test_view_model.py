@@ -1,3 +1,5 @@
+TIER = "unit"  # Qt-free logic, called directly
+
 from sottovoce.lyrics_provider import TrackLyrics
 from sottovoce.player_monitor import PlaybackState, PlayerSnapshot
 from sottovoce.view_model import RETRY_INTERVAL_SECONDS, LyricsViewModel, Mode

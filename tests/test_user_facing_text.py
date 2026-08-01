@@ -27,6 +27,8 @@ a later preference.
 
 from __future__ import annotations
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import ast
 from pathlib import Path
 

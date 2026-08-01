@@ -10,6 +10,8 @@ one.
 
 from __future__ import annotations
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce import proximity as p

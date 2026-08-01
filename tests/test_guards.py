@@ -10,6 +10,8 @@ These are the only tests allowed to cause an escape on purpose, and they
 drain the record afterwards so the autouse check does not fail them.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import socket
 import threading
 
@@ -181,6 +183,7 @@ def test_a_test_cannot_claim_a_system_wide_hotkey(escapes):
     assert any("hotkey" in e for e in escapes.drain())
 
 
+@pytest.mark.qt
 def test_the_real_preferences_file_cannot_be_opened(escapes):
     """The first escape this project had: QSettings("sottovoce", "sottovoce")
     is the user's own window position, opacity and toggles."""
@@ -207,6 +210,7 @@ def test_the_preferences_left_behind_by_the_old_name_cannot_be_opened(escapes):
     assert any("lyrisync" in e for e in escapes.drain())
 
 
+@pytest.mark.qt
 def test_a_settings_file_of_its_own_is_fine(escapes, tmp_path):
     w = pytest.importorskip(
         "sottovoce.window",

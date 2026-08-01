@@ -21,6 +21,8 @@ the palettes are plain tuples — so the floor stays checkable even where
 PySide6 will not load.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce import appearance as ap
@@ -578,6 +580,7 @@ def test_blending_stays_inside_its_endpoints():
 # -- opacity --------------------------------------------------------------
 
 
+@pytest.mark.qt
 def test_the_window_starts_at_full_opacity():
     """Below 1.0 macOS renders the material without its blur, so the
     default has to be exactly 1.0 for the frost to exist at all."""
@@ -590,6 +593,7 @@ def test_the_window_starts_at_full_opacity():
     assert w._MAX_OPACITY == 1.0
 
 
+@pytest.mark.qt
 @PALETTES
 def test_dimming_is_the_users_own_trade(palette):
     """No promise is made below full opacity — dimming is a deliberate

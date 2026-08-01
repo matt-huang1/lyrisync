@@ -12,6 +12,8 @@ the user changes apps. That is verified by hand against the real thing;
 see docs/per-app-position.md.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce import frontmost

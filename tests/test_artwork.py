@@ -13,6 +13,8 @@ asserting an exact RGB triple would be pinning something the app does
 not use — these assert the hue, which is the part that matters.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import json
 
 import pytest
@@ -120,12 +122,14 @@ def encoded_image(fill, width=64, height=64):
     return bytes(buffer.data())
 
 
+@pytest.mark.qt
 def test_a_real_image_decodes_to_its_hue():
     colour = artwork.decode_colour(encoded_image((30, 120, 200)))
     assert colour is not None
     assert hue_of(colour) == pytest.approx(rgb_to_hsl((30, 120, 200))[0], abs=10)
 
 
+@pytest.mark.qt
 def test_a_real_monochrome_image_decodes_to_no_colour():
     assert artwork.decode_colour(encoded_image((128, 128, 128))) is None
 
@@ -166,6 +170,7 @@ def serve(monkeypatch, data, calls=None):
     monkeypatch.setattr(artwork, "_download", fake_download)
 
 
+@pytest.mark.qt
 def test_a_colour_is_worked_out_once_and_remembered(provider, monkeypatch):
     calls = []
     serve(monkeypatch, encoded_image((200, 50, 40)), calls)
@@ -179,6 +184,7 @@ def test_a_colour_is_worked_out_once_and_remembered(provider, monkeypatch):
     assert calls == ["http://cover"], "the cover was fetched twice"
 
 
+@pytest.mark.qt
 def test_the_cache_holds_colours_not_images(provider, monkeypatch):
     """The whole reason the cache exists in this shape: covers are
     hundreds of kilobytes and are already on a CDN."""
@@ -193,6 +199,7 @@ def test_the_cache_holds_colours_not_images(provider, monkeypatch):
     assert len(entry["colour"]) == 3
 
 
+@pytest.mark.qt
 def test_no_usable_hue_is_remembered_as_an_answer(provider, monkeypatch):
     """A monochrome sleeve is settled. Re-deciding it on every play would
     be a download per track for a result that cannot change."""
@@ -205,6 +212,7 @@ def test_no_usable_hue_is_remembered_as_an_answer(provider, monkeypatch):
     assert calls == ["http://cover"], "a settled answer was fetched again"
 
 
+@pytest.mark.qt
 def test_a_failed_fetch_is_never_remembered(provider, monkeypatch):
     """Errors are not answers — the same rule the lyrics cache follows.
     Offline once must not mean colourless forever."""
@@ -218,6 +226,7 @@ def test_a_failed_fetch_is_never_remembered(provider, monkeypatch):
     assert calls == ["http://cover"], "the retry never happened"
 
 
+@pytest.mark.qt
 def test_an_image_that_will_not_decode_is_never_remembered(provider, monkeypatch):
     serve(monkeypatch, b"truncated")
     assert provider.colour_for("t1", "http://cover") is None
@@ -240,6 +249,7 @@ def test_no_artwork_url_fetches_nothing(provider, no_downloads):
     assert provider.colour_for("t1", "") is None
 
 
+@pytest.mark.qt
 def test_a_corrupt_cache_entry_is_ignored_not_trusted(provider, monkeypatch):
     provider.cache_dir.mkdir(parents=True, exist_ok=True)
     provider._cache_path("t1").write_text("{not json", encoding="utf-8")
@@ -249,6 +259,7 @@ def test_a_corrupt_cache_entry_is_ignored_not_trusted(provider, monkeypatch):
     assert calls == ["http://cover"]
 
 
+@pytest.mark.qt
 def test_an_out_of_range_cache_entry_is_ignored(provider, monkeypatch):
     provider.cache_dir.mkdir(parents=True, exist_ok=True)
     provider._cache_path("t1").write_text('{"colour": [999, -4, 0]}', encoding="utf-8")

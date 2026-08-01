@@ -6,6 +6,8 @@ while it was idle — is not something a real server can be asked for on
 demand anyway.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import http.client
 
 import pytest

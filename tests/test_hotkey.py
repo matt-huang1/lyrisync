@@ -12,6 +12,8 @@ Nothing here is macOS-only. The door is faked, and the unavailable branch
 is the one the Linux runner takes for real.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import logging
 
 import pytest

@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-1143 tests, run on every push. The interesting part is not the count — it
+1580 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -99,6 +99,120 @@ modules and is tested without a display.
 What cannot be made pure — signal wiring, `QSettings` round-trips, the
 tray, shutdown — is tested against a real Qt object tree on the
 `offscreen` platform.
+
+## Three tiers, and every test is in exactly one
+
+| tier | what it is | what a failure means | count |
+|---|---|---|---|
+| `unit` | one Qt-free module's own logic, its collaborators stubbed | that module is wrong | 1147 |
+| `integration` | this app's real parts wired to each other, only the outside world faked, entered where a user's actions arrive | the parts disagree | 11 |
+| `qt` | needs a Qt object to answer: the widget tree, a `QSettings` round trip, a painted image | the window is wrong | 422 |
+
+```
+pytest -m unit           # 5.8s, no display needed
+pytest -m integration    # 0.6s
+pytest -m qt             # 4.6s
+pytest                   # all three, and they are the whole suite
+```
+
+**Exactly one**, so the three add up to the suite and each can be run
+alone. A module says which tier it is in with a `TIER` line under its
+docstring; a test that differs from the rest of its file carries a marker
+of its own, and the marker wins. `tests/conftest.py` resolves the two and
+**refuses a test in no tier** — a new file with no `TIER` line fails
+collection rather than quietly running untiered.
+
+The alternative was a module-level `pytestmark` plus per-test overrides,
+and it does not work: a mark on the module cannot be taken back off one
+item, so a test carrying both would be selected by `-m unit` *and* by
+`-m qt`, and the arithmetic that says the tiers are the suite would stop
+holding. `tests/test_suite_shape.py` asserts the rest — every module declares a
+tier, no test claims two, and the markers registered in `pyproject.toml`
+are exactly the ones conftest resolves.
+
+The line between `unit` and `integration` is **how many of the app's own
+parts are in the room**, not how much is faked. `tests/test_player_monitor.py`
+drives the real `PlayerMonitor` against a fake Spotify and a fake clock
+and is still `unit`: one module, its door stubbed. The same fake Spotify
+under the real monitor *wired to a real window* is `integration`, because
+what it can catch is the two of them disagreeing.
+
+## Where the window tests live
+
+`tests/window/` is one file per behaviour, all of them `qt`:
+
+| | |
+|---|---|
+| `conftest.py` | `make_window` (the settings seam) and `no_real_world` |
+| `helpers.py` | Qt brought up once, and the helpers a second file needs |
+| `test_window_seam.py` | that the injected settings file is the one written |
+| `test_window_lyrics.py` | the title card, and why the lyrics are not here |
+| `test_window_menu.py` | the menu model, the menu bar item, the glyph, open at login |
+| `test_window_visibility.py` | show/hide, the flight, the hotkey, quit |
+| `test_window_appearance.py` | palette, hairline, album tint, the three display settings |
+| `test_window_motion.py` | the line change, and what it costs to draw |
+| `test_window_player.py` | the announcement, and the loop against a real player |
+| `test_window_positions.py` | per-app memory, the acknowledgement, each layout's shape |
+| `test_window_notifications.py` | the yield, and the poll rate |
+| `test_window_compact.py` | the strip's rows and its reveal |
+| `test_window_press.py` | presses Qt routes, rather than presses aimed by hand |
+| `test_window_docking.py` | docking, and the square-topped shape |
+| `test_window_fit.py` | fitting the strip to the song, and its type size |
+| `test_window_pointer_yield.py` | dodge, ghost, the suspensions |
+
+It was one 7447-line file, which was a fifth of the suite. A helper lives
+in `helpers.py` **only** when a second file needs it — anything one file
+uses stays in that file, next to what it serves — and the fixtures are in
+`conftest.py`, which is why nothing imports a conftest by name.
+
+Splitting it found a test that had never run: two different tests were
+called `test_the_setting_survives_a_restart`, one about the notification
+yield and one about fitting, and the second definition had shadowed the
+first for as long as they shared a module. Both run now, and both pass.
+`tests/test_suite_shape.py` is where a duplicate would be caught next time.
+
+## What is driven through the real entry point, and what is not
+
+Worth knowing rather than worth fixing all at once. A `qt` test that calls
+`window._on_position_update(snapshot(...))` is asking the window a
+question the test wrote down; only an `integration` test asks the question
+the app is actually asked.
+
+**Driven all the way in** (the eleven):
+
+- **The loop's wrap seek, echo practice, and the position a seek lands
+  at** — a fake Spotify and a fake clock under the real `PlayerMonitor`,
+  wired to the real window's slots. This is the harness that caught a loop
+  seeking twice at every wrap while 1487 tests passed.
+- **Six of the seven controls on the window** — loop, spoken reference,
+  echo done, tap, undo, discard — pressed at their live centres with the
+  press delivered to the top-level `QWindow`, in both layouts, so Qt picks
+  the receiver.
+- **The global hotkey** — the callback Carbon was handed is the one that
+  hides the lyrics.
+
+**Handler only**, with the entry point that is missing:
+
+| feature | how it is driven today | what is not exercised |
+|---|---|---|
+| the title card, the line change, the sung line, the romanisation and spoken rows, the glyph following play/pause | `_on_track_change` / `_on_position_update` with a hand-built snapshot | the monitor deciding there was a change at all |
+| lyrics arriving | `_on_fetch_finished(...)` — `FetchTask.run` is stubbed for every window test | window → `FetchTask` → `LyricsProvider` → `http_client`, which is covered in halves that never meet |
+| the failure line and its reason | a `FetchFailure` handed to the same slot | the same, for the path a real 503 takes |
+| the `why` button | `click()`, which names the receiver | the only one of the seven controls never pressed through Qt |
+| 12 of the 19 menu entries that do something (compact, fit, size, proximity, yield, dock, remember, all desktops, animation, login, spoken, sync) | their setters directly | `Menu.trigger`, which is what decides the state a toggle moves TO |
+| a click on the menu bar item | not at all | `nsmenu` → `Menu.trigger` → the window: two halves, each covered alone |
+| the pointer yield and the strip's reveal | `_check_pointer()` with only `_pointer_position` faked | the `QTimer` that calls it. One call short of driven |
+| the notification yield | `_check_notifications()` with only `occupied_rects` faked | the same |
+| per-app position memory | `_on_app_activated(...)`, and the settle debounce rewound by hand | `FrontmostWatcher` calling back, and the timer |
+| the three accessibility settings | `_on_display_options_changed(...)` | the watcher calling back |
+| dragging and resizing the window | `mousePressEvent`/`mouseReleaseEvent` called directly | a press, a move and a release routed by Qt — so docking-vs-drag, fitting turned off at an edge, and learning at the end of a drag are all asked by hand |
+| the spoken reference actually speaking | `SpeakTask` stubbed | `speech.py` is covered alone |
+
+The system appearance is the exception that shows the shape of the fix:
+`set_scheme` emits Qt's own `colorSchemeChanged`, so the connection the
+window makes in `__init__` runs for real. It is still `qt` — one component
+— but it enters where the system does, which is what the rows above do
+not.
 
 ## No test is macOS-only
 

@@ -437,7 +437,9 @@ because the scale it comes from does.
 | `vibrancy.py` | `masked_corners` and the `CACornerMask` values |
 | `tests/test_typography.py` | the presets, the default, and the ladder |
 | `tests/test_geometry.py` | the floors, the gutters, the cap, the dock position and `is_docked`, notched screen included |
-| `tests/test_window_qt.py` | the rows, the height, the reveal, the sync fallback, the type size, the dock and its corners |
+| `tests/window/test_window_compact.py` | the rows, the height, the reveal, the sync fallback |
+| `tests/window/test_window_fit.py` | the fitted width, and the strip's own type size |
+| `tests/window/test_window_docking.py` | the dock, and its two square corners |
 
 ## Each layout keeps its own place and its own size
 

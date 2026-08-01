@@ -1,3 +1,5 @@
+TIER = "unit"  # Qt-free logic, called directly
+
 from sottovoce import speech as sp
 
 

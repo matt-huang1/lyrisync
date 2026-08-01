@@ -12,6 +12,8 @@ suite, and a result that depends on what the developer happens to have open
 is not a result.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import ast
 from pathlib import Path
 

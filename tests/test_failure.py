@@ -12,6 +12,8 @@ that into the one line both the window and the terminal tool show.
 
 from __future__ import annotations
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import http.client
 
 import pytest

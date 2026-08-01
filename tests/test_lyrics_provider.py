@@ -1,3 +1,5 @@
+TIER = "unit"  # Qt-free logic, called directly
+
 import json
 import threading
 import time

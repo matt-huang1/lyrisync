@@ -19,6 +19,8 @@ Two properties matter, and the ordering of this file follows them:
   autouse fixture fails the test that caused it whether the escape
   happened on the test's own thread, inside a QRunnable, or in a QThread
   that outlived the call.
+
+The three tiers are also resolved here, at the bottom of the file.
 """
 
 from __future__ import annotations
@@ -31,6 +33,18 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# -- the three tiers -------------------------------------------------------
+#
+# Every test is in exactly ONE of these, so each tier can be run on its
+# own and the three together are the suite. A module says which tier it is
+# in with a `TIER` line under its docstring; a test that differs from the
+# rest of its file says so with a marker of its own, and the marker wins.
+#
+# Exactly one, rather than a set of labels, because the question each tier
+# answers is "what does a failure here mean?" — and two answers to that is
+# the shape of most of the bugs in the log.
+TIERS = ("unit", "integration", "qt")
 
 _lock = threading.Lock()
 _violations: list[str] = []
@@ -335,6 +349,40 @@ def escapes():
             return found
 
     return Recorder()
+
+
+def pytest_collection_modifyitems(config, items):
+    """Give every test its one tier marker, and refuse a test with none.
+
+    The module's `TIER` is the default and a marker on the test itself
+    overrides it, which is the only way to get exactly one marker on a
+    test in a file that is mostly one tier and partly another: a
+    module-level `pytestmark` cannot be taken back off an item, so a test
+    carrying both would be selected by both `-m unit` and `-m qt`.
+
+    Refusing a test with no tier is what keeps this from rotting. A new
+    file with no TIER line is not quietly untiered — it fails collection,
+    and the fix is one line at the top of it.
+    """
+    untiered = []
+    for item in items:
+        own = {marker.name for marker in item.own_markers if marker.name in TIERS}
+        if len(own) > 1:
+            raise pytest.UsageError(
+                f"{item.nodeid} claims more than one tier: {sorted(own)}"
+            )
+        if own:
+            continue
+        tier = getattr(item.module, "TIER", None)
+        if tier not in TIERS:
+            untiered.append(item.nodeid)
+            continue
+        item.add_marker(tier)
+    if untiered:
+        raise pytest.UsageError(
+            "these tests are in no tier — give the module a TIER line, or "
+            "the test a marker of its own:\n  " + "\n  ".join(untiered)
+        )
 
 
 @pytest.fixture(autouse=True)

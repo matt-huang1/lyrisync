@@ -8,6 +8,8 @@ stays silent about — was measured by driving a real Spotify and watching,
 and the transcript of that is the module's own docstring.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import ast
 from pathlib import Path
 

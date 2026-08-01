@@ -1,3 +1,5 @@
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce import typography as t

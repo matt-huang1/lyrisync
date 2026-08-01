@@ -10,6 +10,8 @@ door is shut by the guard in conftest, which has a test of its own — an
 unrun guard is the tray test again.
 """
 
+TIER = "qt"  # QSettings round trips, on ini files of their own
+
 import pytest
 
 # Two ini files stand in for the two plists. QSettings is the same class

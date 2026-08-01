@@ -10,6 +10,8 @@ Nothing here starts a monitor or reaches Spotify — the printers are driven
 with snapshots directly, which is all they are.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce import lyrics_cli, monitor_cli

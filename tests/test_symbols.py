@@ -5,6 +5,8 @@ code, so on the Linux runner these assert the fallback contract — the part
 that matters everywhere: no symbol must never mean no button.
 """
 
+TIER = "qt"  # an SF Symbol is a QPixmap or it is nothing
+
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

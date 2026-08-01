@@ -10,6 +10,8 @@ points — is a question about pixels and is verified by hand; see
 docs/menu-and-system-integration.md.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce import menubar

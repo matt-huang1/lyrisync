@@ -20,6 +20,8 @@ and the reading of the real switch is verified by hand.
 
 from __future__ import annotations
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import ast
 from pathlib import Path
 

@@ -56,6 +56,35 @@ seek, pause/resume). Full map in
   order. A rule that must not be undone comes back *here*, stated as a
   rule, in as few words as it needs.
 
+## The three tiers
+
+Every test is in **exactly one** tier, so the three add up to the suite
+and each runs alone: `pytest -m unit` (one Qt-free module's own logic),
+`-m integration` (this app's real parts wired to each other, only the
+outside world faked, entered where a user's actions arrive), `-m qt`
+(needs a Qt object). Rules that come with it:
+
+- **A module declares its tier with a `TIER` line under its docstring**,
+  and a test that differs from the rest of its file carries a marker of
+  its own, which wins. Not a module-level `pytestmark` plus overrides: a
+  mark on the module cannot be taken off one item, so an overridden test
+  would answer to two `-m` selections and the tiers would stop adding up.
+- **A test in no tier fails collection.** The resolution is in
+  `tests/conftest.py`; the marker names are registered once in
+  `pyproject.toml` and `tests/test_suite_shape.py` pins the two together.
+- The line between `unit` and `integration` is **how many of the app's own
+  parts are in the room**, not how much is faked. The real
+  `PlayerMonitor` against a fake Spotify is `unit`; the same fake Spotify
+  under a monitor wired to a real window is `integration`.
+- **What each tier drives, and what nothing drives**, is audited in
+  [docs/testing-and-ci.md](docs/testing-and-ci.md#what-is-driven-through-the-real-entry-point-and-what-is-not).
+  Read it before claiming a feature is covered.
+
+The window's own tests are one file per behaviour in `tests/window/`.
+**A helper goes in `helpers.py` only when a second file needs it** —
+anything one file uses stays in that file, next to what it serves — and
+the fixtures are in `conftest.py`, so nothing imports a conftest by name.
+
 ## The testing guards
 
 `tests/conftest.py` shuts thirteen doors for the whole session. They are the

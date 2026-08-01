@@ -14,6 +14,8 @@ all over again.
 
 from __future__ import annotations
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import ast
 import re
 import tomllib

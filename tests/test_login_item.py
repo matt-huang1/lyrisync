@@ -10,6 +10,8 @@ Nothing here is macOS-only. On the Linux runner _main_app_service returns
 None by platform check alone, which is the same branch these assert.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import sys
 
 import pytest

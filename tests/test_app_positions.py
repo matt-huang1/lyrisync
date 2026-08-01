@@ -6,6 +6,8 @@ NSWorkspace actually calls back when the user changes apps — is verified
 by hand against the real thing; see docs/per-app-position.md.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 import pytest
 
 from sottovoce.app_positions import (

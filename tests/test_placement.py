@@ -7,6 +7,8 @@ strip used to give the full layout its old SIZE at wherever the strip
 happened to be standing.
 """
 
+TIER = "unit"  # Qt-free logic, called directly
+
 from sottovoce.placement import EMPTY, LayoutShapes, Shape
 
 FULL, COMPACT = False, True
