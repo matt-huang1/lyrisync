@@ -258,14 +258,69 @@ Rules that come with them:
   unreachable network is tried twice and every real failure takes twice as
   long to report.
 - A **re-sync takes its lines from the sync it replaces**, not a re-fetch,
-  so it works offline. A sync is saved only when complete, and its
-  confirmation is inline — never a modal, because the window must never
-  take focus.
+  so it works offline. Its confirmation is inline — never a modal, because
+  the window must never take focus.
 - The title card gives the window back when there is **something to
   show**, which is not the same as "the fetch finished": a synced song
   joined before its first line has lyrics and nothing to put on screen,
   and ending the card there trades two seconds of the song's name for ten
   of an empty window.
+
+### A pass that can be interrupted
+
+- **A pass is written down as it goes**, after every tap and every undo,
+  into `.user_syncs/<id>.pass`. It is the user's work in the sense a
+  finished sync is, so it lives with the syncs and not in the cache:
+  clearing `.lyrics_cache/` must stay a safe reset, and minutes of tapping
+  is not something a reset may take. The write is on the UI thread and
+  measured (0.059ms median, 0.149ms worst, 2588 bytes, over the forty
+  writes a forty line song makes); the pool would only let two writes of
+  one file land out of order. A write that FAILS is put on screen, because
+  the promise is the whole point.
+- **Nothing that merely ENDS a pass may take its stamps.** `_leave_sync`
+  drops the session and keeps the journal; a track change, a stop and the
+  ✕ all go through `_end_pass`, which names the reason and shows the
+  count. A song ENDING is a track change, which is how this cost whole
+  passes; the monitor already debounces a one-poll track loss and the view
+  model already suspends rather than resets, and a pass was the one thing
+  downstream of both that treated a blip as final.
+- **`_discard_pass` is the only thing in the app that removes a file from
+  `.user_syncs/`**, and `clear_pass` is the only function in the package
+  that may unlink at all — asserted by AST twice over (no other file holds
+  a deletion primitive; inside the one that does, no other function), and
+  the only path it may name is `pass_path`. A journal is the one file
+  there whose purpose is to stop existing. Everything else is work nobody
+  can make again, which is why the partial marker is **overwritten with a
+  null digest** rather than deleted: the answer has to change, and
+  `save_user_sync` is the function that knows a `.lrc`'s path.
+- **The record carries the LINES, not only the stamps.** A stamp is a
+  number against a position in a list and the list can change between two
+  playings of a song, so `resume_targets` refuses a record whose lines are
+  not the lines in hand. A pasted pass has no lines to disagree with and
+  stands alone, because nothing else knows those words.
+- **✕ stops and keeps; discarding is a menu entry.** A control the hand
+  reaches for by reflex gets the safe act and an irreversible one costs a
+  look, so the second press confirms leaving rather than losing. Both
+  menu entries carry the count, because they are one sentence with the
+  number left out otherwise.
+- **Completion means every line for publishing and for nothing else.** A
+  pass kept short writes a real `.lrc` of the lines it timed and is marked
+  partial in a sidecar; `standing_refusal` refuses it by NAME rather than
+  leaving `verify`'s word check to refuse it by accident. Falling short
+  and losing the work were one rule, and the simplicity that bought was
+  paid for in whole passes.
+- **A tap that does nothing says why.** Measured: a disabled `QPushButton`
+  swallows the press entirely (`acted=0, dragged=0`), and an enabled bar
+  with no position in hand takes the click and drops the stamp
+  (`acted=1, stamps=[]`). Both read as a dead control, so the refusal is
+  named in the row that was counting lines and the boolean is derived
+  from it.
+- **A sync test that supplies its own stamps cannot see any of this.**
+  `session.stamp(4.0)` is the caller answering its own question — the
+  loop's mistake again — and a pass whose stamps arrive that way never
+  meets the tap bar, the player, or the things that end it. Positions come
+  from a real `PlayerMonitor` over a fake Spotify and stamps come from
+  presses Qt routes to the bar's live centre.
 
 ### Publishing a sync
 
@@ -799,4 +854,4 @@ romanisation; configurable hotkeys or any hotkey beyond show/hide; focus
 fade; yielding to anything beyond the notification system; a different
 yield ceiling per appearance; publishing a sync for a track LRCLIB has no
 lyrics for; bulk publishing; editing a sync before publishing it; starting
-a sync mid-song, partial saves, per-line editing of an existing sync.
+a sync mid-song; per-line editing of an existing sync.

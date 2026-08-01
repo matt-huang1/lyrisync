@@ -11,6 +11,10 @@ from sottovoce.sync_session import (
     sync_targets,
     sync_targets_from_lines,
     targets_from_paste,
+    PASS_VERSION,
+    decode,
+    pass_progress,
+    resume_targets,
 )
 
 
@@ -315,3 +319,131 @@ def test_to_lrc_round_trips_through_the_provider_parser():
         (61.25, "Second"),
         (129.0, "Third"),
     ]
+
+
+# -- a pass written down ---------------------------------------------------
+#
+# The integration file drives these through a real pass; what is asked here
+# is the edge cases, which is what a unit tier is for. A record is read
+# back off a disk somebody else can reach, so every question it can answer
+# wrongly is asked once.
+
+
+def record(lines=("one", "two", "three"), stamps=(1.0, 4.0), version=PASS_VERSION):
+    return {"version": version, "lines": list(lines), "stamps": list(stamps)}
+
+
+def test_a_session_encodes_its_lines_as_well_as_its_stamps():
+    """The lines are what makes a resume trustworthy: a stamp is a number
+    against a position in a list, and the list can change."""
+    s = session(offset=0.0)
+    s.stamp(1.0)
+    assert s.encode() == {
+        "version": PASS_VERSION,
+        "lines": ["one", "two", "three"],
+        "stamps": [1.0],
+    }
+
+
+def test_a_session_can_be_built_from_stamps_it_already_had():
+    s = SyncSession(["one", "two", "three"], offset=0.0, stamps=[1.0, 4.0])
+    assert s.index == 2
+    assert s.current == "three"
+    assert s.previous == "two"
+    assert s.is_complete is False
+    s.stamp(9.0)
+    assert s.is_complete is True
+    assert s.to_lrc() == "[00:01.00] one\n[00:04.00] two\n[00:09.00] three\n"
+
+
+def test_more_stamps_than_lines_is_trimmed_rather_than_believed():
+    """Only a hand-edited file can produce it, and stamping line 30 of a
+    20 line song is not a state a session may be in."""
+    s = SyncSession(["one", "two"], offset=0.0, stamps=[1.0, 4.0, 9.0])
+    assert s.stamps == [1.0, 4.0]
+    assert s.is_complete is True
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        "not a record",
+        {},
+        {"version": PASS_VERSION + 1, "lines": ["a"], "stamps": [1.0]},
+        {"version": PASS_VERSION, "lines": "a", "stamps": []},
+        {"version": PASS_VERSION, "lines": ["a"], "stamps": "1.0"},
+        {"version": PASS_VERSION, "lines": [], "stamps": []},
+        {"version": PASS_VERSION, "lines": [1, 2], "stamps": []},
+        {"version": PASS_VERSION, "lines": ["a"], "stamps": [1.0, 2.0]},
+        {"version": PASS_VERSION, "lines": ["a", "b"], "stamps": ["1.0"]},
+        {"version": PASS_VERSION, "lines": ["a", "b"], "stamps": [True]},
+        {"version": PASS_VERSION, "lines": ["a", "b"], "stamps": [-1.0]},
+        {"version": PASS_VERSION, "lines": ["a", "b"], "stamps": [4.0, 1.0]},
+    ],
+)
+def test_a_record_that_is_not_one_reads_as_no_record(bad):
+    """Not an error to report: a record that cannot be read is simply not a
+    pass to resume, and the song falls back to offering a fresh one.
+
+    Stamps that run backwards are rejected rather than repaired, because
+    the repair would be a guess about which of two numbers was meant.
+    """
+    assert decode(bad) is None
+    assert resume_targets(bad) is None
+    assert pass_progress(bad) is None
+
+
+def test_a_readable_record_gives_back_its_lines_and_stamps():
+    assert decode(record()) == (["one", "two", "three"], [1.0, 4.0])
+    assert pass_progress(record()) == (2, 3)
+
+
+def test_integers_are_read_as_stamps_and_bools_are_not():
+    """JSON has one number type, so a stamp written as 4 comes back as an
+    int. A bool is an int in Python and is not a timestamp anybody wrote."""
+    assert decode(record(stamps=[1, 4])) == (["one", "two", "three"], [1.0, 4.0])
+    assert isinstance(decode(record(stamps=[1, 4]))[1][0], float)
+
+
+def test_a_record_only_resumes_onto_the_lines_it_was_made_from():
+    """Stamps are timings against WORDS. A record made from other words is
+    somebody's timings put against lines they never tapped."""
+    assert resume_targets(record(), ["one", "two", "three"]) == (
+        ["one", "two", "three"],
+        [1.0, 4.0],
+    )
+    assert resume_targets(record(), ["one", "two", "different"]) is None
+    assert resume_targets(record(), ["one", "two"]) is None
+
+
+def test_a_record_with_no_lines_to_disagree_with_stands_alone():
+    """A pasted pass. Its words only ever existed in the record, so there
+    is nothing else that could check them — which is not a weaker rule but
+    the only one there is."""
+    assert resume_targets(record(), None) == (["one", "two", "three"], [1.0, 4.0])
+    assert resume_targets(record(), []) == (["one", "two", "three"], [1.0, 4.0])
+
+
+def test_a_record_nobody_has_tapped_in_is_not_a_resume():
+    """Readable, and there is nothing to take back up."""
+    empty = record(stamps=[])
+    assert decode(empty) == (["one", "two", "three"], [])
+    assert pass_progress(empty) == (0, 3)
+    assert resume_targets(empty) is None
+
+
+def test_a_pass_round_trips_through_its_own_record():
+    """The property the two halves add up to: what is written is what is
+    read, and the session rebuilt from it is the session that wrote it."""
+    first = session(offset=0.0)
+    first.stamp(3.0)
+    first.stamp(8.5)
+
+    lines, stamps = resume_targets(first.encode(), first.lines)
+    second = SyncSession(lines, offset=0.0, stamps=stamps)
+
+    assert second.lines == first.lines
+    assert second.stamps == first.stamps
+    assert second.current == first.current
+    assert second.to_lrc() == first.to_lrc()

@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-1702 tests, run on every push. The interesting part is not the count — it
+1844 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -128,14 +128,14 @@ tray, shutdown — is tested against a real Qt object tree on the
 
 | tier | what it is | what a failure means | count |
 |---|---|---|---|
-| `unit` | one Qt-free module's own logic, its collaborators stubbed | that module is wrong | 1205 |
-| `integration` | this app's real parts wired to each other, only the outside world faked, entered where a user's actions arrive | the parts disagree | 62 |
+| `unit` | one Qt-free module's own logic, its collaborators stubbed | that module is wrong | 1310 |
+| `integration` | this app's real parts wired to each other, only the outside world faked, entered where a user's actions arrive | the parts disagree | 99 |
 | `qt` | needs a Qt object to answer: the widget tree, a `QSettings` round trip, a painted image | the window is wrong | 435 |
 
 ```
-pytest -m unit           # 6.8s, no display needed
-pytest -m integration    # 1.2s
-pytest -m qt             # 5.0s
+pytest -m unit           # 4.2s, no display needed
+pytest -m integration    # 14.6s
+pytest -m qt             # 5.3s
 pytest                   # all three, and they are the whole suite
 ```
 
@@ -207,7 +207,7 @@ Worth knowing rather than worth fixing all at once. A `qt` test that calls
 question the test wrote down; only an `integration` test asks the question
 the app is actually asked.
 
-**Driven all the way in** (the eighty-two):
+**Driven all the way in** (the ninety-nine):
 
 - **The loop's wrap seek, echo practice, and the position a seek lands
   at** — a fake Spotify and a fake clock under the real `PlayerMonitor`,
@@ -231,7 +231,7 @@ the app is actually asked.
   the pause and stops the retry after it, a 5xx, a check that could not be
   made and the button that asks again, a song LRCLIB has since synced, and
   a solve cancelled by closing the window and by shutdown.
-- **Every menu entry a click can reach** — all twenty-one, delivered to the
+- **Every menu entry a click can reach** — all twenty-three, delivered to the
   selector Cocoa delivers to, with a tag off the table `_arm` built, and
   the tick read back off the item afterwards. Quit included, through a
   real event loop, and pasting lyrics to sync — the one entry that opens a
@@ -256,10 +256,24 @@ the app is actually asked.
   nothing, fitting turned off at the start of an edge drag, and a window
   that is docked, dragged away, and dragged back onto the pixel.
 - **Every control on the window** — loop, spoken reference, echo done,
-  tap, undo, discard, and now the ⓘ and the retry — pressed at their live
+  tap, undo, stop, and now the ⓘ and the retry — pressed at their live
   centres with the press delivered to the top-level `QWindow`, in both
   layouts, so Qt picks the receiver. `press_through`, `PressRecord` and
   `pressing` moved into `helpers.py` when the second file needed them.
+- **A tap-to-sync pass, for its whole life** — and this row is the one
+  written last, because every sync test before it handed the session its
+  stamps. `session.stamp(4.0)` is the caller answering its own question,
+  the loop's mistake in a different feature, and a pass whose stamps
+  arrive that way never meets the tap bar, the player, or the things that
+  end it. Here nothing supplies a stamp: a real `PlayerMonitor` over a
+  fake Spotify carries every position, and every stamp is a press Qt
+  routes to the bar's own live centre. A whole pass saving the song; the
+  journal written after each tap and after an undo; a track change, a
+  stop and a press on ✕ each ending it and keeping every stamp; the song
+  coming back and the pass being offered and resumed at the last stamp;
+  the compact setting flipped in both directions mid-pass; a partial kept
+  and refused for publication; a journal that cannot be written; and both
+  refusals a tap can meet.
 - **The global hotkey** — the callback Carbon was handed is the one that
   hides the lyrics.
 
@@ -292,7 +306,7 @@ wrong about: that a 503 is never written down, and that narration's three
 would have been the two halves again, wearing an `integration` marker.
 
 **The list of what is covered is asked of the app.** The menu file drives
-twenty entries and then asks `Menu.has_handler` which entries there are,
+every acting entry and then asks `Menu.has_handler` which entries there are,
 so an entry wired up later fails that test rather than quietly going
 uncovered. A written-down list is a list that was true once.
 

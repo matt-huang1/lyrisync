@@ -1392,6 +1392,7 @@ def test_recording_a_publication_leaves_the_sync_untouched(provider):
     assert path.read_bytes() == before
     assert sorted(p.suffix for p in provider.user_sync_dir.iterdir()) == [
         ".lrc",
+        ".partial",
         ".published",
     ]
 

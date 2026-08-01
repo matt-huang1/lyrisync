@@ -16,6 +16,10 @@ ALL_LAYERS = dict(
     # screen at once and ask about ORDER; that they exclude each other is
     # asserted where it is decided, in test_view_model.py.
     paste_sync_offered=True,
+    # A pass somebody made stamps in and has not turned into anything yet.
+    # Its two entries only appear together, which is asserted where that
+    # is decided; here it is on so ORDER can be asked with everything up.
+    pass_in_hand=True,
     # Mutually exclusive in the running app for the same kind of reason:
     # the entry is refused for a sync that has been sent, and the line is
     # shown for exactly that case. Both are on here so that ORDER can be

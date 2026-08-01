@@ -36,16 +36,80 @@ def source_files():
     return sorted(PACKAGE_DIR.glob("*.py"))
 
 
-def test_the_package_contains_no_deletion_calls():
-    """Broad by design: sottovoce only ever creates and reads files, so any
-    deletion primitive appearing anywhere in it is a regression worth
-    looking at — most of all one that could reach a user sync."""
+# The one function in the package allowed to remove a file, and the one
+# path it may name. A pass journal is written so that an interrupted pass
+# can be finished and removed once its stamps are somewhere better — a
+# .lrc, or nowhere because the user said discard — so it is the only file
+# here whose whole purpose is to stop existing. Everything else in
+# .user_syncs/ is work nobody can make again.
+ONE_DELETER = "clear_pass"
+ITS_ONLY_PATH = "pass_path"
+
+
+def test_only_one_function_in_the_package_can_delete_anything():
+    """Broad by design, with exactly one hole in it, named.
+
+    sottovoce creates and reads; it does not remove. The single exception
+    is asserted twice over — no other FILE may contain a deletion
+    primitive at all, and inside the file that may, no other FUNCTION may.
+    A regex alone would pass a second deleter added to lyrics_provider.py,
+    which is precisely where one would be added.
+    """
     assert source_files(), "no package sources found"
     offenders = {
         path.name: _DELETION_CALLS.findall(path.read_text(encoding="utf-8"))
         for path in source_files()
+        if path.name != "lyrics_provider.py"
     }
     assert {name: hits for name, hits in offenders.items() if hits} == {}
+
+    source = (PACKAGE_DIR / "lyrics_provider.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    deleters = {
+        function.name
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute) and node.attr in ("unlink", "rmdir")
+    }
+    assert deleters == {ONE_DELETER}
+
+
+def test_the_one_deleter_can_only_ever_name_a_pass_journal():
+    """The half that matters. A function allowed to unlink is only safe
+    while the path it unlinks cannot be a sync: this reads the paths
+    ``clear_pass`` can reach and asserts there is one."""
+    source = (PACKAGE_DIR / "lyrics_provider.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    body = next(
+        function
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef) and function.name == ONE_DELETER
+    )
+    paths = {
+        node.attr
+        for node in ast.walk(body)
+        if isinstance(node, ast.Attribute) and node.attr.endswith("_path")
+    }
+    assert paths == {ITS_ONLY_PATH}
+
+
+def test_a_pass_journal_is_the_only_thing_clear_pass_can_take(provider):
+    """And the same claim driven rather than read: a sync, its record of
+    publication and its partial marker all outlive a cleared journal."""
+    provider.save_user_sync("track123", "[00:01.00] alpha\n", partial=True)
+    provider.record_published("track123", "[00:01.00] alpha\n")
+    provider.save_pass("track123", {"version": 1, "lines": ["alpha"], "stamps": [1.0]})
+    assert provider.pass_path("track123").exists()
+
+    provider.clear_pass("track123")
+
+    assert not provider.pass_path("track123").exists()
+    assert provider.user_sync_path("track123").read_text(encoding="utf-8") == (
+        "[00:01.00] alpha\n"
+    )
+    assert provider.published_path("track123").exists()
+    assert provider.partial_path("track123").exists()
 
 
 def test_no_source_file_mentions_clearing_the_user_sync_directory():
@@ -198,6 +262,7 @@ def test_only_save_user_sync_ever_writes_to_the_directory():
     assert writers == {
         "save_user_sync",      # the user's own work, and the only one that is
         "record_published",    # that this sync went to LRCLIB, beside it
+        "save_pass",           # the pass in progress, so an interrupted one keeps
         "_write_cache",        # the cache entry for a track that played
         "_keep_warm",          # what is known about one name on an album
         "_write_album_index",  # which names, which tracks seen, warmed yet
@@ -246,7 +311,14 @@ def test_completing_a_resync_overwrites_the_previous_one(provider):
         (2.5, "alpha"),
         (6.75, "beta"),
     ]
-    assert len(list(provider.user_sync_dir.iterdir())) == 1  # no stray copies
+    # No stray copies: the sync itself, and the one marker that says how
+    # much of the song it covers. A resync writes both again rather than
+    # leaving either behind.
+    assert {path.suffix for path in provider.user_sync_dir.iterdir()} == {
+        ".lrc",
+        ".partial",
+    }
+    assert provider.sync_is_partial("track123", redone) is False
 
 
 def test_an_abandoned_resync_leaves_the_stored_sync_untouched(provider):

@@ -234,7 +234,7 @@ def test_a_sync_pass_borrows_the_full_layout_and_gives_it_back(make_window):
     assert window._compact is True
     assert window._menu.is_checked(m.COMPACT) is True
 
-    window._cancel_sync()
+    window._leave_sync()
     window._render()
     APP.processEvents()
     assert window._compact_applied is True
@@ -357,7 +357,7 @@ def test_a_sync_pass_stops_the_pointer_watch_with_the_layout(make_window):
 
     window._begin_sync()
     assert window._pointer_timer.isActive() is False
-    window._cancel_sync()
+    window._leave_sync()
     assert window._pointer_timer.isActive() is True
 
 

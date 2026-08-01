@@ -6,6 +6,30 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## A tap-to-sync pass you cannot lose
+
+**Every tap is written down as you make it.** A pass costs minutes of
+attention, and it used to be all or nothing: the song ending, the next one
+starting, Spotify stopping, a press on **✕** — each threw every stamp away
+without a word. Now the pass leaves the screen, the window says how far you
+got, and the menu offers it back next time that song plays as **Resume the
+sync (14 / 22 lines)**. Resuming seeks to your last stamp rather than to
+the start.
+
+**A pass no longer has to be finished to be worth keeping.** **Save the 14
+lines timed so far** writes a real sync of the lines you did time; the song
+comes back synced that far. It is marked as covering part of the song,
+which is the one place it matters: publishing to LRCLIB still wants a whole
+song, because a submission replaces that song's timings for everybody.
+
+**✕ stops rather than discards**, and says so before it does. Throwing a
+pass away is now a menu entry, **Discard the 14 of 22 lines timed** — the
+control your hand reaches for by reflex should be the safe one.
+
+**A tap that does nothing says why.** Paused playback, or a position not
+yet in hand, used to leave the bar looking simply dead. The counter row
+names the reason.
+
 ## Publishing a sync back to LRCLIB
 
 **LRCLIB gives this app its lyrics for nothing.** When you have timed a

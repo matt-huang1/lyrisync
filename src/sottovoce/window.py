@@ -130,10 +130,12 @@ from sottovoce.menu import (
     ALL_DESKTOPS,
     COMPACT,
     COMPACT_SIZE,
+    DISCARD_SYNC,
     DOCK_TOP,
     ECHO,
     FIT_TO_SONG,
     FORGET_POSITIONS,
+    KEEP_SYNC,
     Menu,
     OPEN_AT_LOGIN,
     PASTE_SYNC,
@@ -178,7 +180,12 @@ from sottovoce.speech import (
     detect_voice,
     speak_korean,
 )
-from sottovoce.sync_session import interpolated_position
+from sottovoce.sync_session import (
+    SyncSession,
+    interpolated_position,
+    pass_progress,
+    resume_targets,
+)
 from sottovoce import symbols
 from sottovoce.symbols import (
     RETRY_FALLBACK_GLYPH,
@@ -413,9 +420,24 @@ _SHUTDOWN_WAIT_MS = 3000
 _TITLE_CARD_SECONDS = 2.0
 # How long the sync exit control stays armed awaiting its second click.
 # What the progress row says meanwhile is coloured from the palette, so
-# the armed prompt reads in both modes (see _exit_confirm_text).
+# the armed prompt reads in both modes (see _warned).
 _EXIT_CONFIRM_MS = 4000
-_EXIT_CONFIRM_TEXT = "discard this sync? tap ✕ again"
+# What ✕ now asks, and it asks a different question than it used to. The
+# control used to throw the pass away, so it needed a confirmation that
+# said so; it now stops the pass and keeps every stamp, so what the second
+# press confirms is leaving rather than losing. Discarding moved to the
+# menu, where getting to it is deliberate, which is the right way round: a
+# reflex press should reach the safe act and a destructive one should
+# cost a look.
+_EXIT_CONFIRM_TEXT = "stop here? your taps are kept · tap ✕ again"
+# What a pass that ended without finishing says, wherever it ended. The
+# count is filled in; the sentence is one string so the two places that
+# can show it cannot word it differently.
+_PASS_KEPT_TEXT = "{done} of {total} lines timed · resume from the menu"
+# And the one state where that promise is not being kept. A journal that
+# cannot be written is the case this whole mechanism exists to prevent, so
+# it is said out loud rather than logged and hoped about.
+_PASS_UNSAVED_TEXT = "taps are not being saved · finish in one go if you can"
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
 # How long after a song's own lookup lands before the rest of its album is
@@ -775,17 +797,26 @@ class SaveSyncTask(QRunnable):
     reloading first would read the old lyrics and show the song as plain
     again."""
 
-    def __init__(self, provider: LyricsProvider, track_id: str, lrc_text: str) -> None:
+    def __init__(
+        self,
+        provider: LyricsProvider,
+        track_id: str,
+        lrc_text: str,
+        partial: bool = False,
+    ) -> None:
         super().__init__()
         self.signals = _SaveSyncSignals()
         self._provider = provider
         self._track_id = track_id
         self._lrc_text = lrc_text
+        self._partial = partial
 
     def run(self) -> None:
         ok = False
         try:
-            self._provider.save_user_sync(self._track_id, self._lrc_text)
+            self._provider.save_user_sync(
+                self._track_id, self._lrc_text, partial=self._partial
+            )
             ok = True
         except OSError:
             logger.exception("failed to save user sync for %s", self._track_id)
@@ -1364,6 +1395,14 @@ class LyricsWindow(QWidget):
         # policy), so a modal would either be unreachable or drag the app
         # into the foreground. First click arms, second discards.
         self._exit_armed = False
+        # Why the last tap did nothing, or "" when it did something. The
+        # reason is what is kept and what the row shows is derived from it,
+        # never the other way round.
+        self._tap_refusal = ""
+        # Whether the journal is failing. False rather than "not yet
+        # tried": the promise is only broken by a write that came back
+        # wrong, and a pass nobody has tapped in has not broken anything.
+        self._pass_unsaved = False
         self._exit_disarm_timer = QTimer(self)
         self._exit_disarm_timer.setSingleShot(True)
         self._exit_disarm_timer.timeout.connect(self._disarm_sync_exit)
@@ -1462,9 +1501,14 @@ class LyricsWindow(QWidget):
         self._current_snapshot = snapshot if snapshot.is_music_track else None
         self._release_loop()
         if self._syncing and snapshot.track_key != self._sync_track_key:
-            # A different song: the pass can't be finished, so discard it.
-            # No prompt — the user's action already said they moved on.
-            self._cancel_sync()
+            # A different song: the pass can't be finished here, so it
+            # comes off the screen. It is not discarded, and that is the
+            # whole of the fix: a song ENDING is a track change, so the
+            # commonest way to reach this line was tapping the last verse
+            # of a song and having the next one start — and every stamp
+            # went with it, silently. The journal stays and the menu
+            # offers it back next time the song plays.
+            self._end_pass("the track changed")
         self._plain_scroll.verticalScrollBar().setValue(0)  # fresh track, top
         if snapshot.has_track and snapshot.track_key != self._card_key:
             self._card_key = snapshot.track_key
@@ -1587,10 +1631,14 @@ class LyricsWindow(QWidget):
             self._render()
         if snapshot.state in (PlaybackState.STOPPED, PlaybackState.NOT_RUNNING):
             self._release_loop(resume_if_attempt=False)
-            # Spotify stopped or quit: the pass can't be completed. Cancel
-            # before the view model suspends, so the resume restores the
-            # plain lyrics rather than a dead session.
-            self._cancel_sync()
+            # Spotify stopped or quit: the pass can't go on. Ended before
+            # the view model suspends, so resuming restores the plain
+            # lyrics rather than a dead session — and ended rather than
+            # discarded, because the monitor already treats a single
+            # trackless poll as a blip it debounces and the view model
+            # already suspends rather than resets for exactly this. A pass
+            # was the one thing here that took a one-poll stop as final.
+            self._end_pass("Spotify stopped")
         if self._view_model.player_state_changed(snapshot.state):
             self._render()
         elif self._syncing:
@@ -1668,9 +1716,54 @@ class LyricsWindow(QWidget):
         return self._view_model.sync_session is not None
 
     def _begin_sync(self) -> None:
-        """Start a sync pass over the lyrics in hand."""
+        """Start a sync pass over the lyrics in hand, or take back up the
+        one that was interrupted.
+
+        One entry for both, because it is one question: the user is asking
+        to time this song, and whether that means from line one or from
+        line fourteen is a fact about what happened last time rather than
+        a choice they should be made to express. The menu's label says
+        which it will be.
+        """
+        resume = self._resumable_pass()
+        if resume is not None:
+            lines, stamps = resume
+            if self._view_model.resume_sync(lines, stamps):
+                logger.info(
+                    "resuming a sync pass at %d of %d lines", len(stamps), len(lines)
+                )
+                self._enter_sync(resumed=True)
+                return
         if self._view_model.begin_sync():
             self._enter_sync()
+
+    def _resumable_pass(self):
+        """The interrupted pass for the song in hand, or None.
+
+        Asked of the FILE every time rather than kept in a field: the
+        journal outlives this window, which is the whole point of it, and
+        a field could only ever describe passes this run happened to see.
+        """
+        track_id = self._view_model.track_id
+        if not track_id or not self._view_model.pass_may_start:
+            return None
+        return resume_targets(
+            self._provider.read_pass(track_id), self._view_model.lines_to_stamp
+        )
+
+    def _pass_in_hand(self):
+        """``(stamped, total)`` for whatever pass this song has going, live
+        or written down, or None.
+
+        The live session outranks the journal because it is ahead of it by
+        at most one tap, and both are the same pass. What this answers is
+        the one question the menu and the notice both ask: are there
+        stamps somebody made that have not become anything yet.
+        """
+        session = self._view_model.sync_session
+        if session is not None:
+            return (session.index, session.total) if session.index else None
+        return pass_progress(self._provider.read_pass(self._view_model.track_id))
 
     def _open_paste_window(self) -> None:
         """Ask for lyrics the app could not find, in a window that can take
@@ -1729,6 +1822,11 @@ class LyricsWindow(QWidget):
         self._publish_refusal = publish.standing_refusal(
             has_sync=bool(lrc),
             already_published=self._sync_published,
+            # A sync kept from a pass that stopped early is a real sync of
+            # the lines it covers and is refused here alone: everything
+            # else in this app treats it as any other sync, because to the
+            # person following the song it is one.
+            sync_is_partial=bool(lrc) and self._provider.sync_is_partial(track_id, lrc),
             remote_was_plain_only=self._provider.remote_was_plain_only(track_id),
             title=snapshot.title if snapshot else "",
             artist=snapshot.artist if snapshot else "",
@@ -1802,23 +1900,43 @@ class LyricsWindow(QWidget):
         logger.info("sync pass starting from %d pasted lines", len(lines))
         self._enter_sync()
 
-    def _enter_sync(self) -> None:
-        """Everything a pass needs once its lines are settled: every pass
-        is a complete run from line one, so the track goes back to 0 and
-        playback is made sure to be running before the first line
-        arrives."""
+    def _enter_sync(self, resumed: bool = False) -> None:
+        """Everything a pass needs once its lines are settled.
+
+        A fresh pass is a complete run from line one, so the track goes
+        back to 0 and playback is made sure to be running before the first
+        line arrives. A RESUMED one goes back to its last stamp instead:
+        the lines before it are already timed, and making somebody sit
+        through them to get back to where they were would be the reason
+        they never resume. It is the last stamp itself rather than
+        somewhere before it, because that stamp is the moment its line
+        began and hearing it begin again is the cue for the next tap —
+        the same cue the line above the current one is kept on screen for.
+        """
         self._release_loop()
         self._disarm_sync_exit()
+        self._pass_unsaved = False
         snapshot = self._current_snapshot
         self._sync_track_key = snapshot.track_key if snapshot is not None else None
-        self._pool.start(PlayerCommandTask(seek_to=0.0, resume=True))
+        session = self._view_model.sync_session
+        start_at = 0.0
+        if resumed and session is not None and session.stamps:
+            start_at = session.stamps[-1]
+        self._pool.start(PlayerCommandTask(seek_to=start_at, resume=True))
         # A sync pass takes the full layout back for as long as it runs;
         # with compact off this is only the tap row's bottom margin.
         self._apply_compact()
         self._render()
 
-    def _cancel_sync(self) -> bool:
-        """Discard the pass in progress. Returns True when there was one."""
+    def _leave_sync(self) -> bool:
+        """Take the pass off the screen. Returns True when there was one.
+
+        The SESSION goes and the journal stays, which is the whole of what
+        changed here: this used to be the only way out and it threw every
+        stamp away. Nothing that merely ends a pass may do that now — a
+        track change, a stop, the ✕ — because none of them is somebody
+        saying the taps were a mistake. Only ``_discard_pass`` is.
+        """
         if not self._view_model.end_sync():
             return False
         self._sync_track_key = None
@@ -1826,43 +1944,123 @@ class LyricsWindow(QWidget):
         self._apply_compact()  # and the strip comes back, if that is where it was
         return True
 
+    def _end_pass(self, why: str) -> bool:
+        """A pass ended without finishing, and it is said out loud.
+
+        Every caller is something that happened TO the pass rather than
+        something the user asked of it, so each one names itself: the log
+        gets the reason and the window gets the count. What it must never
+        do is nothing, which is what all three of these used to do.
+        """
+        progress = self._pass_in_hand()
+        if not self._leave_sync():
+            return False
+        if progress is not None:
+            logger.info(
+                "sync pass ended (%s) with %d of %d lines timed and kept",
+                why, progress[0], progress[1],
+            )
+        return True
+
+    def _journal_pass(self) -> None:
+        """Write the pass down, one tap at a time.
+
+        On the UI thread on purpose. MEASURED over the forty writes a
+        forty line song makes: 0.059ms by median, 0.149ms at worst, for a
+        2588 byte file. A tap happens a few times a minute, so there is
+        nothing here to move off the UI thread — and moving it to the pool
+        would mean two writes of one file able to land out of order, which
+        is a way to lose the last tap rather than a way to keep it.
+
+        A failure is not swallowed. It is the one case this whole
+        mechanism cannot cover, so it is remembered and put on screen
+        rather than logged into a file nobody is reading mid-song.
+        """
+        session = self._view_model.sync_session
+        track_id = self._view_model.track_id
+        if session is None or not track_id:
+            return
+        try:
+            self._provider.save_pass(track_id, session.encode())
+            self._pass_unsaved = False
+        except OSError:
+            logger.exception("could not write the pass journal for %s", track_id)
+            self._pass_unsaved = True
+
     def _on_tap(self) -> None:
         """One tap = "this line starts now". Timed from the last poll plus
         the wall-clock since it landed, minus the reaction offset that
-        SyncSession applies."""
+        SyncSession applies.
+
+        Every way out of here names itself. A tap that does nothing and
+        says nothing is indistinguishable from a control that is not
+        wired up, which is exactly the report this arrived as.
+        """
         session = self._view_model.sync_session
         if session is None:
             return
         if self._last_state is not PlaybackState.PLAYING:
-            return  # paused: the session simply waits for playback
+            self._refuse_tap("playback is paused")
+            return
         position = interpolated_position(
             self._last_position, self._last_polled_at, time.monotonic()
         )
-        if position is None or not session.stamp(position):
+        if position is None:
+            self._refuse_tap("waiting for Spotify")
             return
+        if not session.stamp(position):
+            self._refuse_tap("every line is timed")
+            return
+        self._tap_refusal = ""
         self._disarm_sync_exit()
+        self._journal_pass()
         if session.is_complete:
             self._finish_sync(session)
         else:
             self._render()
 
+    def _refuse_tap(self, reason: str) -> None:
+        """Why that tap did nothing, in the row that was going to count it.
+
+        The reason is what is kept and the display is derived from it,
+        which is the rule every other gate here follows: a boolean saying
+        "the tap did not land" could not answer the only question somebody
+        has at that moment, which is why not.
+        """
+        if self._tap_refusal == reason:
+            return
+        self._tap_refusal = reason
+        logger.debug("tap refused: %s", reason)
+        self._render()
+
     def _on_sync_undo(self) -> None:
         session = self._view_model.sync_session
         if session is None or not session.undo():
             return
+        self._tap_refusal = ""
         self._disarm_sync_exit()
+        # The journal follows the session down as well as up, or an undo
+        # would be given back by the next resume.
+        self._journal_pass()
         self._render()
 
     def _on_sync_exit(self) -> None:
-        """Two-step discard: the first click arms and says so in the
-        progress row, the second throws the pass away. Anything else the
-        user does — a tap, an undo, a few seconds of hesitation — disarms."""
+        """Two-step stop: the first click arms and says so in the progress
+        row, the second leaves the pass. Anything else the user does — a
+        tap, an undo, a few seconds of hesitation — disarms.
+
+        It KEEPS. The stamps stay on disk and the menu offers them back,
+        which is why the confirmation asks about stopping rather than
+        about losing: a control the hand reaches for by reflex is the
+        wrong place to put an irreversible act, and throwing the pass away
+        is one entry down the menu where getting to it means meaning it.
+        """
         if not self._exit_armed:
             self._exit_armed = True
             self._exit_disarm_timer.start(_EXIT_CONFIRM_MS)
             self._render()
             return
-        self._cancel_sync()
+        self._end_pass("the user stopped it")
         self._render()
 
     def _disarm_sync_exit(self) -> None:
@@ -1872,26 +2070,90 @@ class LyricsWindow(QWidget):
             if self._syncing:
                 self._render()
 
+    def _keep_pass(self) -> None:
+        """Keep what has been timed as a sync of its own.
+
+        An explicit act, and it is the one that answers "must a pass be
+        all or nothing". It is not: a song timed as far as the last chorus
+        is a song you can follow that far, and the alternative on offer
+        used to be throwing it away. What it produces is marked partial,
+        so the one place a half-timed song would do harm — somebody else's
+        database — refuses it by name rather than by luck.
+
+        Taken from the live session when there is one and from the journal
+        otherwise, because "the sync so far" has to mean the same thing
+        whether or not the pass is still on screen.
+        """
+        track_id = self._view_model.track_id
+        session = self._view_model.sync_session
+        if session is not None and session.index:
+            lrc_text, complete = session.to_lrc(), session.is_complete
+        else:
+            resume = resume_targets(self._provider.read_pass(track_id))
+            if resume is None:
+                return
+            lines, stamps = resume
+            held = SyncSession(lines, stamps=stamps)
+            lrc_text, complete = held.to_lrc(), held.is_complete
+        self._end_pass("the user kept it")
+        self._save_sync(track_id, lrc_text, partial=not complete)
+        self._render()
+
+    def _discard_pass(self) -> None:
+        """Throw the stamps away, because somebody said so.
+
+        The only thing in this app that removes a file from
+        ``.user_syncs/``, and the only thing that may: everything else
+        there is work nobody can make again, and this is the one file
+        whose whole purpose is to stop existing.
+        """
+        track_id = self._view_model.track_id
+        progress = self._pass_in_hand()
+        self._leave_sync()
+        self._provider.clear_pass(track_id)
+        if progress is not None:
+            logger.info(
+                "discarded a sync pass at %d of %d lines", progress[0], progress[1]
+            )
+        self._render()
+
     def _finish_sync(self, session) -> None:
         """Last line stamped: save, leave sync mode, and reload so the song
         comes straight back as synced and can be checked by ear."""
         track_id = self._view_model.track_id
         lrc_text = session.to_lrc()
-        self._cancel_sync()  # the session's work now lives in lrc_text
+        self._leave_sync()  # the session's work now lives in lrc_text
         self._render()
-        if not track_id:
+        self._save_sync(track_id, lrc_text, partial=False)
+
+    def _save_sync(self, track_id: str, lrc_text: str, partial: bool) -> None:
+        """Put a pass's work on disk, complete or kept short.
+
+        One path for both, so the journal is cleared in exactly one place
+        and only ever after the save has been asked for: the stamps go
+        from the journal to the ``.lrc`` and there is no moment they are
+        in neither.
+        """
+        if not track_id or not lrc_text:
             return
-        task = SaveSyncTask(self._provider, track_id, lrc_text)
+        task = SaveSyncTask(self._provider, track_id, lrc_text, partial=partial)
         task.signals.finished.connect(self._on_sync_saved)
         self._pool.start(task)
 
     def _on_sync_saved(self, track_id: str, ok: bool) -> None:
         if not ok:
-            return  # the plain lyrics are still on screen; nothing was lost
+            # Nothing was lost: the journal is untouched, so the pass is
+            # still there to resume or to try keeping again.
+            self._render()
+            return
+        # Only now, and only here. The stamps are in the .lrc, so the
+        # journal has somewhere better to be.
+        self._provider.clear_pass(track_id)
+        self._reconsider_publishing()
         if self._view_model.begin_reload(track_id):
             if self._current_snapshot is not None:
                 self._start_fetch(self._current_snapshot)
-            self._render()
+        self._render()
 
     def _place_sync_controls(self) -> None:
         """Lay the tap row across the window bottom: undo on the left, exit
@@ -2465,13 +2727,28 @@ class LyricsWindow(QWidget):
     def _render_sync_controls(self, display) -> None:
         """The tap row and its status line. The tap bar goes inert while
         playback is paused — the session waits rather than stamping a
-        position that isn't moving."""
+        position that isn't moving.
+
+        The status row outlives the pass. It is the only row this window
+        has that states a fact about the timing rather than showing a line
+        of the song, so it is also where a pass that ENDED says what
+        became of it: a promise that the stamps are kept has to be visible
+        somewhere the user is already looking, and the menu is not that
+        place until they open it.
+        """
         syncing = display.mode is Mode.SYNCING
         session = self._view_model.sync_session
         for button in (self._tap_button, self._undo_button, self._sync_exit_button):
             button.setVisible(syncing)
-        self._progress.setVisible(syncing)
+        status = self._status_text(display) if not syncing else ""
+        # A strip is one row tall and that row belongs to the song, which
+        # is the same rule the header is held to. The pass is not lost
+        # there, only unsaid: the menu still carries it, counted.
+        self._progress.setVisible(
+            syncing or bool(status) and not self._compact_applied
+        )
         if not syncing:
+            self._progress.setText(status)
             return
         playing = self._last_state is PlaybackState.PLAYING
         self._tap_button.setEnabled(playing)
@@ -2479,17 +2756,46 @@ class LyricsWindow(QWidget):
         self._undo_button.setEnabled(bool(session and session.index > 0))
         # The armed prompt is coloured inline rather than by object name:
         # a stylesheet swap would need a repolish on every render.
-        self._progress.setText(
-            self._exit_confirm_text() if self._exit_armed else display.progress
-        )
+        self._progress.setText(self._progress_text(display))
         self._place_sync_controls()
 
-    def _exit_confirm_text(self) -> str:
-        """The armed discard prompt, in this appearance's warning colour —
-        a pale red on a dark panel is invisible on a light one."""
+    def _progress_text(self, display) -> str:
+        """What the row says during a pass, in priority order.
+
+        The armed prompt first, because it is a question waiting on an
+        answer. Then the journal failing, because it is the one thing that
+        makes the count a lie. Then a refused tap, because somebody has
+        just pressed something and nothing happened. The count last: it is
+        true whenever nothing else is, which is nearly always.
+        """
+        if self._exit_armed:
+            return self._warned(_EXIT_CONFIRM_TEXT)
+        if self._pass_unsaved:
+            return self._warned(_PASS_UNSAVED_TEXT)
+        if self._tap_refusal:
+            return f"{display.progress} · {self._tap_refusal}"
+        return display.progress
+
+    def _status_text(self, display) -> str:
+        """What the row says once the pass is off the screen.
+
+        Only for the song the stamps belong to, and only while they are
+        still stamps: the moment they become a sync or are discarded there
+        is nothing here to say, and the row goes.
+        """
+        if display.mode in (Mode.IDLE, Mode.SYNCING):
+            return ""
+        progress = self._pass_in_hand()
+        if progress is None:
+            return ""
+        return _PASS_KEPT_TEXT.format(done=progress[0], total=progress[1])
+
+    def _warned(self, text: str) -> str:
+        """A line the user has to read, in this appearance's warning colour
+        — a pale red on a dark panel is invisible on a light one."""
         return (
             f'<span style="color: {appearance.rgba(self._palette.confirm_text)}">'
-            f"{_EXIT_CONFIRM_TEXT}</span>"
+            f"{text}</span>"
         )
 
     def _show_plain_view(self, plain: bool) -> None:
@@ -4894,6 +5200,8 @@ class LyricsWindow(QWidget):
         self._menu.on(OPEN_AT_LOGIN, self._set_open_at_login)
         self._menu.on(SYNC, self._begin_sync)
         self._menu.on(PASTE_SYNC, self._open_paste_window)
+        self._menu.on(KEEP_SYNC, self._keep_pass)
+        self._menu.on(DISCARD_SYNC, self._discard_pass)
         self._menu.on(PUBLISH, self._open_publish_window)
         # Straight to the app's quit, so the existing aboutToQuit shutdown
         # (settings saved, monitor joined) runs however quit is reached.
@@ -4958,6 +5266,18 @@ class LyricsWindow(QWidget):
         sync_label = self._view_model.sync_menu_entry(
             self._provider.has_user_sync(self._view_model.track_id)
         )
+        # An interrupted pass takes the entry over, because "Sync this
+        # song" and "carry on where you left off" are the same request and
+        # the second is what would actually happen. It outranks the
+        # re-sync label for the same reason: the pass in hand is newer
+        # than the sync it was going to replace.
+        resume = self._resumable_pass()
+        if resume is not None:
+            sync_label = f"Resume the sync ({len(resume[1])} / {len(resume[0])} lines)"
+        # Live or written down, and while a pass is on screen too: the
+        # menu is reachable mid-pass by right-clicking the window, and
+        # "keep what I have" is at its most wanted exactly then.
+        progress = self._pass_in_hand()
         self._menu.show_only(
             visible_entries(
                 has_korean_lyrics=self._view_model.has_korean_lyrics,
@@ -4965,6 +5285,7 @@ class LyricsWindow(QWidget):
                 synced=self._view_model.display().mode is Mode.SYNCED,
                 sync_offered=sync_label is not None,
                 paste_sync_offered=self._view_model.paste_sync_offered,
+                pass_in_hand=progress is not None,
                 publish_offered=not self._publish_refusal,
                 sync_published=self._sync_published,
                 login_item_offered=login_item.offered(
@@ -4977,6 +5298,16 @@ class LyricsWindow(QWidget):
         )
         if sync_label is not None:
             self._menu.set_label(SYNC, sync_label)
+        if progress is not None:
+            done, total = progress
+            # Both labels carry the count, because both are about a
+            # quantity of somebody's work and neither means anything
+            # without it: "save the sync so far" and "discard" are the
+            # same sentence with the number left out.
+            self._menu.set_label(KEEP_SYNC, f"Save the {done} lines timed so far")
+            self._menu.set_label(
+                DISCARD_SYNC, f"Discard the {done} of {total} lines timed"
+            )
         self._refresh_position_readout()
         self._menu.set_checked(SHOW_LYRICS, self._lyrics_visible)
         self._menu.set_checked(ROMANISATION, self._view_model.romanisation_enabled)

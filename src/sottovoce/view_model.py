@@ -348,6 +348,32 @@ class LyricsViewModel:
             return sync_targets_from_lines(text for _, text in self._lyrics.synced)
         return []
 
+    @property
+    def lines_to_stamp(self) -> list[str]:
+        """The lines this song is offering a pass right now, for whoever
+        has to decide whether an interrupted pass is still about them.
+
+        Empty when the song has no lines of its own, which is not the same
+        as "no pass is possible": a pasted pass has words nothing else
+        knows, and ``sync_session.resume_targets`` is what reads that
+        distinction.
+        """
+        return self._stampable_lines()
+
+    @property
+    def pass_may_start(self) -> bool:
+        """Whether this song is in a state a pass can run in at all.
+
+        Not the same question as ``sync_menu_entry``, which decides what to
+        OFFER and refuses to re-sync somebody else's timings. Taking an
+        interrupted pass of your own back up is not that offer, so it is
+        held to the weaker rule: there is something to stamp, or there are
+        no lyrics and the words came from you.
+        """
+        if self._mode in (Mode.PLAIN, Mode.SYNCED):
+            return bool(self._stampable_lines())
+        return self.paste_sync_offered
+
     def sync_menu_entry(self, has_user_sync: bool) -> Optional[str]:
         """Label for the tap-to-sync context-menu entry, or None when no
         pass can be started.
@@ -388,6 +414,19 @@ class LyricsViewModel:
             return False
         return self._start_sync(self._stampable_lines())
 
+    def resume_sync(self, lines: list[str], stamps: list[float]) -> bool:
+        """Take an interrupted pass back up, stamps and all.
+
+        The lines are the RECORD's rather than this song's, because the
+        record is the only thing that knows which words those stamps were
+        made against — and the caller has already asked
+        ``sync_session.resume_targets`` whether the two still agree. What
+        is checked here is only that a pass could run at all.
+        """
+        if not self.pass_may_start:
+            return False
+        return self._start_sync(list(lines), list(stamps))
+
     def begin_sync_from(self, lines: list[str]) -> bool:
         """Start a pass over lines that came from somewhere else — today,
         the paste window.
@@ -401,12 +440,15 @@ class LyricsViewModel:
             return False
         return self._start_sync(list(lines))
 
-    def _start_sync(self, targets: list[str]) -> bool:
-        """One pass, however its lines were found. Returns False (and
-        changes nothing) when there is nothing to stamp."""
+    def _start_sync(
+        self, targets: list[str], stamps: Optional[list[float]] = None
+    ) -> bool:
+        """One pass, however its lines were found and whatever it already
+        knows. Returns False (and changes nothing) when there is nothing to
+        stamp."""
         if not targets:
             return False
-        self._sync = SyncSession(targets)
+        self._sync = SyncSession(targets, stamps=stamps)
         # Where cancelling lands: a re-sync that is abandoned must put the
         # existing sync back, not drop the song to plain lyrics — and a
         # pasted one abandoned must go back to saying why there are none.

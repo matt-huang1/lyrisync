@@ -118,7 +118,7 @@ def test_every_control_takes_its_own_press_in_the_full_layout(make_window):
         record = pressing(window, button)
         assert record.acted == 1, f"{name} did not act on a press at its own position"
         assert record.dragged == 0, f"{name}'s press reached the drag handler"
-    window._cancel_sync()
+    window._leave_sync()
 
 
 def test_every_revealed_control_takes_its_own_press_in_the_strip(make_window):

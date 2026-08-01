@@ -38,6 +38,10 @@ Five rules, and they are the feature rather than a wrapper around it.
   offering again.
 - **The user's own work is untouched.** Publishing copies `.user_syncs/`
   outward. It never modifies, truncates or deletes anything in it.
+- **A sync of part of a song is never offered.** A submission replaces
+  that song's timings in a database other people read, so half a song is
+  not an improvement to it. A pass kept short is a perfectly good sync
+  locally and is refused here by name, before LRCLIB is asked anything.
 
 ## Where the gate is asked, and why it is asked twice
 

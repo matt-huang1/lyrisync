@@ -65,6 +65,12 @@ FORGET_POSITIONS = "forget_positions"
 OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
 PASTE_SYNC = "paste_sync"
+# What an interrupted pass can become. Both appear only while there are
+# stamps somebody made and has not yet turned into anything, and both say
+# how many in their own label: "the sync so far" means nothing without a
+# number, and a discard has to name what it is throwing away.
+KEEP_SYNC = "keep_sync"
+DISCARD_SYNC = "discard_sync"
 PUBLISH = "publish"
 PUBLISH_STATUS = "publish_status"
 QUIT = "quit"
@@ -165,6 +171,11 @@ MENU = (
     # appears exactly where the entry above cannot: a song whose lyrics
     # could not be had. The two are never visible together.
     Entry(PASTE_SYNC, "Paste lyrics to sync…", COMMAND),
+    # The two ends an interrupted pass can come to, under the entry that
+    # resumes it, because resuming is what somebody came here for and these
+    # are what to do instead. Labels carry the count and are set live.
+    Entry(KEEP_SYNC, "Save the sync so far", COMMAND),
+    Entry(DISCARD_SYNC, "Discard the sync in progress", COMMAND),
     # Under the entry that makes a sync, because it is the next thing that
     # can be done with one and because it can only ever appear where one
     # exists. The ellipsis is the platform's promise that a press opens
@@ -301,6 +312,7 @@ def visible_entries(
     synced: bool,
     sync_offered: bool,
     paste_sync_offered: bool = False,
+    pass_in_hand: bool = False,
     publish_offered: bool = False,
     sync_published: bool = False,
     login_item_offered: bool = False,
@@ -316,6 +328,14 @@ def visible_entries(
     installed, and tap-to-sync needs lines to stamp. With every layer
     dormant the menu is show/hide, the two standing choices about how the
     window looks, the two submenus and quit.
+
+    A pass that was interrupted brings two more entries with it, and only
+    while there are stamps nobody has decided about: what to do instead of
+    resuming is either to keep them or to throw them away, and both have
+    to be reachable or "your stamps are safe" is a promise with no door.
+    They go together because they are one question asked twice, so a state
+    that could offer one and not the other would be a state where the
+    answer had already been made for the user.
 
     Pasting lyrics to sync is the mirror of that last one and the two are
     mutually exclusive by construction: it is offered only where there are
@@ -378,6 +398,8 @@ def visible_entries(
         shown.add(SYNC)
     if paste_sync_offered:
         shown.add(PASTE_SYNC)
+    if pass_in_hand:
+        shown.update((KEEP_SYNC, DISCARD_SYNC))
     if publish_offered:
         shown.add(PUBLISH)
     if sync_published:

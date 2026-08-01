@@ -103,6 +103,14 @@ NO_SYNC = "there is no sync of this song to publish"
 INCOMPLETE = "this song is missing details LRCLIB needs"
 ALREADY_SENT = "this sync has been published already"
 NOT_PLAIN_ONLY = "LRCLIB is not holding plain lyrics for this song"
+# A sync kept from a pass that stopped early. Perfectly good locally — it
+# is the lines somebody actually timed — and out of scope here, because a
+# submission replaces the whole song's timings in somebody else's
+# database and half a song is not an improvement to it. Refused HERE
+# rather than left to verify's word check, which would also refuse it: a
+# song offered and then refused is correct when the answer could only come
+# from LRCLIB, and this answer is entirely our own.
+PARTIAL_SYNC = "this sync covers part of the song"
 # The three the fresh lookup can answer with, which the cached signal
 # above cannot tell apart on its own.
 NO_RECORD = "LRCLIB has no record of this song"
@@ -116,6 +124,7 @@ def standing_refusal(
     has_sync: bool,
     already_published: bool,
     remote_was_plain_only: bool,
+    sync_is_partial: bool = False,
     title: str = "",
     artist: str = "",
     album: str = "",
@@ -139,6 +148,8 @@ def standing_refusal(
         return NO_SONG
     if not has_sync:
         return NO_SYNC
+    if sync_is_partial:
+        return PARTIAL_SYNC
     if not album or not duration_ms:
         return INCOMPLETE
     if already_published:

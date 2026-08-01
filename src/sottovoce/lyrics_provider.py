@@ -1194,15 +1194,129 @@ class LyricsProvider:
         entries = parse_lrc(text)
         return TrackLyrics(synced=entries) if entries else None
 
-    def save_user_sync(self, track_id: str, lrc_text: str) -> Path:
-        """Write a completed sync and return its path. Unlike the cache
-        this is NOT best-effort: the user just tapped through a whole song,
-        so a failure must reach them rather than vanish. Raises OSError."""
+    def save_user_sync(
+        self, track_id: str, lrc_text: str, partial: bool = False
+    ) -> Path:
+        """Write a sync and return its path. Unlike the cache this is NOT
+        best-effort: the user just tapped through a song, so a failure must
+        reach them rather than vanish. Raises OSError.
+
+        ``partial`` is written down beside the file rather than into it,
+        for the reason every other sidecar here exists: the ``.lrc`` is
+        what any other player reads and what would be sent, so nothing
+        this app happens to know about it may live inside it. A partial
+        sync is a real sync of the lines it covers and is treated as one
+        everywhere except publishing, which is somebody else's database
+        and gets the whole song or nothing.
+
+        A complete pass writes the marker too, holding no digest, rather
+        than removing it. The answer has to change — a re-sync that
+        finishes the job must not be refused on the strength of the pass
+        it replaced — and OVERWRITING it says so without this becoming a
+        second place in the package that can delete a file. There is
+        exactly one of those and it is not the one that touches ``.lrc``.
+        """
         self.user_sync_dir.mkdir(parents=True, exist_ok=True)
         path = self.user_sync_path(track_id)
         path.write_text(lrc_text, encoding="utf-8")
-        logger.info("saved user sync for %s -> %s", track_id, path)
+        self.partial_path(track_id).write_text(
+            json.dumps(
+                {"digest": self.sync_digest(lrc_text) if partial else None},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        logger.info(
+            "saved %s user sync for %s -> %s",
+            "partial" if partial else "complete",
+            track_id,
+            path,
+        )
         return path
+
+    def partial_path(self, track_id: str) -> Path:
+        """Where the note that this sync covers part of a song lives."""
+        return self.user_sync_dir / (
+            _SAFE_FILENAME_RE.sub("_", track_id) + ".partial"
+        )
+
+    def sync_is_partial(self, track_id: Optional[str], lrc_text: str) -> bool:
+        """Whether THIS text is the partial sync the marker is about.
+
+        The text and not merely the track, exactly as ``is_published``
+        does it and for the same reason: a sync edited by hand or replaced
+        by a complete pass is a different thing, and a stale marker must
+        not be allowed to speak for it.
+        """
+        if not track_id:
+            return False
+        try:
+            record = json.loads(self.partial_path(track_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(record, dict) or record.get("digest") is None:
+            return False
+        return record["digest"] == self.sync_digest(lrc_text)
+
+    # -- a pass in progress ------------------------------------------------
+    #
+    # The one thing in this directory the app may remove, and the rule is
+    # narrow on purpose. ``.user_syncs/`` is the user's work and nothing
+    # here deletes any of it: not the ``.lrc``, not the record of what was
+    # published. A pass journal is the exception because it is the only
+    # file here whose whole purpose is to stop existing — it is written so
+    # that an interrupted pass can be finished, and it is removed at the
+    # two moments its stamps have somewhere better to be: they became a
+    # sync, or the user said discard them.
+    #
+    # It lives here rather than in ``.lyrics_cache/`` because clearing the
+    # cache is a documented safe reset, and minutes of somebody tapping
+    # through a song is not something a reset may take.
+
+    def pass_path(self, track_id: str) -> Path:
+        """Where this track's pass in progress is written down."""
+        return self.user_sync_dir / (_SAFE_FILENAME_RE.sub("_", track_id) + ".pass")
+
+    def read_pass(self, track_id: Optional[str]) -> Optional[dict]:
+        """The pass written down for this track, or None. Never raises: a
+        journal that cannot be read is a pass that cannot be resumed, and
+        the song simply offers a fresh one."""
+        if not track_id:
+            return None
+        try:
+            record = json.loads(self.pass_path(track_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def save_pass(self, track_id: str, record: dict) -> Path:
+        """Write the pass in progress down. Raises OSError.
+
+        Not best-effort, and it is the reason this exists: the caller has
+        to be able to tell somebody that their taps are no longer being
+        kept. A journal that failed silently would be worse than no
+        journal at all, because it would be a promise.
+        """
+        self.user_sync_dir.mkdir(parents=True, exist_ok=True)
+        path = self.pass_path(track_id)
+        path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def clear_pass(self, track_id: Optional[str]) -> None:
+        """Forget the pass written down for this track.
+
+        Best-effort, unlike writing one: the stamps have already gone
+        wherever they were going by the time this is called, so a journal
+        left behind costs an offer to resume a pass that is finished, and
+        that is recoverable. Failing the save because the tidy-up failed
+        would not be.
+        """
+        if not track_id:
+            return
+        try:
+            self.pass_path(track_id).unlink(missing_ok=True)
+        except OSError:
+            logger.debug("could not clear the pass journal for %s", track_id)
 
     # -- what has been published ------------------------------------------
     #

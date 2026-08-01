@@ -582,7 +582,7 @@ def test_sync_this_song_begins_a_pass_and_the_label_says_which(drawn, make_windo
     click(window, m.SYNC)
 
     assert window._syncing is True
-    window._cancel_sync()
+    window._leave_sync()
     window._provider.save_user_sync("t7", "[00:01.00] first line\n")
     window._refresh_menu()
     assert item_for(window, m.SYNC).title_text == "Re-sync this song"
@@ -622,7 +622,66 @@ def test_paste_lyrics_to_sync_opens_the_one_window_that_takes_a_keyboard(
         "and another",
     ]
     assert window._paste_window is None, "the window outlived the pass it started"
-    window._cancel_sync()
+    window._leave_sync()
+
+
+def test_keeping_a_pass_writes_the_lines_that_were_timed(drawn, make_window):
+    """The entry that answers "must a pass be all or nothing" with no.
+
+    What it produces is a real sync of the lines that were stamped, and it
+    is marked partial — the one place a half-timed song would do harm is
+    somebody else's database, and that is refused by name rather than by
+    the words happening not to match.
+    """
+    window = make_window()
+    load(window, PLAIN, track_id="t11")
+    click(window, m.SYNC)
+    window._last_state = w.PlaybackState.PLAYING
+    window._last_position, window._last_polled_at = 4.0, None
+    window._on_tap()  # one line of three
+    assert item_for(window, m.KEEP_SYNC).title_text == "Save the 1 lines timed so far"
+
+    click(window, m.KEEP_SYNC)
+    assert window._pool.waitForDone(5000)
+    APP.processEvents()
+
+    assert window._syncing is False
+    lrc = window._provider.user_sync_text("t11")
+    assert lrc == "[00:03.75] first line\n"
+    assert window._provider.sync_is_partial("t11", lrc) is True
+    # The journal has somewhere better to be, so it is gone — and with it
+    # the offer to resume a pass that has become a sync.
+    assert window._provider.read_pass("t11") is None
+    window._refresh_menu()
+    assert item_for(window, m.KEEP_SYNC).hidden is True
+    assert item_for(window, m.PUBLISH).hidden is True
+
+
+def test_discarding_a_pass_is_the_only_thing_that_throws_stamps_away(
+    drawn, make_window
+):
+    """And it is a menu entry rather than a control on the window, because
+    reaching it has to mean it."""
+    window = make_window()
+    load(window, PLAIN, track_id="t12")
+    click(window, m.SYNC)
+    window._last_state = w.PlaybackState.PLAYING
+    window._last_position, window._last_polled_at = 4.0, None
+    window._on_tap()
+    assert window._provider.read_pass("t12") is not None
+    assert (
+        item_for(window, m.DISCARD_SYNC).title_text
+        == "Discard the 1 of 3 lines timed"
+    )
+
+    click(window, m.DISCARD_SYNC)
+
+    assert window._syncing is False
+    assert window._provider.read_pass("t12") is None
+    assert window._provider.user_sync_text("t12") is None
+    window._refresh_menu()
+    assert item_for(window, m.DISCARD_SYNC).hidden is True
+    assert item_for(window, m.SYNC).title_text == "Sync this song"
 
 
 def test_publishing_a_sync_opens_a_window_and_sends_nothing_by_itself(
@@ -745,6 +804,8 @@ COVERED = (
         m.OPEN_AT_LOGIN,
         m.SYNC,
         m.PASTE_SYNC,
+        m.KEEP_SYNC,
+        m.DISCARD_SYNC,
         m.PUBLISH,
         m.QUIT,
     }

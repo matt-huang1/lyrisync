@@ -947,7 +947,7 @@ def test_a_sync_pass_hands_the_strip_back_where_it_found_it(make_window):
     window._begin_sync()
     APP.processEvents()
     assert window.pos() == QPoint(300, 200)  # the full layout's own place
-    window._cancel_sync()
+    window._leave_sync()
     APP.processEvents()
 
     assert window.pos() == QPoint(120, 60)

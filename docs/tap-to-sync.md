@@ -18,8 +18,10 @@ Showing the next two lines matters for the same reason: you should not be
 reading a line for the first time at the moment you need to stamp it.
 
 - **↩** undoes the last tap.
-- **✕** abandons the pass, and asks for a second click to confirm.
-- Taps are ignored while playback is paused, so you can stop to catch up.
+- **✕** stops the pass, and asks for a second click to confirm. It keeps
+  what you have timed.
+- Taps are ignored while playback is paused, so you can stop to catch up,
+  and the counter row says so rather than leaving you guessing.
 - The counter shows how far you have got.
 
 ## The timing model
@@ -48,18 +50,52 @@ monitor stamps each poll with the wall-clock time it landed, and the
 stamper does arithmetic on that instead — a subprocess on the UI thread
 would block the very frame the user is judging their tap against.
 
-## A pass is saved only when complete
+## Nothing you tap is ever lost quietly
 
-Exiting early discards. There are no partial saves.
+A pass costs minutes of attention, so it is written down as it goes. Every
+tap and every undo lands in a small file beside where the sync will go, and
+nothing that merely *ends* a pass touches it.
 
-This keeps the storage story simple — every `.lrc` in `.user_syncs/` is a
-complete timing of a whole song — and it keeps the *interface* story
-simple: there is no half-synced state to explain, resume, or repair.
+That covers all of it: the song ending, the next song starting, Spotify
+stopping, a press on **✕**, quitting the app. The pass leaves the screen,
+the window says how far you got, and the menu offers it back the next time
+that song plays as **Resume the sync (14 / 22 lines)**. Resuming seeks to
+your last stamp rather than to the start, so you carry on where you were
+instead of sitting through the part you already timed.
 
-The confirmation for abandoning is **inline**, a two-step control, never a
+If the file cannot be written — a full disk, a read-only home — the window
+says *that*, in the counter row, while you are tapping. A promise that
+fails quietly is worse than no promise.
+
+### The three ends a pass can come to
+
+- **Finished.** Every line timed. It saves as an ordinary sync and the song
+  comes straight back synced, so you can check it by ear.
+- **Kept short.** **Save the 14 lines timed so far** writes a real sync of
+  the lines you did time. The song comes back synced that far, which is
+  worth having; it is marked as covering part of the song, which is why
+  publishing refuses it.
+- **Discarded.** **Discard the 14 of 22 lines timed** throws them away.
+  It is the only thing in the app that does, and it is a menu entry rather
+  than a control on the window: the button your hand reaches for by reflex
+  should be the safe one.
+
+The confirmation for stopping is **inline**, a two-step control, never a
 modal dialog. The window must never take focus or activate the app; a
 modal would do both, and would also be the only thing in the app that
 demands attention rather than waits for it.
+
+### Why completion still means every line
+
+Only for the one purpose it was ever for. A sync of a whole song is what
+can be offered back to LRCLIB, because a submission replaces that song's
+timings in a database other people read, and half a song is not an
+improvement to it. Locally, a partial sync is a sync: it shows, it loops,
+it re-syncs, it does everything the others do.
+
+What changed is that *falling short* and *losing it* stopped being the same
+thing. They were one rule, and the simplicity that bought was being paid
+for in whole passes.
 
 ## Re-syncing
 
@@ -105,23 +141,29 @@ tap through. A bracket in the middle of a line is left alone: that is your
 punctuation, and guessing further about your own words is how a sync loses
 the line you were waiting for.
 
-## What a pass survives
+## What a pass survives without leaving the screen
 
 - **A fetch landing under it.** Held, not applied; it becomes where
-  cancelling lands.
+  stopping lands.
 - **Hiding the window.** The pass keeps stamping. Hiding is a display
   choice, not a stop button.
-- **Pausing.** Taps are ignored, and the tap bar shows it.
+- **Pausing.** Taps are ignored, the tap bar reads PAUSED, and the counter
+  row says why.
+- **The compact layout being switched on or off.** A pass borrows the full
+  layout for as long as it runs and hands back whichever one you asked
+  for when it ends.
 
-## What ends it
+## What takes it off the screen
 
-Spotify stopping or quitting cancels the pass, before the view model
-suspends, so that resuming restores the plain lyrics rather than a dead
-session. A pass that cannot be completed should not be pretended to.
+A track change, Spotify stopping or quitting, and **✕**. Each of them ends
+the pass before the view model suspends, so that resuming restores the
+plain lyrics rather than a dead session — and each of them keeps every
+stamp. A pass that cannot go on here should not be pretended to, and
+should not be thrown away either.
 
-## Not in v1
+## Not in this version
 
-Starting a sync mid-song, partial saves, per-line editing or nudging of an
-existing sync, and publishing syncs back to LRCLIB. Each is a real
-feature; none of them is *this* feature, which is "stamp a song end to end
-and get it back".
+Starting a sync **mid-song**, and per-line editing or nudging of an
+existing sync. Each is a real feature; neither is *this* feature, which is
+"stamp a song end to end and get it back". Resuming a pass of your own is
+neither of them: it is finishing the one you started.

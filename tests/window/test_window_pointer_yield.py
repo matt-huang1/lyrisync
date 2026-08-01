@@ -403,7 +403,7 @@ def test_a_sync_pass_suspends_the_whole_layer(make_window, mode):
     assert window._proximity.engaged is True  # the pointer did not go anywhere
 
     # And it does not re-arm under a hand that never left.
-    window._cancel_sync()
+    window._leave_sync()
     poll(window, over(window))
     assert window.pos() == home
     assert window._ghost_level == 0.0

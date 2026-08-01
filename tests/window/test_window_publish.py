@@ -319,6 +319,7 @@ def test_the_users_own_sync_is_untouched_by_all_of_it(ready):
     assert window._provider.published_path(TRACK_ID).exists()
     assert sorted(p.suffix for p in window._provider.user_sync_dir.iterdir()) == [
         ".lrc",
+        ".partial",
         ".published",
     ]
 

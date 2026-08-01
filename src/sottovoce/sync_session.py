@@ -20,6 +20,15 @@ actually started":
   stamp is late by roughly a reaction time. ``SYNC_REACTION_OFFSET_SECONDS``
   is subtracted back off, clamped so timestamps never go negative and never
   run backwards past the previous line.
+
+A pass also has to survive the world. It costs minutes of somebody's
+attention and the things that ended it used to throw all of that away in
+silence: a track change (a song ENDING is a track change), a one-poll stop
+the monitor debounces everywhere else, a mis-aimed press on the discard.
+So a pass is written down as it goes — ``encode``/``decode`` here are the
+shape of that record, ``resume_targets`` is the one rule about whether an
+old record may be stamped onto the lines in hand, and the file it lives in
+is ``lyrics_provider``'s. Nothing here touches a disk.
 """
 
 from __future__ import annotations
@@ -128,10 +137,15 @@ class SyncSession:
         self,
         lines: list[str],
         offset: float = SYNC_REACTION_OFFSET_SECONDS,
+        stamps: Optional[Iterable[float]] = None,
     ) -> None:
         self._lines = list(lines)
         self._offset = offset
-        self._stamps: list[float] = []
+        # A resumed pass starts with the stamps it already had, trimmed to
+        # the lines it has: a record longer than its lines could only come
+        # from a file somebody edited, and stamping line 30 of a 20 line
+        # song is not a state this can be in.
+        self._stamps: list[float] = list(stamps or [])[: len(self._lines)]
 
     @property
     def lines(self) -> list[str]:
@@ -201,9 +215,122 @@ class SyncSession:
         return True
 
     def to_lrc(self) -> str:
-        """The stamped lines as LRC text, in order. Lines not yet stamped
-        are simply absent — v1 only ever saves a complete pass."""
+        """The stamped lines as LRC text, in order.
+
+        Lines not yet stamped are simply absent, which is what makes this
+        the same function for a complete pass and for a partial one kept
+        on purpose: the file says what was timed and claims nothing about
+        what was not. Whether a pass that is short of its last lines may
+        be saved at all is the window's question, not this one's.
+        """
         return "".join(
             f"{format_timestamp(stamp)} {line}\n"
             for stamp, line in zip(self._stamps, self._lines)
         )
+
+    def encode(self) -> dict:
+        """The pass, as something that can be written down.
+
+        The LINES go in it as well as the stamps, and that is the whole
+        reason a resumed pass can be trusted: stamps alone are numbers
+        against positions in a list, and the list can change under them
+        between one playing of a song and the next.
+        """
+        return {
+            "version": PASS_VERSION,
+            "lines": list(self._lines),
+            "stamps": list(self._stamps),
+        }
+
+
+# -- a pass written down ---------------------------------------------------
+#
+# A pass in progress is the user's work in exactly the sense a finished
+# sync is, which is why the file lives with the syncs rather than in the
+# cache: clearing ``.lyrics_cache/`` is a documented reset, and minutes of
+# somebody tapping through a song is not something a reset may take.
+#
+# The shape is here, next to the session it is a picture of, so that what
+# is written and what is read back are one definition. ``lyrics_provider``
+# owns the file; this owns what is in it.
+
+PASS_VERSION = 1
+
+
+def decode(record: object) -> Optional[tuple[list[str], list[float]]]:
+    """``(lines, stamps)`` from a written-down pass, or None.
+
+    None for anything that is not a pass this app wrote: a version it does
+    not know, a file half-written when the power went, a hand-edit that
+    left a string where a number belongs. A record that cannot be read is
+    not an error to report — it is simply not a pass to resume, and the
+    song falls back to offering a fresh one.
+
+    Stamps never run backwards, so a record whose do is rejected rather
+    than repaired: the repair would be a guess about which of two numbers
+    the user meant, and a fresh pass is the honest answer.
+    """
+    if not isinstance(record, dict) or record.get("version") != PASS_VERSION:
+        return None
+    lines, stamps = record.get("lines"), record.get("stamps")
+    if not isinstance(lines, list) or not isinstance(stamps, list):
+        return None
+    if not lines or not all(isinstance(line, str) for line in lines):
+        return None
+    if len(stamps) > len(lines):
+        return None
+    values: list[float] = []
+    for stamp in stamps:
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            return None
+        value = float(stamp)
+        if value < 0 or (values and value < values[-1]):
+            return None
+        values.append(value)
+    return [str(line) for line in lines], values
+
+
+def resume_targets(
+    record: object, lines_in_hand: Optional[list[str]] = None
+) -> Optional[tuple[list[str], list[float]]]:
+    """The pass to resume for this song, or None to start a fresh one.
+
+    Two things have to be true, and the second is the one that matters.
+
+    The record has to be readable, which ``decode`` answers. And its lines
+    have to be the lines this song is offering NOW: a sync is stamps
+    against WORDS, so resuming a record made from different words would
+    put somebody's timings against lines they never tapped. That is the
+    same rule publishing already holds itself to, one layer down.
+
+    ``lines_in_hand`` is None when the song has no lines of its own to
+    disagree with — a pass over pasted lyrics, whose words only ever
+    existed in the record. There the record stands alone, which is not a
+    weaker check but the only one there is: nothing else knows those words.
+
+    A record with no stamps in it resumes onto nothing, so it is not a
+    resume at all and says so by answering None.
+    """
+    decoded = decode(record)
+    if decoded is None:
+        return None
+    lines, stamps = decoded
+    if not stamps:
+        return None
+    if lines_in_hand and list(lines_in_hand) != lines:
+        return None
+    return lines, stamps
+
+
+def pass_progress(record: object) -> Optional[tuple[int, int]]:
+    """``(stamped, total)`` for a written-down pass, or None.
+
+    What the menu and the window need to SAY about an interrupted pass,
+    and they need it without building a session: "14 / 22 lines" is a
+    sentence about a file.
+    """
+    decoded = decode(record)
+    if decoded is None:
+        return None
+    lines, stamps = decoded
+    return len(stamps), len(lines)
