@@ -18,6 +18,8 @@ the reasoning: what was decided, why, and what was measured to check it.
   chain, what is cached and what never is, why your syncs are not cache
 - [Tap-to-sync](tap-to-sync.md) — timing a song by hand, and the timing
   model behind a tap
+- [Publishing a sync back to LRCLIB](publishing.md) — the one case it
+  covers, the consent it needs, and the proof of work it costs
 - [The learning layers](learning-features.md) — romanisation, spoken
   reference, looping, echo practice
 

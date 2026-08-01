@@ -788,8 +788,9 @@ def answering(monkeypatch, response):
     what is under test here is what _fetch_json does with a status and a
     header — stubbing it out would be stubbing out the answer."""
     class Connection:
-        def request(self, method, path, headers=None):
+        def request(self, method, path, body=None, headers=None):
             self.path = path
+            self.body = body
 
         def getresponse(self):
             return response
@@ -1004,7 +1005,7 @@ def test_a_second_track_from_the_album_is_what_buys_the_per_track_pass(
     # own lookup answered a different question (this recording), and the
     # name may cover other tracks the user has not reached.
     assert len(fake.asked("api/get")) == 3
-    assert slept == [lp.WARM_REQUEST_GAP_SECONDS] * 3
+    assert slept == [lp.REQUEST_GAP_SECONDS] * 3
     assert provider.album_is_warm(playing()) is True
 
 
@@ -1213,3 +1214,228 @@ def test_the_warm_store_lives_inside_the_cache_directory(provider):
     This is the only thing here nobody made, so it has to go with it."""
     assert provider.warm_dir.parent == provider.cache_dir
     assert provider.user_sync_dir not in provider.warm_dir.parents
+
+
+# -- writing to LRCLIB, and the record of having done it ---------------------
+#
+# The provider's half of publishing: the one door a POST goes through, the
+# question the publish path asks fresh, and the sidecar that remembers what
+# was sent. The exchange itself is test_publish.py's and the whole path is
+# tests/window/test_window_publish.py's.
+
+
+def posting(monkeypatch, response):
+    """The same seam ``answering`` uses, one verb along: a real pool over a
+    fake connection, so what is under test is what post_json does with a
+    status rather than what a stub was told to return."""
+    sent = {}
+
+    class Connection:
+        def request(self, method, path, body=None, headers=None):
+            sent.update(method=method, path=path, body=body, headers=headers)
+
+        def getresponse(self):
+            return response
+
+        def close(self):
+            pass
+
+    from sottovoce.http_client import ConnectionPool
+
+    monkeypatch.setattr(
+        lp, "_pool", ConnectionPool(lp.LRCLIB_HOST, connect=Connection)
+    )
+    return sent
+
+
+def test_a_post_carries_the_apps_user_agent_and_its_json(monkeypatch):
+    """One definition of the User-Agent, and the body is the payload rather
+    than a rendering of it."""
+    sent = posting(monkeypatch, Held(201, body=b""))
+
+    assert lp.post_json(lp.LRCLIB_PUBLISH_URL, {"trackName": "Blue Hour"}) is None
+
+    assert sent["method"] == "POST"
+    assert sent["path"] == "/api/publish"
+    assert json.loads(sent["body"]) == {"trackName": "Blue Hour"}
+    assert sent["headers"]["User-Agent"] == lp.USER_AGENT
+    assert sent["headers"]["Content-Type"] == "application/json"
+
+
+def test_a_created_with_no_body_is_a_success_rather_than_a_broken_answer(
+    monkeypatch,
+):
+    """201 and nothing else is what publishing answers with, and reading an
+    empty body as unparseable would turn every publish into a failure."""
+    posting(monkeypatch, Held(201, body=b""))
+    assert lp.post_json(lp.LRCLIB_PUBLISH_URL, {}) is None
+
+
+def test_a_post_may_carry_a_header_of_its_own(monkeypatch):
+    sent = posting(monkeypatch, Held(200))
+
+    lp.post_json(lp.LRCLIB_PUBLISH_URL, {}, {"X-Publish-Token": "prefix:42"})
+
+    assert sent["headers"]["X-Publish-Token"] == "prefix:42"
+
+
+def test_a_post_that_is_refused_carries_the_status_back(monkeypatch):
+    """The status is the whole of what the publish path needs to tell its
+    failures apart: 400 is the token, and it is the recoverable one."""
+    posting(monkeypatch, Held(400, body=b'{"name": "IncorrectPublishTokenError"}'))
+
+    with pytest.raises(lp.LyricsError) as raised:
+        lp.post_json(lp.LRCLIB_PUBLISH_URL, {})
+
+    assert raised.value.failure.status == 400
+
+
+def test_a_429_on_a_post_starts_the_same_pause_a_lookup_would(monkeypatch):
+    """The hold is a fact about the host rather than about an errand, so
+    the verb it arrived on makes no difference to it."""
+    monkeypatch.setattr(time, "monotonic", lambda: 5000.0)
+    posting(monkeypatch, Held(429, headers=[("Retry-After", "120")]))
+
+    with pytest.raises(lp.LyricsError):
+        lp.post_json(lp.LRCLIB_PUBLISH_URL, {})
+
+    assert lp._hold.remaining(5000.0) == 120.0
+
+
+def test_a_post_is_refused_while_the_pause_runs(monkeypatch):
+    """And in the other direction: a pause a lookup earned stops a publish
+    before a socket is opened."""
+    monkeypatch.setattr(time, "monotonic", lambda: 5000.0)
+    lp._hold.asked_to_wait(60.0, 5000.0)
+    posting(monkeypatch, Held(201, body=b""))
+
+    with pytest.raises(lp.LyricsError) as raised:
+        lp.post_json(lp.LRCLIB_PUBLISH_URL, {})
+
+    assert raised.value.failure.kind == lp.HELD
+
+
+def test_the_fresh_check_asks_the_exact_signature_and_hands_back_the_record(
+    monkeypatch,
+):
+    """The whole record rather than the TrackLyrics the app displays: what
+    publishing turns on is whether LRCLIB has words and no timings, and two
+    of those three facts are thrown away on the way to a TrackLyrics."""
+    asked = []
+
+    def fake_fetch(url):
+        asked.append(url)
+        return {"plainLyrics": "a line", "syncedLyrics": None, "instrumental": False}
+
+    monkeypatch.setattr(lp, "_fetch_json", fake_fetch)
+
+    record = lp.track_record("Blue Hour", "Someone", "First Light", 213.6)
+
+    assert record["plainLyrics"] == "a line"
+    assert asked[0].startswith(lp.LRCLIB_GET_URL)
+    assert "track_name=Blue+Hour" in asked[0]
+    assert "album_name=First+Light" in asked[0]
+    assert "duration=214" in asked[0], "the duration was not rounded the way /get wants"
+
+
+def test_the_fresh_check_reads_and_writes_no_cache(provider, monkeypatch, tmp_path):
+    """The reason it exists. A cached answer is what LRCLIB said the first
+    time this song played, and a publication is permanent."""
+    monkeypatch.setattr(lp, "_fetch_json", lambda url: {"plainLyrics": "a line"})
+
+    lp.track_record("Blue Hour", "Someone", "First Light", 213.0)
+
+    assert list(provider.cache_dir.glob("*.json")) == []
+
+
+# -- what has been published ------------------------------------------------
+
+
+LRC = "[00:01.00] first line\n[00:05.00] second line\n"
+
+
+def test_nothing_is_published_until_it_is_recorded(provider):
+    provider.save_user_sync("track123", LRC)
+    assert provider.is_published("track123", LRC) is False
+    assert provider.published_record("track123") is None
+
+
+def test_a_recorded_publication_is_remembered_for_that_text_alone(provider):
+    """The record is of the TEXT, not of the track: a re-sync is a
+    different thing to send, and the entry has to come back for it."""
+    provider.save_user_sync("track123", LRC)
+    provider.record_published("track123", LRC)
+
+    assert provider.is_published("track123", LRC) is True
+    assert provider.is_published("track123", LRC.replace("00:01", "00:02")) is False
+
+
+def test_the_record_sits_beside_the_sync_rather_than_in_the_cache(provider):
+    """Clearing .lyrics_cache/ is a documented reset. Forgetting what has
+    been published is not a reset: it is an app offering to send somebody's
+    work a second time."""
+    provider.save_user_sync("track123", LRC)
+    path = provider.record_published("track123", LRC)
+
+    assert path.parent == provider.user_sync_dir
+    assert provider.cache_dir not in path.parents
+    assert path != provider.user_sync_path("track123")
+
+
+def test_recording_a_publication_leaves_the_sync_untouched(provider):
+    """.user_syncs/ is the user's work. Publishing copies it outward."""
+    path = provider.save_user_sync("track123", LRC)
+    before = path.read_bytes()
+
+    provider.record_published("track123", LRC)
+
+    assert path.read_bytes() == before
+    assert sorted(p.suffix for p in provider.user_sync_dir.iterdir()) == [
+        ".lrc",
+        ".published",
+    ]
+
+
+def test_an_unreadable_record_is_the_same_as_no_record(provider):
+    """Best-effort on the way IN, like every other file this app reads: a
+    truncated sidecar means the entry comes back, which is the safe way for
+    this one to fail."""
+    provider.save_user_sync("track123", LRC)
+    provider.published_path("track123").write_text("{ not json", encoding="utf-8")
+
+    assert provider.is_published("track123", LRC) is False
+
+
+def test_the_sync_text_is_handed_back_exactly_as_it_sits_on_disk(provider):
+    """The file is what would be sent and what is remembered as sent, so
+    anything that took a round trip through parse_lrc would be a second
+    version of it."""
+    provider.save_user_sync("track123", LRC)
+    assert provider.user_sync_text("track123") == LRC
+    assert provider.user_sync_text("nothing here") is None
+    assert provider.user_sync_text(None) is None
+
+
+# -- what the cache says about LRCLIB's answer ------------------------------
+
+
+def test_a_cached_plain_answer_is_what_makes_the_entry_worth_offering(provider):
+    provider._write_cache("track123", lp.TrackLyrics(plain="a line"))
+    assert provider.remote_was_plain_only("track123") is True
+
+
+def test_a_cached_synced_answer_is_not(provider):
+    provider._write_cache("track123", lp.TrackLyrics(synced=[(1.0, "a line")]))
+    assert provider.remote_was_plain_only("track123") is False
+
+
+def test_a_track_lrclib_has_nothing_for_is_not(provider):
+    """Publishing lyrics for a track LRCLIB has no record of is a different
+    thing and a later step."""
+    provider._write_cache("track123", None)
+    assert provider.remote_was_plain_only("track123") is False
+
+
+def test_a_track_nobody_has_asked_about_is_not(provider):
+    assert provider.remote_was_plain_only("track123") is False
+    assert provider.remote_was_plain_only(None) is False

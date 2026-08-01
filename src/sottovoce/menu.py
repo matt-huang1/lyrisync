@@ -65,6 +65,8 @@ FORGET_POSITIONS = "forget_positions"
 OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
 PASTE_SYNC = "paste_sync"
+PUBLISH = "publish"
+PUBLISH_STATUS = "publish_status"
 QUIT = "quit"
 
 # The two submenus. They are entries like any other, which is what lets one
@@ -163,6 +165,15 @@ MENU = (
     # appears exactly where the entry above cannot: a song whose lyrics
     # could not be had. The two are never visible together.
     Entry(PASTE_SYNC, "Paste lyrics to sync…", COMMAND),
+    # Under the entry that makes a sync, because it is the next thing that
+    # can be done with one and because it can only ever appear where one
+    # exists. The ellipsis is the platform's promise that a press opens
+    # something to read rather than doing the thing, which here is the
+    # whole of the design: nothing is sent from this menu.
+    Entry(PUBLISH, "Publish this sync to LRCLIB…", COMMAND),
+    # And the fact that replaces it once the sync has gone. A row that
+    # states a fact rather than a control, so it is drawn as one.
+    Entry(PUBLISH_STATUS, "Published to LRCLIB", READOUT),
     Entry(SEPARATOR_AFTER_SONG, kind=SEPARATOR),
     # Where the window goes, and where it lives. Docking is a command and
     # per-app memory is a layer, and they are one submenu because they are
@@ -290,6 +301,8 @@ def visible_entries(
     synced: bool,
     sync_offered: bool,
     paste_sync_offered: bool = False,
+    publish_offered: bool = False,
+    sync_published: bool = False,
     login_item_offered: bool = False,
     positions_remembered: bool = False,
     remembering_positions: bool = False,
@@ -310,6 +323,18 @@ def visible_entries(
     lyrics shows "Sync this song"; a song without shows the way to bring
     some. Neither ever shows both, so the group gains a row rather than the
     menu gaining a column.
+
+    Publishing a sync is gated hardest of anything here, and every part of
+    that gate is somebody else's rule rather than this app's taste: there
+    has to be a sync, LRCLIB has to be holding the words for this song and
+    no timings, and the same sync must not have been sent already. The
+    reason it is not offered is ``publish.standing_refusal``'s, and the
+    entry appearing at all is derived from that reason.
+
+    The line saying it HAS been published takes its place, and the two can
+    never both be shown, because the second is exactly the case the first
+    refuses for. It states a fact rather than offering an act, so it is a
+    readout: there is nothing to do about a sync that has gone.
 
     Open at Login is the one entry gated on how the app was launched
     rather than on what the song is: there is nothing for macOS to start
@@ -353,6 +378,10 @@ def visible_entries(
         shown.add(SYNC)
     if paste_sync_offered:
         shown.add(PASTE_SYNC)
+    if publish_offered:
+        shown.add(PUBLISH)
+    if sync_published:
+        shown.add(PUBLISH_STATUS)
     if login_item_offered:
         shown.add(OPEN_AT_LOGIN)
     if positions_remembered:

@@ -25,7 +25,6 @@ NOT be written down as "no lyrics", because its outcome is unknown.
 TIER = "integration"  # the window, the fetch, the provider and the pool
 
 import json
-import threading
 import time
 
 import pytest
@@ -33,232 +32,27 @@ import pytest
 from sottovoce import lyrics_provider as lp
 from sottovoce import player_monitor as pmon
 from sottovoce import window as w
-from sottovoce.http_client import ConnectionPool
 from sottovoce.view_model import Mode
 
-from helpers import APP, pressing, shown
+from helpers import (
+    APP,
+    PLAIN_BODY,
+    SONG,
+    SYNCED_BODY,
+    SYNCED_LRC,
+    monitor_for,
+    payload,
+    play,
+    pressing,
+    settled,
+    shown,
+    worked,
+)
 
 # Captured at import, before the directory's autouse fixture stubs it. The
 # same trick helpers.py uses for the artwork worker, and it stays here
-# rather than moving there because one file needs it.
-REAL_FETCH_RUN = w.FetchTask.run
+# because one file needs it: the album warm is asked about nowhere else.
 REAL_WARM_RUN = w.WarmTask.run
-
-
-# -- the one thing here that is not this app -------------------------------
-
-
-SONG = {
-    "uri": "spotify:track:0Ab1Cd2Ef3",
-    "title": "Blue Hour",
-    "artist": "Someone",
-    "album": "First Light",
-    "duration_ms": 214000,
-}
-
-SYNCED_LRC = "[00:01.00] first line\n[00:05.50] second line\n"
-
-
-def payload(synced=None, plain=None):
-    return json.dumps({"syncedLyrics": synced, "plainLyrics": plain}).encode()
-
-
-SYNCED_BODY = payload(synced=SYNCED_LRC, plain="first line\nsecond line")
-PLAIN_BODY = payload(plain="first line\nsecond line\nthird line")
-
-
-class FakeResponse:
-    def __init__(self, status, body, headers=()):
-        self.status = status
-        self._body = body
-        self._headers = list(headers)
-        # The server keeps the connection, which is what LRCLIB measurably
-        # does and what the pool exists for: the next attempt in the chain
-        # reuses this one rather than opening another.
-        self.will_close = False
-
-    def read(self):
-        return self._body
-
-    def getheaders(self):
-        return list(self._headers)
-
-
-class FakeLrclib:
-    """LRCLIB, one layer below the app: a connection factory, and what it
-    answers to each path.
-
-    Routed by substring in the order given, first match wins, exactly as
-    test_lyrics_provider.py's fetcher is — the three request shapes are told
-    apart by ``album_name=`` (the exact match), ``api/get`` (the same
-    question without the album) and ``api/search`` (the loose one).
-
-    An unrouted path is a 404 and not an error, because a 404 is what
-    LRCLIB says about a question it has no answer to, and the chain is
-    meant to walk past those.
-
-    A route may carry headers as a third item, which is how a 429 says how
-    long it wants to be left alone.
-    """
-
-    def __init__(self, *routes):
-        self.routes = list(routes)
-        self.asked = []
-        self.headers = []
-        self.connections = 0
-        self._lock = threading.Lock()
-
-    def connect(self):
-        with self._lock:
-            self.connections += 1
-        return _FakeConnection(self)
-
-    def answer(self, path, headers):
-        with self._lock:
-            self.asked.append(path)
-            self.headers.append(headers)
-        for substring, response in self.routes:
-            if substring in path:
-                return response
-        return (404, b"")
-
-    def asked_for(self, substring):
-        with self._lock:
-            return [path for path in self.asked if substring in path]
-
-
-class _FakeConnection:
-    def __init__(self, service):
-        self._service = service
-        self._pending = None
-        self.closed = False
-
-    def request(self, method, path, headers=None):
-        self._pending = self._service.answer(path, dict(headers or {}))
-
-    def getresponse(self):
-        status, body, *headers = self._pending
-        return FakeResponse(status, body, headers[0] if headers else ())
-
-    def close(self):
-        self.closed = True
-
-
-@pytest.fixture
-def lrclib(monkeypatch):
-    """A pool that opens fakes instead of sockets.
-
-    The POOL is the real one — this is ``http_client.ConnectionPool`` with
-    its own connect factory, which is the seam that module was given so the
-    suite could exercise reuse and the stale-connection retry without a
-    socket. Installed as the module's pool, so ``_fetch_json`` finds it the
-    way it finds the real one and nothing above here knows the difference.
-    """
-    def install(*routes):
-        service = FakeLrclib(*routes)
-        monkeypatch.setattr(
-            lp, "_pool", ConnectionPool(lp.LRCLIB_HOST, connect=service.connect)
-        )
-        return service
-
-    return install
-
-
-# -- a real fetch, on a real worker thread ---------------------------------
-
-
-@pytest.fixture
-def fetching(monkeypatch):
-    """Give ``FetchTask`` its body back for the length of one test."""
-    monkeypatch.setattr(w.FetchTask, "run", REAL_FETCH_RUN)
-
-
-class FakeSpotify:
-    """Enough of a player to announce a song and hold a position."""
-
-    def __init__(self, song=SONG):
-        self.song = song
-        self.position = 0.0
-        self.state = "playing"
-
-    def answer(self, script):
-        if script != pmon._SNAPSHOT_SCRIPT:
-            return ""
-        return "\n".join([
-            self.state,
-            self.song["uri"],
-            self.song["title"],
-            self.song["artist"],
-            self.song["album"],
-            str(self.song["duration_ms"]),
-            f"{self.position:.3f}",
-        ])
-
-
-@pytest.fixture
-def spotify(monkeypatch):
-    fake = FakeSpotify()
-    monkeypatch.setattr(pmon, "_ask", fake.answer)
-    monkeypatch.setattr(pmon, "spotify_running", lambda: True)
-    monkeypatch.setattr(pmon, "_moved", None, raising=False)
-    yield fake
-    pmon._wake.clear()
-    pmon._moved = None
-
-
-def monitor_for(window):
-    """A real monitor wired to the real window's slots."""
-    return pmon.PlayerMonitor(
-        on_track_change=window._on_track_change,
-        on_position_update=window._on_position_update,
-        on_state_change=window._on_state_change,
-    )
-
-
-def settled(window, seconds=5.0):
-    """Pump the event loop until the lookup has answered.
-
-    The fetch runs on the global QThreadPool and its result crosses back on
-    a queued signal, so both halves need the loop turning. Waiting on the
-    MODE rather than on the pool is what makes this honest about the thing
-    under test: it is done when the window knows, not when the worker
-    stopped.
-    """
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        APP.processEvents()
-        if window._view_model.display().mode is not Mode.FETCHING:
-            window._title_card_until = 0.0  # the card is not what is asked here
-            window._render()
-            APP.processEvents()
-            return
-        time.sleep(0.005)
-    raise AssertionError("the lookup never came back")
-
-
-def worked(window):
-    """Let every worker the window started finish, and its answer come back.
-
-    Only the non-music case needs this, and the reason is worth saying out
-    loud: nothing about it ever enters FETCHING, so there is no state
-    change for ``settled`` to wait on — a test that only pumped the loop
-    would be asserting that no request had been made YET.
-    """
-    assert window._pool.waitForDone(5000), "a worker never finished"
-    APP.processEvents()
-
-
-def play(window, spotify, position=None):
-    """A song starts, and the monitor is the one that notices."""
-    monitor = monitor_for(window)
-    monitor.tick()
-    APP.processEvents()
-    settled(window)
-    if position is not None:
-        spotify.position = position
-        monitor.tick()
-        APP.processEvents()
-    return monitor
 
 
 # -- the four answers ------------------------------------------------------
@@ -598,7 +392,7 @@ def warming(monkeypatch):
     """
     monkeypatch.setattr(w.WarmTask, "run", REAL_WARM_RUN)
     monkeypatch.setattr(w, "_WARM_DELAY_MS", 1)
-    monkeypatch.setattr(lp, "WARM_REQUEST_GAP_SECONDS", 0.01)
+    monkeypatch.setattr(lp, "REQUEST_GAP_SECONDS", 0.01)
 
 
 def album_search(*names, duration=214.0):

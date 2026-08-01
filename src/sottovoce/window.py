@@ -106,6 +106,8 @@ from sottovoce.geometry import (
 )
 from sottovoce.failure import UNKNOWN, FetchFailure
 from sottovoce.paste_window import PasteWindow
+from sottovoce import publish
+from sottovoce.publish_window import PublishWindow
 from sottovoce.gestures import opacity_step, scroll_step, wheel_action
 from sottovoce import flight
 from sottovoce import frontmost
@@ -138,6 +140,8 @@ from sottovoce.menu import (
     POSITION_LIST,
     POSITION_STATUS,
     PROXIMITY,
+    PUBLISH,
+    PUBLISH_STATUS,
     QUIT,
     REMEMBER_POSITION,
     ROMANISATION,
@@ -1335,6 +1339,14 @@ class LyricsWindow(QWidget):
         # The one window this app has that takes a keyboard, and it exists
         # only while it is being used. None whenever there is not one.
         self._paste_window: Optional[PasteWindow] = None
+        self._publish_window: Optional[PublishWindow] = None
+        # What the menu needs to know about publishing this song's sync,
+        # worked out when something that could change it happens rather
+        # than on every render: the answer costs a file read and a hash of
+        # the sync, and _refresh_menu runs on every frame.
+        self._publish_refusal: str = publish.NO_SONG
+        self._publish_lrc: str = ""
+        self._sync_published: bool = False
         self._tap_button = self._make_overlay_button(
             "tap", "TAP", "Tap as each line begins"
         )
@@ -1463,6 +1475,10 @@ class LyricsWindow(QWidget):
         if self._view_model.track_changed(snapshot):
             self._start_fetch(snapshot)
             self._request_artwork(snapshot)
+        # After the view model has the new track, because what may be
+        # published is a question about THIS song and the answer is read
+        # off its id.
+        self._reconsider_publishing()
         self._render()
 
     def _on_fetch_finished(
@@ -1489,6 +1505,11 @@ class LyricsWindow(QWidget):
             # so how wide it has to be is known. Every other path here is
             # a line change, which deliberately does not.
             self._fit_width()
+            # The lookup wrote the cache entry that says whether LRCLIB is
+            # holding plain lyrics for this song, which is half of whether
+            # a sync of it may be published. Asked here rather than at the
+            # save, because a completed sync reloads through this path.
+            self._reconsider_publishing()
         # Asked on every outcome, including a result the view model
         # rejected as stale: what to warm is decided from the song that is
         # playing NOW rather than from the answer that just landed, and a
@@ -1682,6 +1703,94 @@ class LyricsWindow(QWidget):
         window, self._paste_window = self._paste_window, None
         if window is not None:
             window.close()
+
+    # -- publishing a sync ---------------------------------------------------
+
+    def _reconsider_publishing(self) -> None:
+        """Work out whether this song's sync could be offered to LRCLIB.
+
+        Called when something that could change the answer happens — a
+        track change, a lookup landing, a publication finishing — rather
+        than from ``_refresh_menu``, which runs on every render. What it
+        costs is a stat, a file read and a hash of the sync, which is
+        nothing once a song and far too much sixty times a second.
+
+        The reason is what is kept and the two booleans the menu uses are
+        derived from it, so the entry and the line that replaces it cannot
+        both be shown and cannot both be hidden by accident.
+        """
+        track_id = self._view_model.track_id
+        snapshot = self._current_snapshot
+        lrc = self._provider.user_sync_text(track_id) or ""
+        self._publish_lrc = lrc
+        self._sync_published = bool(lrc) and self._provider.is_published(
+            track_id, lrc
+        )
+        self._publish_refusal = publish.standing_refusal(
+            has_sync=bool(lrc),
+            already_published=self._sync_published,
+            remote_was_plain_only=self._provider.remote_was_plain_only(track_id),
+            title=snapshot.title if snapshot else "",
+            artist=snapshot.artist if snapshot else "",
+            album=snapshot.album if snapshot else "",
+            duration_ms=snapshot.duration_ms if snapshot else None,
+        )
+
+    def _open_publish_window(self) -> None:
+        """Put the submission in front of somebody, and let them decide.
+
+        One at a time, like the paste window and for a sharper version of
+        its reason: two windows each offering to publish the same sync is
+        two chances to send it twice.
+
+        Nothing is checked or sent here. The window asks LRCLIB what it is
+        holding, shows exactly what would go, and sends only when the
+        button under it is pressed.
+        """
+        snapshot = self._current_snapshot
+        track_id = self._view_model.track_id
+        if self._publish_refusal or snapshot is None or not track_id:
+            logger.info("not publishing: %s", self._publish_refusal or "no song")
+            return
+        # An accessory app is not the active app, and a window shown by one
+        # that is not comes up inactive. See bring_to_front, which measured
+        # it, and paste_window.present, which says the same thing.
+        bring_to_front()
+        if self._publish_window is not None:
+            self._publish_window.present()
+            return
+        window = PublishWindow(
+            self._provider,
+            track_id=track_id,
+            title=snapshot.title,
+            artist=snapshot.artist,
+            album=snapshot.album,
+            duration_ms=snapshot.duration_ms,
+            lrc_text=self._publish_lrc,
+            song=self._view_model.display().header,
+        )
+        window.published.connect(self._on_published)
+        window.destroyed.connect(self._on_publish_window_gone)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._publish_window = window
+        window.present()
+        window.begin()
+
+    def _on_publish_window_gone(self) -> None:
+        self._publish_window = None
+
+    def _close_publish_window(self) -> None:
+        window, self._publish_window = self._publish_window, None
+        if window is not None:
+            window.close()
+
+    def _on_published(self, track_id: str) -> None:
+        """LRCLIB took it. The record was written by the worker that sent
+        it, so all that is left here is to ask again and let the menu say
+        so."""
+        logger.info("published the sync for %s", track_id)
+        self._reconsider_publishing()
+        self._refresh_menu()
 
     def _on_pasted_lines(self, lines) -> None:
         """The user handed over the words. From here it is an ordinary
@@ -4785,6 +4894,7 @@ class LyricsWindow(QWidget):
         self._menu.on(OPEN_AT_LOGIN, self._set_open_at_login)
         self._menu.on(SYNC, self._begin_sync)
         self._menu.on(PASTE_SYNC, self._open_paste_window)
+        self._menu.on(PUBLISH, self._open_publish_window)
         # Straight to the app's quit, so the existing aboutToQuit shutdown
         # (settings saved, monitor joined) runs however quit is reached.
         self._menu.on(QUIT, QApplication.instance().quit)
@@ -4855,6 +4965,8 @@ class LyricsWindow(QWidget):
                 synced=self._view_model.display().mode is Mode.SYNCED,
                 sync_offered=sync_label is not None,
                 paste_sync_offered=self._view_model.paste_sync_offered,
+                publish_offered=not self._publish_refusal,
+                sync_published=self._sync_published,
                 login_item_offered=login_item.offered(
                     bundled=self._bundled, status=self._login_status
                 ),
@@ -6243,6 +6355,10 @@ class LyricsWindow(QWidget):
         # would outlive it, since it is a top-level of its own with no
         # parent to take it down. Closed here beside the rest.
         self._close_paste_window()
+        # And the sixth, which is the same shape again with a worker
+        # attached: closing it sets the flag a proof of work in flight
+        # reads, so the pool below is not waiting out a solve.
+        self._close_publish_window()
         self._settle_timer.stop()
         self._pointer_timer.stop()
         # Before the pool is drained below: the album warm sleeps between

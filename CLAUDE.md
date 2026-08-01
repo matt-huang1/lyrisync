@@ -22,7 +22,7 @@ can be logic rather than widget is a **Qt-free pure module** —
 `flight.py`, `app_positions.py`, `gestures.py`, `romanize.py`,
 `menubar.py`, `http_client.py`, `settings.py`, `notifications.py`,
 `proximity.py`, `failure.py`, `player_events.py`, `hit_test.py`,
-`placement.py`, `backoff.py`. That is
+`placement.py`, `backoff.py`, `challenge.py`, `publish.py`. That is
 why the contrast floor is a test rather than a judgement, and why the
 whole suite runs headless on Linux.
 
@@ -266,6 +266,57 @@ Rules that come with them:
   joined before its first line has lyrics and nothing to put on screen,
   and ending the card there trades two seconds of the song's name for ten
   of an empty window.
+
+### Publishing a sync
+
+- **Nothing is ever published automatically, and consent is to the
+  CONTENT.** A completed sync stays local. Publishing is one explicit act
+  per track, with no bulk path, and what is confirmed is the exact
+  `Submission` on screen: four metadata fields and both sets of lyrics,
+  whole and unsummarised. `verify` builds it, the window shows it, `send`
+  is a separate call afterwards.
+- **One case only**: LRCLIB is holding the plain lyrics and no timings,
+  and the user has made timings. A track LRCLIB has nothing for is out of
+  scope.
+- **The gate is asked twice and the two are different questions.**
+  `standing_refusal` reads the cache and answers "worth offering";
+  `verify` asks LRCLIB and answers "true right now". A publication is
+  permanent and done to somebody else's database, so it turns on the
+  fresh answer, and a song that is offered and then refused is correct.
+- **The words are checked, not only the timings.** The sync's lines must
+  be LRCLIB's own plain lines; anything else is stamps against words
+  nobody else has.
+- **What is sent carries LRCLIB's OWN metadata**, from the fresh check.
+  A submission finds its track by normalised names and a duration within
+  2s, so their duration is forgiving and their album name is not: our
+  spelling would create a second record carrying the timings and leave
+  the plain lyrics where they were.
+- **The proof-of-work rule is the SERVER's**, not the example
+  implementation's: LRCGET's loop ignores the last byte and
+  `verify_answer` does not. It is `digest <= target` for equal lengths.
+  Measured: 4.67s median over twelve solves at the documented target,
+  3.32M hashes/s, tail to 24.29s, so it is off the UI thread with a count
+  against an EXPECTED count (never a percentage: the process is
+  memoryless) and a way to stop. The hasher is primed once and copied
+  (56% faster); the clock and the stop flag are read every 50,000
+  attempts (free, measured).
+- **A challenge that expires mid-solve is replaced, bounded at three**,
+  and said out loud. That is preparation rather than sending, and consent
+  governs sending; a failed SEND is never retried without a press.
+- **A POST is never retried by the pool.** A connection that failed
+  cannot say whether the request was heard, and the token is accepted
+  once. GET keeps its retry; POST does not.
+- **`_refuse_while_held` is in front of every request, whatever the
+  verb**, and a 429 on a publish starts the same pause a lookup's would.
+  The gap between sequential requests is `REQUEST_GAP_SECONDS`, one fact
+  about the host rather than one per errand.
+- **The record of a publication is a sidecar in `.user_syncs/`**, holding
+  the digest of the TEXT that was sent: not in the cache, because
+  clearing the cache is a reset and this is not; not in the preferences,
+  because it belongs to the file. A re-sync is a different digest and is
+  offered again. Written by `lyrics_provider.py`, which keeps the
+  two-writers rule intact.
+- **Publishing copies `.user_syncs/` outward and never changes it.**
 
 ### The window
 
@@ -731,6 +782,7 @@ it there would be a second answer to one question.
 |---|---|
 | [docs/compact-and-docking.md](docs/compact-and-docking.md) | the strip, the pointer poll, and the notch |
 | [docs/pointer-yield.md](docs/pointer-yield.md) | Dodge, Ghost, and the hysteresis |
+| [docs/publishing.md](docs/publishing.md) | offering a sync back to LRCLIB, and every restriction on it |
 | [docs/decision-log.md](docs/decision-log.md) | every decision, in order, with its measurement |
 | [DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md) | the twelve principles the rest is downstream of |
 | [docs/](docs/) | one page per topic: architecture, contrast, album colour, motion, packaging, testing, … |
@@ -745,5 +797,6 @@ album-art background; multiple colours or gradients from one cover;
 per-song colour overrides; karaoke word-by-word; side panels; Japanese
 romanisation; configurable hotkeys or any hotkey beyond show/hide; focus
 fade; yielding to anything beyond the notification system; a different
-yield ceiling per appearance; publishing user syncs to LRCLIB; starting a
-sync mid-song, partial saves, per-line editing of an existing sync.
+yield ceiling per appearance; publishing a sync for a track LRCLIB has no
+lyrics for; bulk publishing; editing a sync before publishing it; starting
+a sync mid-song, partial saves, per-line editing of an existing sync.

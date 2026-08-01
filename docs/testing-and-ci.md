@@ -207,7 +207,7 @@ Worth knowing rather than worth fixing all at once. A `qt` test that calls
 question the test wrote down; only an `integration` test asks the question
 the app is actually asked.
 
-**Driven all the way in** (the sixty-two):
+**Driven all the way in** (the eighty-two):
 
 - **The loop's wrap seek, echo practice, and the position a seek lands
   at** — a fake Spotify and a fake clock under the real `PlayerMonitor`,
@@ -222,11 +222,22 @@ the app is actually asked.
   written down as nothing. The user's own sync outranking the network, the
   retry going back out, the second play served from the cache, and
   narration leaving the song it announced alone.
-- **Every menu entry a click can reach** — all twenty, delivered to the
+- **Publishing a sync back to LRCLIB** — the menu entry, the window, the
+  fresh check, the real proof of work, and the three requests reaching the
+  same fake connection everything else does. What the body on the wire
+  actually is, that the token's nonce really clears the challenge, and
+  that a completed sync sends nothing by itself. Every documented
+  failure: a 400 recovered from with a fresh challenge, a 429 that starts
+  the pause and stops the retry after it, a 5xx, a check that could not be
+  made and the button that asks again, a song LRCLIB has since synced, and
+  a solve cancelled by closing the window and by shutdown.
+- **Every menu entry a click can reach** — all twenty-one, delivered to the
   selector Cocoa delivers to, with a tag off the table `_arm` built, and
   the tick read back off the item afterwards. Quit included, through a
   real event loop, and pasting lyrics to sync — the one entry that opens a
-  second window — through the pass it really starts.
+  second window — through the pass it really starts. Publishing is here
+  too, asserting only that a click opens something to read and sends
+  nothing; the rest of that path is its own file.
 - **Asking again after a failure** — the ⓘ and the retry beside it,
   pressed at their live centres with the press delivered to the top-level
   `QWindow`, over the same real provider and fake connection: a second

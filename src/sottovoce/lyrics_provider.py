@@ -64,6 +64,10 @@ logger = logging.getLogger(__name__)
 LRCLIB_HOST = "lrclib.net"
 LRCLIB_GET_URL = f"https://{LRCLIB_HOST}/api/get"
 LRCLIB_SEARCH_URL = f"https://{LRCLIB_HOST}/api/search"
+# The two endpoints that write. Named here beside the two that read,
+# because "where this app talks to LRCLIB" has one list and this is it.
+LRCLIB_CHALLENGE_URL = f"https://{LRCLIB_HOST}/api/request-challenge"
+LRCLIB_PUBLISH_URL = f"https://{LRCLIB_HOST}/api/publish"
 DEFAULT_CACHE_DIR = Path(".lyrics_cache")
 # Hand-made syncs. Deliberately NOT under the cache directory: clearing the
 # cache is a documented reset, and it must never cost the user a sync they
@@ -119,12 +123,17 @@ _SEARCH_DURATION_TOLERANCE = 10.0
 # three fall through to the ordinary chain, which is exactly what this
 # number is for.
 _WARM_DURATION_TOLERANCE = 2.0
-# Between the requests of an album warm. LRCLIB's API documentation asks
-# that batch work — it names library scanning — be sent sequentially, one
-# at a time, with 200 to 500ms between requests. This is the middle of the
-# band they give, and it is what the coverage measurement above was taken
-# at: 4 searches and 20 gets, no 429.
-WARM_REQUEST_GAP_SECONDS = 0.35
+# Between two requests this app makes in a row. LRCLIB's API documentation
+# asks that requests be sent sequentially, one finishing before the next
+# starts, with a short delay of 200 to 500ms between them — it names
+# library scanning as the case, and an album warm is one, but the
+# instruction is about the client rather than about the errand. This is the
+# middle of the band they give, and it is what the album warm's coverage
+# measurement was taken at: 4 searches and 20 gets, no 429.
+#
+# One number rather than one per errand, because it is one fact about
+# somebody else's service. The publish exchange obeys it too.
+REQUEST_GAP_SECONDS = 0.35
 # The most requests one album's warm may spend. LRCLIB's search answers
 # with 20 records, so today this binds nothing at all — it is a ceiling on
 # a number that comes from somebody else's service, and the alternative is
@@ -279,28 +288,74 @@ def _retry_after_seconds(response) -> Optional[float]:
         return None
 
 
+def _refuse_while_held(url: str) -> None:
+    """Turn a request away while a pause LRCLIB asked for is running.
+
+    The one door in front of every request this app makes, whichever verb
+    it uses. It is here rather than at any of the places a request is
+    started from so that a caller added later cannot miss it, and
+    publishing is exactly that caller: a POST during a pause would be the
+    one request that walked through a hold set by a GET.
+    """
+    waiting = _hold.remaining(time.monotonic())
+    if waiting <= 0:
+        return
+    # It is a failure the window can show and explain, and the one kind of
+    # failure that is not evidence about LRCLIB: see failure.HELD.
+    logger.info("not asking for %s: %.1fs left of the pause", url, waiting)
+    raise LyricsError(
+        "waiting as LRCLIB asked",
+        FetchFailure(kind=HELD, retry_after=waiting),
+    )
+
+
+def _pause_asked_for(response) -> float:
+    """Start the pause a 429 carries, and hand back the number.
+
+    Set at the point the answer arrives, so every other request in flight
+    or about to be made obeys it too — the fallback chain runs its attempts
+    concurrently, and two of them being told to slow down while the third
+    goes out anyway is the case this must not have.
+    """
+    asked = _retry_after_seconds(response)
+    _hold.asked_to_wait(asked or 0.0, time.monotonic())
+    logger.warning("LRCLIB asked for a pause of %ss", asked)
+    return asked
+
+
+def _path_of(url: str) -> str:
+    split = urllib.parse.urlsplit(url)
+    return split.path + (f"?{split.query}" if split.query else "")
+
+
+def _parsed(response):
+    """The body as JSON, or None when there is no body.
+
+    An empty body is a real answer rather than a broken one: ``POST
+    /api/publish`` says 201 and nothing else, and reading that as
+    unparseable would turn every successful publish into a failure.
+    """
+    if not response.body:
+        return None
+    try:
+        return json.loads(response.body)
+    except ValueError as exc:
+        raise LyricsError(
+            str(exc), FetchFailure(kind=PAYLOAD, detail=str(exc))
+        ) from exc
+
+
 def _fetch_json(url: str):
     """GET a JSON document. Returns the parsed body, or None on 404 (a
     definitive "not found"). Raises LyricsError for anything whose outcome
     is unknown: network trouble, other HTTP errors, unparseable payload —
     and for a request this app declined to make at all, while a pause
     LRCLIB asked for is still running."""
-    waiting = _hold.remaining(time.monotonic())
-    if waiting > 0:
-        # Refused here rather than at any of the three places a lookup is
-        # started from, so a caller added later cannot miss it. It is a
-        # failure the window can show and explain, and the one kind of
-        # failure that is not evidence about LRCLIB: see failure.HELD.
-        logger.info("not asking for %s: %.1fs left of the pause", url, waiting)
-        raise LyricsError(
-            "waiting as LRCLIB asked",
-            FetchFailure(kind=HELD, retry_after=waiting),
-        )
-
-    split = urllib.parse.urlsplit(url)
-    path = split.path + (f"?{split.query}" if split.query else "")
+    _refuse_while_held(url)
     try:
-        response = _lrclib_pool().get(path, headers={"User-Agent": USER_AGENT})
+        response = _lrclib_pool().get(
+            _path_of(url), headers={"User-Agent": USER_AGENT}
+        )
     except (OSError, http.client.HTTPException) as exc:
         # The socket's own words go on the record here and nowhere else:
         # this is the log line that has room for them, and the window's
@@ -314,14 +369,7 @@ def _fetch_json(url: str):
     if response.status == 404:
         return None
     if response.status == RATE_LIMITED_STATUS:
-        # The one status that carries an instruction. The pause starts here,
-        # at the point the answer arrives, so every other request in flight
-        # or about to be made obeys it too — the fallback chain runs its
-        # attempts concurrently, and two of them being told to slow down
-        # while the third goes out anyway is the case this must not have.
-        asked = _retry_after_seconds(response)
-        _hold.asked_to_wait(asked or 0.0, time.monotonic())
-        logger.warning("LRCLIB asked for a pause of %ss", asked)
+        asked = _pause_asked_for(response)
         raise LyricsError(
             f"LRCLIB returned HTTP {response.status}",
             FetchFailure(
@@ -333,12 +381,96 @@ def _fetch_json(url: str):
             f"LRCLIB returned HTTP {response.status}",
             FetchFailure(kind=HTTP, status=response.status),
         )
+    return _parsed(response)
+
+
+# Every 2xx LRCLIB answers a write with. 201 is what /api/publish says on
+# success and 200 is what /api/request-challenge says; anything else is a
+# failure whatever its shape, including a 3xx, because this app follows no
+# redirect to a service it publishes lyrics to.
+_CREATED = 201
+_OK = 200
+
+
+def post_json(url: str, payload: dict, headers: Optional[dict] = None):
+    """POST a JSON document, and answer with the parsed body or None.
+
+    The write-side twin of ``_fetch_json`` and it keeps everything that one
+    keeps: the same pause in front of it, the same 429 handling behind it,
+    the same User-Agent, the same pool. What it does NOT keep is 404 as an
+    answer — there is no endpoint here that means anything by one — so
+    every status that is not a success raises, carrying the status with it.
+
+    That status is the whole of what the publish path needs to tell its
+    failures apart: 400 is the token being refused, and it is the one that
+    is recovered from by starting again with a fresh challenge.
+    """
+    _refuse_while_held(url)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    sent = {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+        **(headers or {}),
+    }
     try:
-        return json.loads(response.body)
-    except ValueError as exc:
+        response = _lrclib_pool().post(_path_of(url), body, headers=sent)
+    except (OSError, http.client.HTTPException) as exc:
+        logger.warning("POST %s -> error: %s", url, exc)
         raise LyricsError(
-            str(exc), FetchFailure(kind=PAYLOAD, detail=str(exc))
+            str(exc), FetchFailure(kind=CONNECTION, detail=str(exc))
         ) from exc
+
+    logger.info("POST %s -> %d", url, response.status)
+    if response.status == RATE_LIMITED_STATUS:
+        asked = _pause_asked_for(response)
+        raise LyricsError(
+            f"LRCLIB returned HTTP {response.status}",
+            FetchFailure(
+                kind=HTTP, status=response.status, retry_after=asked
+            ),
+        )
+    if response.status not in (_OK, _CREATED):
+        raise LyricsError(
+            f"LRCLIB returned HTTP {response.status}",
+            FetchFailure(kind=HTTP, status=response.status),
+        )
+    return _parsed(response)
+
+
+def track_record(
+    title: str, artist: str, album: str, duration_seconds: float
+) -> Optional[dict]:
+    """LRCLIB's own record for one exact track signature, asked NOW.
+
+    The whole of it, rather than the ``TrackLyrics`` the app displays: what
+    publishing has to know is what LRCLIB is holding — plain lyrics,
+    synced lyrics, whether it thinks the track is instrumental — and two of
+    those three are thrown away on the way to a ``TrackLyrics``.
+
+    Nothing here reads or writes the cache, and that is the point of it
+    existing at all. The cached answer is what LRCLIB said the first time
+    this song played, which may be weeks ago and may have been replaced by
+    somebody else's contribution since. A publication is a permanent thing
+    done to somebody else's database, so the question it turns on is asked
+    fresh every time.
+
+    None for a 404, which here means "LRCLIB has no such track" and is a
+    definitive answer rather than a failure. Raises LyricsError otherwise,
+    exactly like every other lookup.
+    """
+    return _fetch_json(
+        LRCLIB_GET_URL
+        + "?"
+        + urllib.parse.urlencode(
+            {
+                "track_name": title,
+                "artist_name": artist,
+                "album_name": album,
+                "duration": str(round(duration_seconds)),
+            }
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -941,7 +1073,7 @@ class LyricsProvider:
             # Before the request rather than after it, so the first one is
             # spaced from whatever the playing track's own lookup was doing
             # a moment ago.
-            sleep(WARM_REQUEST_GAP_SECONDS)
+            sleep(REQUEST_GAP_SECONDS)
             asked += 1
             try:
                 record = _fetch_json(
@@ -1034,6 +1166,21 @@ class LyricsProvider:
         offering "Sync this song" and "Re-sync this song"."""
         return bool(track_id) and self.user_sync_path(track_id).is_file()
 
+    def user_sync_text(self, track_id: Optional[str]) -> Optional[str]:
+        """The sync file's own text, exactly as it sits on disk.
+
+        What publishing needs, and it needs the TEXT rather than the parsed
+        lyrics: the file is what would be sent and the file is what is
+        remembered as having been sent, so anything that took a round trip
+        through ``parse_lrc`` and back would be a second version of it.
+        """
+        if not track_id:
+            return None
+        try:
+            return self.user_sync_path(track_id).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+
     def read_user_sync(self, track_id: Optional[str]) -> Optional[TrackLyrics]:
         """The user's sync for this track, or None when there isn't one (or
         it no longer parses as timed lyrics — a hand-edit gone wrong falls
@@ -1055,6 +1202,78 @@ class LyricsProvider:
         path = self.user_sync_path(track_id)
         path.write_text(lrc_text, encoding="utf-8")
         logger.info("saved user sync for %s -> %s", track_id, path)
+        return path
+
+    # -- what has been published ------------------------------------------
+    #
+    # A sync that has been sent to LRCLIB is still the user's sync and is
+    # not changed by having been sent, so this stores one fact about it and
+    # nothing else: which TEXT went out. That is what "the same unchanged
+    # sync" means, and a digest is the whole of it — re-syncing the song
+    # produces different stamps, a different digest, and an offer to
+    # publish again, while opening the menu twice produces neither.
+    #
+    # It lives beside the sync it is about, in ``.user_syncs/``, and that
+    # is deliberate on both counts. Not in ``.lyrics_cache/``, because
+    # clearing the cache is a documented reset and forgetting what has been
+    # published is not a reset, it is an app offering to send somebody's
+    # work a second time. And not in the preferences, because it belongs to
+    # the file rather than to this Mac's settings: a sync deleted by hand
+    # takes its record with it, which is the right answer to a question
+    # nobody has asked yet.
+    #
+    # It is a sidecar rather than one index, so a failure to write can only
+    # ever cost the record of one publication, and so nothing ever
+    # truncates a file in this directory that another publication's record
+    # is also in.
+
+    def published_path(self, track_id: str) -> Path:
+        """Where the record of this track's publication lives."""
+        return self.user_sync_dir / (
+            _SAFE_FILENAME_RE.sub("_", track_id) + ".published"
+        )
+
+    @staticmethod
+    def sync_digest(lrc_text: str) -> str:
+        """What identifies one version of a sync. The text itself, hashed:
+        the file is what was sent, so the file is what is remembered."""
+        return hashlib.sha256(lrc_text.encode("utf-8")).hexdigest()
+
+    def published_record(self, track_id: Optional[str]) -> Optional[dict]:
+        """What is known about this track's publication, or None."""
+        if not track_id:
+            return None
+        try:
+            return json.loads(
+                self.published_path(track_id).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+
+    def is_published(self, track_id: Optional[str], lrc_text: str) -> bool:
+        """Whether THIS text has already been sent for this track.
+
+        The text and not merely the track, because a re-sync is a new
+        thing to publish and the old record must not stand in for it.
+        """
+        record = self.published_record(track_id)
+        return bool(record) and record.get("digest") == self.sync_digest(lrc_text)
+
+    def record_published(self, track_id: str, lrc_text: str) -> Path:
+        """Remember that this text went to LRCLIB. Raises OSError.
+
+        Not best-effort, for the same reason ``save_user_sync`` is not: the
+        thing that just happened cannot be undone, so the app has to be
+        able to say it happened. A record that failed to write would leave
+        the menu offering to publish something already published.
+        """
+        self.user_sync_dir.mkdir(parents=True, exist_ok=True)
+        path = self.published_path(track_id)
+        path.write_text(
+            json.dumps({"digest": self.sync_digest(lrc_text)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info("recorded the publication of %s", track_id)
         return path
 
     # -- cache ------------------------------------------------------------
@@ -1082,6 +1301,24 @@ class LyricsProvider:
             )
         except OSError:
             pass  # cache is best-effort
+
+    def remote_was_plain_only(self, track_id: Optional[str]) -> bool:
+        """Whether the last answer LRCLIB gave about this track was words
+        with no timings.
+
+        Read off the cache, so it costs nothing and is available with the
+        network down — which is what a menu needs, since a menu is opened
+        far more often than a song is published. It is what was TRUE once
+        rather than what is true now, and that distinction is the whole
+        reason ``track_record`` exists: this decides whether to offer the
+        entry, and a fresh lookup decides whether anything is sent.
+        """
+        if not track_id:
+            return False
+        entry = self._read_cache(track_id)
+        if not entry or not entry.get("found"):
+            return False
+        return bool(entry.get("plain")) and not entry.get("synced")
 
     @staticmethod
     def _decode_cache_entry(entry: dict) -> Optional[TrackLyrics]:

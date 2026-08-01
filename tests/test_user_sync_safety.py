@@ -197,12 +197,15 @@ def test_only_save_user_sync_ever_writes_to_the_directory():
     }
     assert writers == {
         "save_user_sync",      # the user's own work, and the only one that is
+        "record_published",    # that this sync went to LRCLIB, beside it
         "_write_cache",        # the cache entry for a track that played
         "_keep_warm",          # what is known about one name on an album
         "_write_album_index",  # which names, which tracks seen, warmed yet
     }
-    # And the sharper half: exactly one of those four knows the path that
-    # leads into .user_syncs/.
+    # And the sharper half: exactly one of those five knows the path that
+    # leads to a .lrc file. record_published writes IN that directory and
+    # is on the list above, but it writes a sidecar of its own beside the
+    # sync rather than the sync, so it may not know the sync's own path.
     reaches = {
         function.name
         for function in ast.walk(tree)
@@ -210,7 +213,12 @@ def test_only_save_user_sync_ever_writes_to_the_directory():
         for node in ast.walk(function)
         if isinstance(node, ast.Attribute) and node.attr == "user_sync_path"
     }
-    assert reaches == {"save_user_sync", "has_user_sync", "read_user_sync"}
+    assert reaches == {
+        "save_user_sync",
+        "has_user_sync",
+        "read_user_sync",
+        "user_sync_text",
+    }
 
 
 def test_the_artwork_cache_cannot_reach_the_user_sync_directory():

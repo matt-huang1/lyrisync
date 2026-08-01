@@ -42,8 +42,8 @@ class FakeConnection:
         self.status = status
         self.headers = list(headers)
 
-    def request(self, method, path, headers=None):
-        self.requests.append((method, path, headers or {}))
+    def request(self, method, path, body=None, headers=None):
+        self.requests.append((method, path, headers or {}, body))
         if self.fail_next:
             self.fail_next = False
             raise http.client.RemoteDisconnected("closed by server")
@@ -86,7 +86,7 @@ def test_the_connection_is_kept_and_used_again():
     pool.get("/second")
 
     assert len(opened) == 1
-    assert [path for _, path, _ in opened[0].requests] == ["/first", "/second"]
+    assert [path for _, path, _, _ in opened[0].requests] == ["/first", "/second"]
 
 
 def test_a_connection_the_server_says_it_will_close_is_not_kept():
@@ -113,7 +113,7 @@ def test_a_pooled_connection_that_died_while_idle_is_retried_once():
 
     assert first.closed is True
     assert len(opened) == 2
-    assert [path for _, path, _ in second.requests] == ["/second"]
+    assert [path for _, path, _, _ in second.requests] == ["/second"]
 
 
 def test_a_brand_new_connection_that_fails_is_not_retried():
@@ -153,3 +153,51 @@ def test_headers_reach_the_connection():
     pool, opened = pool_of()
     pool.get("/first", headers={"User-Agent": "sottovoce/test"})
     assert opened[0].requests[0][2] == {"User-Agent": "sottovoce/test"}
+
+
+# -- POST, and the one rule it does not share ------------------------------
+
+
+def test_a_post_carries_its_body_and_its_headers():
+    pool, opened = pool_of()
+
+    assert pool.post(
+        "/api/publish", b'{"a": 1}', headers={"X-Publish-Token": "p:1"}
+    ) == Response(200, b"{}")
+
+    method, path, headers, body = opened[0].requests[0]
+    assert (method, path, body) == ("POST", "/api/publish", b'{"a": 1}')
+    assert headers["X-Publish-Token"] == "p:1"
+
+
+def test_a_post_on_a_dead_pooled_connection_is_not_retried():
+    """The rule ``get`` has and this deliberately does not. A connection
+    that failed cannot say whether the request was heard, and the one POST
+    this app makes publishes lyrics under a token the server accepts once:
+    a resend that was really a duplicate either posts twice or is refused
+    for a token already spent. So it is reported, and asking again is
+    somebody's decision rather than the pool's."""
+    first = FakeConnection()
+    second = FakeConnection()
+    pool, opened = pool_of(first, second)
+    pool.get("/first")  # fills the pool
+    first.fail_next = True
+
+    with pytest.raises(http.client.HTTPException):
+        pool.post("/api/publish", b"{}")
+
+    assert first.closed is True
+    assert len(opened) == 1, "the pool opened a second connection to try again"
+    assert second.requests == []
+
+
+def test_a_post_is_kept_alive_like_any_other_request():
+    """It is the same pool and the same connection: publishing borrows the
+    handshakes the lookups already paid for."""
+    pool, opened = pool_of()
+
+    pool.get("/first")
+    pool.post("/api/publish", b"{}")
+
+    assert len(opened) == 1
+    assert [method for method, _, _, _ in opened[0].requests] == ["GET", "POST"]

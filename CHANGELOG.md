@@ -6,6 +6,41 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Publishing a sync back to LRCLIB
+
+**LRCLIB gives this app its lyrics for nothing.** When you have timed a
+song by hand and LRCLIB has the words but no timings for it, the menu
+offers **Publish this sync to LRCLIB…** — one song, one deliberate act.
+
+**Nothing is ever published on its own.** A finished sync stays on your
+Mac. Publishing opens a window that asks LRCLIB what it is holding, then
+shows you the exact submission: the track, artist, album and duration that
+will go, your synced lyrics whole, and LRCLIB's own plain lyrics sent back
+unchanged. The button underneath sends *that*. There is no bulk path.
+
+**Only one case, deliberately.** LRCLIB has to be holding the words for the
+track and no timings, and your sync's lines have to be those words. Adding
+stamps to text they already host attaches to the record they already have.
+Publishing for a track LRCLIB has never heard of is a different thing and
+is not in this version.
+
+**The condition is checked freshly.** The cached answer is what LRCLIB said
+the first time the song played; somebody else may have contributed timings
+since. So it is asked again at the moment of publishing, and a song can be
+offered and then refused.
+
+**LRCLIB asks for a few seconds of CPU instead of an account.** A
+proof-of-work challenge, solved off the UI thread — about 4.7 seconds by
+measurement, sometimes a good deal longer, so there is a running count and
+a Cancel. Stopping before it is sent costs nothing.
+
+**The same sync is never offered twice.** A record is kept beside it, and
+the menu says *Published to LRCLIB* instead. Re-syncing the song makes a
+new thing to send, so the entry comes back.
+
+**Your syncs are untouched.** Publishing copies `.user_syncs/` outward and
+never modifies or deletes anything in it.
+
 ## Resilience — a growing backoff, a retry you can press, lyrics you can paste, an album fetched ahead
 
 **"Will retry" meant every 30 seconds, for ever.** A song left on screen

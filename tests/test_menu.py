@@ -16,6 +16,12 @@ ALL_LAYERS = dict(
     # screen at once and ask about ORDER; that they exclude each other is
     # asserted where it is decided, in test_view_model.py.
     paste_sync_offered=True,
+    # Mutually exclusive in the running app for the same kind of reason:
+    # the entry is refused for a sync that has been sent, and the line is
+    # shown for exactly that case. Both are on here so that ORDER can be
+    # asked about with everything on screen at once.
+    publish_offered=True,
+    sync_published=True,
     login_item_offered=True,
     positions_remembered=True,
     remembering_positions=True,
@@ -27,6 +33,8 @@ NO_LAYERS = dict(
     synced=False,
     sync_offered=False,
     paste_sync_offered=False,
+    publish_offered=False,
+    sync_published=False,
     login_item_offered=False,
     positions_remembered=False,
     remembering_positions=False,

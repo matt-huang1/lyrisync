@@ -31,6 +31,9 @@ have a handler and fails if one of them is not covered above.
 
 TIER = "integration"  # a click, the model, the window, and the tick coming back
 
+import json
+import time
+
 import pytest
 
 from PySide6.QtCore import QTimer
@@ -39,6 +42,7 @@ from sottovoce import login_item
 from sottovoce import menu as m
 from sottovoce import nsmenu
 from sottovoce import proximity
+from sottovoce import publish_window
 from sottovoce import speech
 from sottovoce import typography
 from sottovoce import window as w
@@ -621,6 +625,56 @@ def test_paste_lyrics_to_sync_opens_the_one_window_that_takes_a_keyboard(
     window._cancel_sync()
 
 
+def test_publishing_a_sync_opens_a_window_and_sends_nothing_by_itself(
+    drawn, make_window, lrclib
+):
+    """The entry that reaches outside this Mac, and the whole of what a
+    click on it does: it opens something to read.
+
+    The rest of the path is test_window_publish.py's. What matters here is
+    that the click is not the consent — after it, LRCLIB has been asked
+    what it holds and nothing has been sent, and the window is sitting in
+    its review state waiting for a second, deliberate press.
+    """
+    service = lrclib(("api/get", (200, json.dumps({
+        "trackName": "Song",
+        "artistName": "Artist",
+        "albumName": "Album",
+        "duration": 200.0,
+        "plainLyrics": "first line\nsecond line\nthird line",
+        "syncedLyrics": None,
+    }).encode())))
+    window = make_window()
+    load(window, PLAIN, track_id="t7")
+    # What the running app would have on disk by now: their own sync, and
+    # the cached record of LRCLIB answering with words and no timings.
+    # Written through the app's own writers rather than by hand, so the
+    # test cannot describe a shape the app does not produce.
+    window._provider.save_user_sync(
+        "t7",
+        "[00:01.00] first line\n[00:05.00] second line\n[00:09.00] third line\n",
+    )
+    window._provider._write_cache("t7", PLAIN)
+    window._reconsider_publishing()
+    window._refresh_menu()
+    assert item_for(window, m.PUBLISH).hidden is False
+    assert item_for(window, m.PUBLISH_STATUS).hidden is True
+
+    click(window, m.PUBLISH)
+
+    publishing = window._publish_window
+    assert publishing is not None, "the click opened nothing"
+    for _ in range(200):
+        APP.processEvents()
+        if publishing.state != publish_window.CHECKING:
+            break
+        time.sleep(0.005)
+    assert publishing.state == publish_window.REVIEW
+    assert service.sent_to("api/publish") == [], "a click published something"
+    publishing.close()
+    APP.processEvents()
+
+
 def test_quit_from_a_native_click_runs_the_clean_shutdown(drawn, make_window):
     """Straight to the app's own quit, so the aboutToQuit shutdown runs
     however quit is reached. Driven through a real event loop because that
@@ -691,6 +745,7 @@ COVERED = (
         m.OPEN_AT_LOGIN,
         m.SYNC,
         m.PASTE_SYNC,
+        m.PUBLISH,
         m.QUIT,
     }
 )

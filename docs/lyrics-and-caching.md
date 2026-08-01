@@ -308,13 +308,24 @@ three integers of JSON per track (see [album colour](album-colour.md)).
 `.user_syncs/` is **your work**. Those are plain `.lrc` files you tapped
 out by hand, and nothing in the app or its documentation may delete them.
 No "clear cache" action touches them. That is enforced, not merely
-intended: a test asserts that exactly one module in the codebase writes to
-the user-sync directory, and that the album-colour module may not so much
-as *mention* it — a module that learns to write there has to argue for
+intended: a test asserts which functions in the codebase write to the
+user-sync directory, that only one of them knows the path to a sync
+itself, and that the album-colour module may not so much as *mention* the
+directory — a module that learns to write there has to argue for
 itself in that test first.
 
 A sync is written only when a pass is finished. There are no partial
 saves, so there is never a half-timed file to reason about.
+
+One other kind of file lives in that directory, and it is the app's
+rather than yours: a `.published` sidecar beside a sync that has been
+offered back to LRCLIB, holding the digest of the text that went. It is
+there rather than in the cache because clearing the cache is a reset and
+forgetting what has been published is not one — it would be the app
+offering to send your work a second time. Writing it is the second
+writer that had to argue for itself in the test above, and it writes a
+file of its own beside a sync rather than ever touching one. See
+[publishing](publishing.md).
 
 ## Re-syncing works offline
 
@@ -347,6 +358,7 @@ cancelling lands.
 .lyrics_cache/    derived — JSON per track ID, including definitive "no lyrics"
 .artwork_cache/   derived — the album colour, three integers per track
 .user_syncs/      yours   — hand-made .lrc files, which the app only ever adds to
+                            (plus a .published sidecar per sync offered back to LRCLIB)
 ```
 
 The two derived directories can be thrown away at any time: everything in

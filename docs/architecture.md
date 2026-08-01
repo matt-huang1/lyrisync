@@ -25,6 +25,12 @@ again the moment it hands them over. It exists precisely because
 `window.py` refuses focus and cannot hold a text field. See
 [tap-to-sync](tap-to-sync.md).
 
+`publish_window.py` is the third widget and is the same argument again,
+one step further: offering a sync back to LRCLIB means reading a whole
+submission and deciding whether it goes to a public database, which is not
+a thing to do in a HUD or behind a control that could be pressed by
+accident. See [publishing](publishing.md).
+
 ## Pure modules behind a thin window
 
 Everything that can be logic rather than widget is:
@@ -50,6 +56,8 @@ Everything that can be logic rather than widget is:
 | `http_client.py` | connections to one host, kept alive between requests |
 | `failure.py` | why a lookup could not be answered, in words |
 | `backoff.py` | how long before this app asks LRCLIB again: the schedule that grows, and the pause LRCLIB itself asks for |
+| `challenge.py` | LRCLIB's proof of work: the server's own rule, the solver, and the token it makes |
+| `publish.py` | who may publish a sync, exactly what would be sent, and the three-request exchange that sends it |
 | `accessibility.py` | the three macOS display settings the window follows — plus one native door |
 | `nsmenu.py` | *not* pure, and the only module here that is all door: the one native NSMenu drawn from `menu.py`, and the menu bar item that carries it |
 

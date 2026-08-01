@@ -14,7 +14,10 @@ fixtures are in conftest.py, and a helper only one file uses stays in
 that file where it can be read next to what it serves.
 """
 
+import json
 import os
+import threading
+import time
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -31,6 +34,8 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
+from typing import NamedTuple  # noqa: E402
+
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -43,17 +48,20 @@ except Exception as exc:  # pragma: no cover - platform plugin missing
 from sottovoce import accessibility  # noqa: E402
 from sottovoce import frontmost  # noqa: E402
 from sottovoce import menu as m  # noqa: E402
+from sottovoce import player_monitor as pmon  # noqa: E402
 from sottovoce import proximity  # noqa: E402
 from sottovoce import window as w  # noqa: E402
 from sottovoce.lyrics_provider import TrackLyrics  # noqa: E402
+from sottovoce.view_model import Mode  # noqa: E402
 from sottovoce.player_monitor import (  # noqa: E402
     PlaybackState,
     PlayerSnapshot,
 )
 
-# Captured before any fixture stubs it, so the one test that needs the
-# real worker body can still reach it.
+# Captured before any fixture stubs it, so the tests that need the real
+# worker body can still reach it.
 REAL_ARTWORK_RUN = w.ArtworkTask.run
+REAL_FETCH_RUN = w.FetchTask.run
 
 PLAIN = TrackLyrics(plain="first line\nsecond line\nthird line")
 SYNCED = TrackLyrics(synced=[(1.0, "one"), (5.0, "two")])
@@ -482,3 +490,226 @@ def with_mode(window, mode):
     with pointer_at(window, away_from(window)):
         window._set_proximity_mode(mode)
     return window
+
+
+# -- LRCLIB, one layer below the app --------------------------------------
+#
+# Here rather than in one test file because a second file needs it: the
+# lyrics path and the publish path are both entered through a real
+# ConnectionPool over a fake connection, which is the deepest seam either
+# of them has. Everything above it — the pool, the hedge, the priority
+# order, the cache, the hold a 429 sets, the token header a publish carries
+# — is the real thing in both.
+
+
+SONG = {
+    "uri": "spotify:track:0Ab1Cd2Ef3",
+    "title": "Blue Hour",
+    "artist": "Someone",
+    "album": "First Light",
+    "duration_ms": 214000,
+}
+
+SYNCED_LRC = "[00:01.00] first line\n[00:05.50] second line\n"
+
+
+def payload(synced=None, plain=None):
+    return json.dumps({"syncedLyrics": synced, "plainLyrics": plain}).encode()
+
+
+SYNCED_BODY = payload(synced=SYNCED_LRC, plain="first line\nsecond line")
+PLAIN_BODY = payload(plain="first line\nsecond line\nthird line")
+
+
+class FakeResponse:
+    def __init__(self, status, body, headers=()):
+        self.status = status
+        self._body = body
+        self._headers = list(headers)
+        # The server keeps the connection, which is what LRCLIB measurably
+        # does and what the pool exists for: the next attempt in the chain
+        # reuses this one rather than opening another.
+        self.will_close = False
+
+    def read(self):
+        return self._body
+
+    def getheaders(self):
+        return list(self._headers)
+
+
+class Asked(NamedTuple):
+    """One request as it reached the wire.
+
+    The whole of it rather than the path alone, because publishing is the
+    first thing here that is told apart by its VERB and carries a body and
+    a header of its own: a fake that recorded only paths could not tell a
+    challenge from a publish, nor say what token went with which.
+    """
+
+    method: str
+    path: str
+    headers: dict
+    body: object = None
+
+
+class FakeLrclib:
+    """A connection factory, and what it answers to each path.
+
+    Routed by substring in the order given, first match wins, exactly as
+    test_lyrics_provider.py's fetcher is — the request shapes are told
+    apart by ``album_name=`` (the exact match), ``api/get`` (the same
+    question without the album), ``api/search`` (the loose one),
+    ``request-challenge`` and ``api/publish``.
+
+    An unrouted path is a 404 and not an error, because a 404 is what
+    LRCLIB says about a question it has no answer to, and the chain is
+    meant to walk past those.
+
+    A route may carry headers as a third item, which is how a 429 says how
+    long it wants to be left alone.
+    """
+
+    def __init__(self, *routes):
+        self.routes = list(routes)
+        self.requests: list = []
+        self.connections = 0
+        self._lock = threading.Lock()
+
+    def connect(self):
+        with self._lock:
+            self.connections += 1
+        return _FakeConnection(self)
+
+    def answer(self, method, path, headers, body):
+        with self._lock:
+            self.requests.append(Asked(method, path, headers, body))
+        for substring, response in self.routes:
+            if substring in path:
+                return response
+        return (404, b"")
+
+    @property
+    def asked(self) -> list:
+        """The paths, in order. What most of these tests count."""
+        with self._lock:
+            return [request.path for request in self.requests]
+
+    @property
+    def headers(self) -> list:
+        with self._lock:
+            return [request.headers for request in self.requests]
+
+    def asked_for(self, substring) -> list:
+        with self._lock:
+            return [
+                request.path for request in self.requests if substring in request.path
+            ]
+
+    def sent_to(self, substring) -> list:
+        """Every request whose path matches, whole."""
+        with self._lock:
+            return [
+                request for request in self.requests if substring in request.path
+            ]
+
+
+class _FakeConnection:
+    def __init__(self, service):
+        self._service = service
+        self._pending = None
+        self.closed = False
+
+    def request(self, method, path, body=None, headers=None):
+        self._pending = self._service.answer(method, path, dict(headers or {}), body)
+
+    def getresponse(self):
+        status, body, *headers = self._pending
+        return FakeResponse(status, body, headers[0] if headers else ())
+
+    def close(self):
+        self.closed = True
+
+
+# -- a song playing, and the lookup it starts ------------------------------
+#
+# Here because a second file needs it: the lyrics path and the publish path
+# both begin with a song starting, and in both of them the track change is
+# not supplied. A real PlayerMonitor over a fake Spotify decides there was
+# one, which is where the app really enters either path from.
+
+
+class FakeSpotify:
+    """Enough of a player to announce a song and hold a position."""
+
+    def __init__(self, song=SONG):
+        self.song = song
+        self.position = 0.0
+        self.state = "playing"
+
+    def answer(self, script):
+        if script != pmon._SNAPSHOT_SCRIPT:
+            return ""
+        return "\n".join([
+            self.state,
+            self.song["uri"],
+            self.song["title"],
+            self.song["artist"],
+            self.song["album"],
+            str(self.song["duration_ms"]),
+            f"{self.position:.3f}",
+        ])
+
+
+def monitor_for(window):
+    """A real monitor wired to the real window's slots."""
+    return pmon.PlayerMonitor(
+        on_track_change=window._on_track_change,
+        on_position_update=window._on_position_update,
+        on_state_change=window._on_state_change,
+    )
+
+
+def settled(window, seconds=5.0):
+    """Pump the event loop until the lookup has answered.
+
+    The fetch runs on the global QThreadPool and its result crosses back on
+    a queued signal, so both halves need the loop turning. Waiting on the
+    MODE rather than on the pool is what makes this honest about the thing
+    under test: it is done when the window knows, not when the worker
+    stopped.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        APP.processEvents()
+        if window._view_model.display().mode is not Mode.FETCHING:
+            window._title_card_until = 0.0  # the card is not what is asked here
+            window._render()
+            APP.processEvents()
+            return
+        time.sleep(0.005)
+    raise AssertionError("the lookup never came back")
+
+
+def worked(window):
+    """Let every worker the window started finish, and its answer come back.
+
+    For the cases where nothing about the state changes, so there is no
+    change for ``settled`` to wait on and a test that only pumped the loop
+    would be asserting that nothing had happened YET.
+    """
+    assert window._pool.waitForDone(5000), "a worker never finished"
+    APP.processEvents()
+
+
+def play(window, spotify, position=None):
+    """A song starts, and the monitor is the one that notices."""
+    monitor = monitor_for(window)
+    monitor.tick()
+    APP.processEvents()
+    settled(window)
+    if position is not None:
+        spotify.position = position
+        monitor.tick()
+        APP.processEvents()
+    return monitor

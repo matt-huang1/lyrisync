@@ -15,12 +15,15 @@ import pytest
 
 from PySide6.QtCore import QSettings
 
+from sottovoce import lyrics_provider as lp
 from sottovoce import player_events
+from sottovoce import player_monitor as pmon
 from sottovoce import window as w
 from sottovoce.artwork import ArtworkProvider
+from sottovoce.http_client import ConnectionPool
 from sottovoce.lyrics_provider import LyricsProvider
 
-from helpers import APP
+from helpers import APP, REAL_FETCH_RUN, FakeLrclib, FakeSpotify
 
 
 @pytest.fixture(autouse=True)
@@ -154,3 +157,48 @@ def make_window(tmp_path):
         f"{len(unjoined)} monitor thread(s) outlived _shutdown — destroying "
         "those windows would have aborted the process"
     )
+
+
+@pytest.fixture
+def lrclib(monkeypatch):
+    """A pool that opens fakes instead of sockets.
+
+    The POOL is the real one: ``http_client.ConnectionPool`` with its own
+    connect factory, which is the seam that module was given so the suite
+    could exercise reuse and the stale-connection retry without a socket.
+    Installed as the module's pool, so ``_fetch_json`` and ``post_json``
+    find it the way they find the real one and nothing above here knows the
+    difference.
+
+    Here rather than in one file because two need it: a lyrics lookup and a
+    publication are the same door, and faking either of them anywhere
+    higher would be faking this app's own parts.
+    """
+
+    def install(*routes):
+        service = FakeLrclib(*routes)
+        monkeypatch.setattr(
+            lp, "_pool", ConnectionPool(lp.LRCLIB_HOST, connect=service.connect)
+        )
+        return service
+
+    return install
+
+
+@pytest.fixture
+def spotify(monkeypatch):
+    """A fake Spotify under the real monitor, and the module state it
+    touches put back afterwards."""
+    fake = FakeSpotify()
+    monkeypatch.setattr(pmon, "_ask", fake.answer)
+    monkeypatch.setattr(pmon, "spotify_running", lambda: True)
+    monkeypatch.setattr(pmon, "_moved", None, raising=False)
+    yield fake
+    pmon._wake.clear()
+    pmon._moved = None
+
+
+@pytest.fixture
+def fetching(monkeypatch):
+    """Give ``FetchTask`` its body back for the length of one test."""
+    monkeypatch.setattr(w.FetchTask, "run", REAL_FETCH_RUN)
