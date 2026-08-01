@@ -10,6 +10,12 @@ ALL_LAYERS = dict(
     speech_available=True,
     synced=True,
     sync_offered=True,
+    # Never true beside sync_offered in the running app — the two answer
+    # the same question about a song that has lyrics and one that does not.
+    # Both are on here because this dict exists to put every entry on
+    # screen at once and ask about ORDER; that they exclude each other is
+    # asserted where it is decided, in test_view_model.py.
+    paste_sync_offered=True,
     login_item_offered=True,
     positions_remembered=True,
     remembering_positions=True,
@@ -20,6 +26,7 @@ NO_LAYERS = dict(
     speech_available=False,
     synced=False,
     sync_offered=False,
+    paste_sync_offered=False,
     login_item_offered=False,
     positions_remembered=False,
     remembering_positions=False,
@@ -369,9 +376,9 @@ def test_the_login_label_is_the_login_modules_own():
 
 def test_a_toggle_is_handed_the_state_it_is_moving_to():
     """Not the state it is in, and not a tick that moved itself. The handler
-    changes the app and the refresh that follows says what the app now is,
-    which is the same rule the QMenu entries followed by connecting to
-    triggered rather than toggled."""
+    changes the app and the refresh that follows says what the app now is;
+    trigger only READS the tick, to work out which way the toggle is
+    going."""
     menu = m.Menu()
     seen = []
     menu.on(m.COMPACT, seen.append)
@@ -385,9 +392,10 @@ def test_a_toggle_is_handed_the_state_it_is_moving_to():
 
 
 def test_a_click_never_moves_the_tick_by_itself():
-    """The whole of why toggled was wrong: a refresh sets every check mark,
-    and an entry that also set its own would be a second answer to what the
-    setting is."""
+    """The model half of the one-writer rule: the refresh sets every check
+    mark, and an entry that also set its own would be a second answer to
+    what the setting is. The native half — that ``apply`` is the only thing
+    that calls ``setState_`` — is in test_nsmenu.py."""
     menu = m.Menu()
     menu.on(m.COMPACT, lambda enabled: None)
     menu.trigger(m.COMPACT)

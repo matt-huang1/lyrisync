@@ -386,6 +386,23 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _no_pause_carried_over():
+    """Start every test with LRCLIB not having asked us to wait.
+
+    Not a door and not a guard: it is leaked state. The Retry-After hold is
+    module level for the reason the connection pool is — it is a fact about
+    the host rather than about a provider — so a test that drives a 429
+    would otherwise refuse the first request of whatever test ran next, and
+    the failure would appear somewhere with nothing to do with it.
+    """
+    from sottovoce import lyrics_provider
+
+    lyrics_provider._hold.clear()
+    yield
+    lyrics_provider._hold.clear()
+
+
+@pytest.fixture(autouse=True)
 def _fail_on_escape():
     """Fail the test that caused an escape, wherever the call came from.
 

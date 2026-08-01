@@ -18,6 +18,13 @@ there was a window.
 decodes covers with `QImage` rather than adding an image library, because
 Qt already ships with the app. Its colour maths is still pure.)
 
+`paste_window.py` is the one other widget, and it is deliberately nothing
+like the lyrics window: an ordinary system-drawn top-level with a text
+box, opened only to bring lyrics in for a tap-to-sync pass and closed
+again the moment it hands them over. It exists precisely because
+`window.py` refuses focus and cannot hold a text field. See
+[tap-to-sync](tap-to-sync.md).
+
 ## Pure modules behind a thin window
 
 Everything that can be logic rather than widget is:
@@ -42,6 +49,7 @@ Everything that can be logic rather than widget is:
 | `settings.py` | where the preferences live, and the one-time carry from the LyriSync name — plus one native door |
 | `http_client.py` | connections to one host, kept alive between requests |
 | `failure.py` | why a lookup could not be answered, in words |
+| `backoff.py` | how long before this app asks LRCLIB again: the schedule that grows, and the pause LRCLIB itself asks for |
 | `accessibility.py` | the three macOS display settings the window follows — plus one native door |
 | `nsmenu.py` | *not* pure, and the only module here that is all door: the one native NSMenu drawn from `menu.py`, and the menu bar item that carries it |
 
@@ -83,7 +91,10 @@ app runs, and one door could not be blocked without blocking the other.
   about once a second or whenever it is told to.
 - **Worker pool** (`QThreadPool`) — one-shot tasks: lyrics fetch, artwork
   fetch, `say`, seek, pause/resume. The last three send Apple events,
-  serialised against the monitor's behind one lock.
+  serialised against the monitor's behind one lock. The album warm runs
+  here too and is the one worker that lasts: it makes a request per track
+  with a deliberate gap between them, so it waits on a stop flag rather
+  than sleeping, and shutdown sets that flag before it drains the pool.
 
 Shutdown drains them in a fixed order — hotkey, then monitor thread, then
 pool — with bounded waits. See

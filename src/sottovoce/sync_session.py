@@ -4,6 +4,11 @@ Pure logic, Qt-free like loop.py and geometry.py. The session owns the
 line list, the cursor, and the stamps recorded so far; the caller owns the
 clock, the player, and the widgets.
 
+Where the lines come from is not this module's business: plain lyrics from
+LRCLIB, the sync a re-sync replaces, or a block somebody pasted in. All
+three arrive as tap targets, and ``targets_from_paste`` is the only one
+with anything to take off first.
+
 Two corrections stand between "when the click landed" and "when the line
 actually started":
 
@@ -19,6 +24,7 @@ actually started":
 
 from __future__ import annotations
 
+import re
 from typing import Iterable, Optional
 
 # Subtracted from every stamp to cancel the tap's reaction lag. Tuning
@@ -43,6 +49,42 @@ def sync_targets_from_lines(lines: Iterable[str]) -> list[str]:
 def sync_targets(plain_text: str) -> list[str]:
     """Tap targets from a block of plain lyrics."""
     return sync_targets_from_lines(plain_text.splitlines())
+
+
+# What a bracketed thing at the start of a line is: an LRC timestamp
+# ([00:12.34]) or an LRC metadata tag ([ar:Someone]). Both are structure
+# rather than words, and both arrive when somebody pastes a .lrc file into
+# a box that asked for lyrics.
+_LRC_STAMP_RE = re.compile(r"^\s*(?:\[\d+:\d{1,2}(?:[.:]\d+)?\]\s*)+")
+_LRC_TAG_RE = re.compile(r"^\s*\[[a-zA-Z#]+:[^\]]*\]\s*$")
+
+
+def targets_from_paste(text: str) -> list[str]:
+    """Tap targets from lyrics a person pasted in.
+
+    The same targets as any other pass — every non-blank line, in order —
+    with one thing taken off first: LRC syntax. What people have to hand is
+    frequently a ``.lrc`` file from somewhere, and pasting one into a box
+    that asked for words would otherwise produce a song whose every line
+    begins "[00:12.34]" and then be saved back out with a second timestamp
+    in front of the first.
+
+    Metadata tags go entirely: ``[ar:Someone]`` is not a line anybody
+    sings, and a pass that made the user tap through four of them before
+    the first lyric would be one they abandoned. A stamp at the START of a
+    line is stripped and the words after it kept, because those words are
+    exactly the line.
+
+    Nothing else is cleaned up. What is left is what the user pasted, and
+    guessing further about somebody's own lyrics is how a sync ends up
+    missing the line they were waiting for.
+    """
+    lines = []
+    for raw in text.splitlines():
+        if _LRC_TAG_RE.match(raw):
+            continue
+        lines.append(_LRC_STAMP_RE.sub("", raw))
+    return sync_targets_from_lines(lines)
 
 
 def interpolated_position(

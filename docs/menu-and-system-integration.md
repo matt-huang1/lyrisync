@@ -43,10 +43,26 @@ is assembled only while somebody is looking at it (`menuWillOpen:`).
 
 **Nothing checks or unchecks an entry from a click.** The handler changes
 the app's state and the refresh that follows says what the state now is, so
-`Menu.trigger` hands a toggle the state it is moving *to*. That is the same
-rule the `QMenu` followed by connecting to `triggered` rather than
-`toggled`, stated where it now lives: a tick that moved itself would be a
-second answer to what the setting is.
+`Menu.trigger` hands a toggle the state it is moving *to*. A tick that
+moved itself would be a second answer to what the setting is.
+
+What holds that up is that the tick has exactly **one writer**.
+`NativeMenu.apply` is the only thing in the app that calls `setState_`, and
+it reads what to write off the model; the click path — `fire_` → `_fired` →
+`Menu.trigger` → the handler — never touches `_checked` at all, it only
+*reads* it to work out which way the toggle is going. A structural test
+pins the writer down, because a second `setState_` somewhere else would
+pass every behavioural test while quietly reintroducing the bug.
+
+It used to be written here that the rule was "why the `QMenu` entries were
+connected to `triggered` rather than `toggled`", and that was the wrong
+reason twice over. It names a mechanism this app no longer has — the
+`QMenu` is gone, and AppKit never moves an `NSMenuItem`'s state on its own
+the way a checkable `QAction` does. And it was not what that connection
+bought even at the time: a `QAction` flips its own tick on a click whichever
+signal you listen to, so `triggered` was never what stopped the tick moving
+itself. What it avoided was the *refresh* re-entering the handlers, because
+`toggled` also fires when `setChecked` is called from our own code.
 
 Which entries are visible is still pure logic in `menu.py`, tested without
 Qt — and so, now, is everything else about the menu except its pixels.

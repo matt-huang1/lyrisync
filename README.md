@@ -25,8 +25,8 @@ Synced lyrics for the Spotify desktop app on macOS, in a floating window built f
 - **Korean romanisation** — an optional pronunciation line under the current lyric.
 - **Spoken reference** — pause the music and hear the current line read slowly, then carry on.
 - **Line looping and echo practice** — repeat a line, or alternate hearing it with a silent turn to sing it yourself.
-- **Tap-to-sync** — a song with plain lyrics only can be timed by hand. Your timings are saved and used from then on.
-- **A reason, if you want one** — when a lookup fails the window says "lyrics unavailable, will retry", and nothing else, because that is all most people need. Beside it is a small ⓘ: click it and it says which of the four things went wrong (an HTTP status, a timeout, an unreachable server, an unreadable answer) and which attempt in the fallback chain it came from. A song that simply has no lyrics says so plainly and offers nothing to click.
+- **Tap-to-sync** — a song with plain lyrics only can be timed by hand. Your timings are saved and used from then on. A song with no lyrics at all can be synced too: paste the words in and tap through them, with nothing on the network at any point.
+- **A reason, if you want one** — when a lookup fails the window says "lyrics unavailable, will retry", and nothing else, because that is all most people need. Beside it is a small ⓘ: click it and it says which of the four things went wrong (an HTTP status, a timeout, an unreachable server, an unreadable answer) and which attempt in the fallback chain it came from. A song that simply has no lyrics says so plainly and offers nothing to click. Beside the reason is a retry, for when you know the service is back and would rather not wait — the automatic one backs off from 30 seconds to five minutes as failures accumulate, so an outage costs LRCLIB nine times fewer requests.
 - **Everything optional** — every learning feature is a toggle. With them all off, this is a simple synced-lyrics window.
 
 ## Requirements

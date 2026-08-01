@@ -22,7 +22,7 @@ can be logic rather than widget is a **Qt-free pure module** —
 `flight.py`, `app_positions.py`, `gestures.py`, `romanize.py`,
 `menubar.py`, `http_client.py`, `settings.py`, `notifications.py`,
 `proximity.py`, `failure.py`, `player_events.py`, `hit_test.py`,
-`placement.py`. That is
+`placement.py`, `backoff.py`. That is
 why the contrast floor is a test rather than a judgement, and why the
 whole suite runs headless on Linux.
 
@@ -190,7 +190,43 @@ Rules that come with them:
   `lyrics_provider.py` and `artwork.py` may write in the package, and
   `artwork.py` may not so much as mention the user-sync directory.
 - **Only genuine 404s are cached negatively.** An error's outcome is
-  unknown; it surfaces as a retry state and re-attempts every 30s.
+  unknown; it surfaces as a retry state and re-attempts on a **growing**
+  interval: 30s, then doubling to a 300s ceiling (`backoff.py`, measured —
+  38 requests over a three hour outage against 360 at a flat 30s, and a
+  ceiling under the 232s median of 69 real album tracks, because a track
+  change re-attempts at once and beats it for 88% of songs).
+- **Only an answer from LRCLIB resets the schedule.** A cache hit, a user
+  sync and a warmed track are successes that say nothing about the
+  service, and a counter that reset on those would be back to 30s on
+  every uncached track in the middle of an outage. `look_up` names the
+  source; `get_lyrics` still answers with lyrics alone.
+- **`Retry-After` on a 429 outranks our own schedule**, because LRCLIB's
+  documentation says ignoring it may earn a temporary ban. The hold is
+  checked inside `_fetch_json`, not in front of the retry timer — a track
+  change and the album warm are two more ways a request leaves this app —
+  and it is module level, like the pool, because it is a fact about the
+  host. Read as **seconds only**: an HTTP date would mean trusting this
+  clock against theirs.
+- **A lookup this app refused is not a failure of theirs.** `HELD` is the
+  one kind `failure.reached_lrclib` answers False for; counting it would
+  grow the backoff on the strength of the backoff. It carries no attempt,
+  because it belongs to no link of the chain.
+- **A manual retry resets the schedule and cannot waive the pause.** It
+  lives beside the REASON rather than beside the message: "will retry"
+  already promises the thing, so a control next to that sentence would be
+  inviting people to do it themselves.
+- **The album warm can say yes and it can say nothing.** Never "this
+  track has no lyrics" — it is a guess made without the track in hand. A
+  hit is checked against the **`/get`** duration tolerance rather than the
+  looser search one, because it stands in for the album match; it is
+  promoted to an ordinary cache entry on the way past; and the store lives
+  INSIDE `.lyrics_cache/`, because it is the one thing there nobody made.
+  Requests go out **sequentially with a gap** (350ms, the middle of the
+  200-500ms band LRCLIB's docs ask for), one album at a time, once per
+  album ever, and **never while the service is failing**.
+- **Tap-to-sync must not need the network.** Lyrics can be pasted in, and
+  that entry point is offered exactly where "Sync this song" cannot be, so
+  the two can never both be on screen.
 - **Non-music items never touch the cache or the network** — DJ narration
   reuses the next song's ID, so even a cache *read* is wrong.
 - **Prefer no lyrics to mismatched-duration lyrics.**
@@ -311,7 +347,16 @@ Rules that come with them:
   unless asked. The reason (kind, HTTP status, the attempt it came from)
   lives one click away, in the HUD's own register, and never carries the
   socket's own message. **A track with no lyrics offers nothing to
-  click** — that distinction is the point.
+  click** — that distinction is the point. The retry control follows the
+  REASON into whichever row it landed in, and is gone when it is.
+- **The lyrics window never takes a keyboard, so text entry gets a window
+  of its own.** `paste_window.py` is ordinary, system-drawn and focusable
+  — every flag the overlay sets to stay out of the way is one that makes
+  typing impossible — and it borrows exactly one thing, staying on top,
+  because the window it serves does. An accessory app must **activate
+  itself** first (`bring_to_front`): measured, `show`/`raise_`/
+  `activateWindow` alone leaves it inactive with no focus widget, and no
+  headless test can see that.
 
 ### Motion
 
@@ -486,10 +531,11 @@ Rules that come with them:
   flickers.
 - **Nothing checks or unchecks an entry from a click.** The handler
   changes the app's state and the refresh that follows says what the
-  state is: `Menu.trigger` hands a toggle the state it is moving TO. It
-  is why the QMenu entries were connected to `triggered` rather than
-  `toggled`, and a tick that moved itself would be a second answer to
-  what the setting is.
+  state is: `Menu.trigger` hands a toggle the state it is moving TO. What
+  protects it is that the tick has exactly **one writer** —
+  `NativeMenu.apply`, reading the model — and the click path only ever
+  READS it, which a structural test pins down. A tick that moved itself
+  would be a second answer to what the setting is.
 - **The menu bar item is this app's own NSStatusItem**, not
   `QSystemTrayIcon`'s: Qt owns the item it makes and there is no
   supported way to hand it a menu, so the item that carries one NSMenu

@@ -64,6 +64,7 @@ POSITION_LIST = "position_list"
 FORGET_POSITIONS = "forget_positions"
 OPEN_AT_LOGIN = "open_at_login"
 SYNC = "sync"
+PASTE_SYNC = "paste_sync"
 QUIT = "quit"
 
 # The two submenus. They are entries like any other, which is what lets one
@@ -158,6 +159,10 @@ MENU = (
     Entry(ECHO, "Echo practice", TOGGLE),
     # Label swaps between "Sync" and "Re-sync" once a user sync exists.
     Entry(SYNC, "Sync this song", COMMAND),
+    # The same act with the lines brought from somewhere else, and it
+    # appears exactly where the entry above cannot: a song whose lyrics
+    # could not be had. The two are never visible together.
+    Entry(PASTE_SYNC, "Paste lyrics to sync…", COMMAND),
     Entry(SEPARATOR_AFTER_SONG, kind=SEPARATOR),
     # Where the window goes, and where it lives. Docking is a command and
     # per-app memory is a layer, and they are one submenu because they are
@@ -284,6 +289,7 @@ def visible_entries(
     speech_available: bool,
     synced: bool,
     sync_offered: bool,
+    paste_sync_offered: bool = False,
     login_item_offered: bool = False,
     positions_remembered: bool = False,
     remembering_positions: bool = False,
@@ -297,6 +303,13 @@ def visible_entries(
     installed, and tap-to-sync needs lines to stamp. With every layer
     dormant the menu is show/hide, the two standing choices about how the
     window looks, the two submenus and quit.
+
+    Pasting lyrics to sync is the mirror of that last one and the two are
+    mutually exclusive by construction: it is offered only where there are
+    no lines to stamp and the song could still have some. A song with
+    lyrics shows "Sync this song"; a song without shows the way to bring
+    some. Neither ever shows both, so the group gains a row rather than the
+    menu gaining a column.
 
     Open at Login is the one entry gated on how the app was launched
     rather than on what the song is: there is nothing for macOS to start
@@ -338,6 +351,8 @@ def visible_entries(
         shown.add(ECHO)
     if sync_offered:
         shown.add(SYNC)
+    if paste_sync_offered:
+        shown.add(PASTE_SYNC)
     if login_item_offered:
         shown.add(OPEN_AT_LOGIN)
     if positions_remembered:
@@ -528,11 +543,12 @@ class Menu:
 
         The one way in, whether the click came from the menu bar item, from
         the window's right-click menu, or from a test. Nothing is checked
-        or unchecked here: the handler changes the app's state and the
-        refresh that follows says what the state now is, which is the same
-        reason the entries were connected to ``triggered`` rather than
-        ``toggled`` when this was a QMenu. A tick that moved itself would
-        be a second answer to what the setting is.
+        or unchecked here, and that is the whole of what protects the rule:
+        this method READS ``is_checked`` to work out what the handler is
+        being asked for, and the only thing that ever WRITES it is the
+        refresh, from the app's own state. One writer, and it is not the
+        click. A tick that moved itself would be a second answer to what
+        the setting is.
         """
         handler = self._handlers.get(key)
         if handler is None:

@@ -36,12 +36,13 @@ from sottovoce import window as w
 from sottovoce.http_client import ConnectionPool
 from sottovoce.view_model import Mode
 
-from helpers import APP
+from helpers import APP, pressing, shown
 
 # Captured at import, before the directory's autouse fixture stubs it. The
 # same trick helpers.py uses for the artwork worker, and it stays here
 # rather than moving there because one file needs it.
 REAL_FETCH_RUN = w.FetchTask.run
+REAL_WARM_RUN = w.WarmTask.run
 
 
 # -- the one thing here that is not this app -------------------------------
@@ -67,9 +68,10 @@ PLAIN_BODY = payload(plain="first line\nsecond line\nthird line")
 
 
 class FakeResponse:
-    def __init__(self, status, body):
+    def __init__(self, status, body, headers=()):
         self.status = status
         self._body = body
+        self._headers = list(headers)
         # The server keeps the connection, which is what LRCLIB measurably
         # does and what the pool exists for: the next attempt in the chain
         # reuses this one rather than opening another.
@@ -77,6 +79,9 @@ class FakeResponse:
 
     def read(self):
         return self._body
+
+    def getheaders(self):
+        return list(self._headers)
 
 
 class FakeLrclib:
@@ -91,6 +96,9 @@ class FakeLrclib:
     An unrouted path is a 404 and not an error, because a 404 is what
     LRCLIB says about a question it has no answer to, and the chain is
     meant to walk past those.
+
+    A route may carry headers as a third item, which is how a 429 says how
+    long it wants to be left alone.
     """
 
     def __init__(self, *routes):
@@ -129,8 +137,8 @@ class _FakeConnection:
         self._pending = self._service.answer(path, dict(headers or {}))
 
     def getresponse(self):
-        status, body = self._pending
-        return FakeResponse(status, body)
+        status, body, *headers = self._pending
+        return FakeResponse(status, body, headers[0] if headers else ())
 
     def close(self):
         self.closed = True
@@ -471,3 +479,231 @@ def test_narration_asks_nothing_and_leaves_the_song_it_announced_alone(
 
     assert song._view_model.display().mode is Mode.SYNCED
     assert song._current.text() == "first line"
+
+
+# -- asking again, by hand -------------------------------------------------
+
+
+def test_the_reason_and_the_retry_are_reached_by_a_press_qt_routes(
+    make_window, lrclib, spotify, fetching
+):
+    """The two controls beside a failed lookup, pressed where they are.
+
+    Every other test of these calls ``click()``, which names the receiver
+    and so cannot fail the way a hit-testing bug fails. Here the press goes
+    to the top-level QWindow and Qt picks what is under the point: the ⓘ
+    reveals the reason, the retry appears beside it, and pressing that
+    really does put a second request on the wire and change the window's
+    mind. The whole path is real — the press, the model, the worker, the
+    provider, the pool and the connection.
+    """
+    service = lrclib(("album_name=", (503, b"")))
+    window = shown(make_window())
+    play(window, spotify)
+    assert window._view_model.display().mode is Mode.ERROR
+    failed = len(service.asked)
+
+    # Nothing to retry with until the reason is out: the retry belongs to
+    # the explanation, not to the message.
+    assert window._retry_button.isVisibleTo(window) is False
+    why = pressing(window, window._why_button)
+    assert why.acted == 1, "the reason control did not take its own press"
+    assert why.dragged == 0, "the reason control's press reached the drag handler"
+    assert window._upcoming.text() == "LRCLIB answered HTTP 503 · album match"
+    assert window._retry_button.isVisibleTo(window) is True
+
+    service.routes = [("album_name=", (200, SYNCED_BODY))]
+    retry = pressing(window, window._retry_button)
+    settled(window)
+
+    assert retry.acted == 1, "the retry did not take its own press"
+    assert retry.dragged == 0, "the retry's press reached the drag handler"
+    assert len(service.asked) > failed, "no second request went out"
+    assert window._view_model.display().mode is Mode.SYNCED
+
+
+def test_pressing_retry_does_not_wait_out_the_backoff(
+    make_window, lrclib, spotify, fetching
+):
+    """The point of the control. After four failures the next automatic
+    retry is four minutes away, and somebody who knows the service is back
+    should not have to sit through it — nor start the next failure at four
+    minutes if they were wrong."""
+    service = lrclib(("album_name=", (503, b"")))
+    window = shown(make_window())
+    play(window, spotify)
+    for _ in range(3):
+        window._view_model._error_at = -1e6  # due now, whatever the schedule
+        window._tick_retry()
+        settled(window)
+    assert window._view_model.failures == 4
+    assert window._view_model.retry_interval() == 240.0
+    asked = len(service.asked)
+
+    window._why_button.click()
+    APP.processEvents()
+    window._retry_button.click()
+    settled(window)
+
+    assert len(service.asked) > asked
+    assert window._view_model.failures == 1, "the schedule did not go back"
+    assert window._view_model.retry_interval() == 30.0
+
+
+def test_a_429_stops_every_request_including_the_one_the_user_asked_for(
+    make_window, lrclib, spotify, fetching
+):
+    """LRCLIB's documentation says ignoring Retry-After may earn a
+    temporary ban, so the pause is not the user's to waive. Their press
+    goes out, is refused at the provider's door before a socket is opened,
+    and the reason says so rather than pretending it was asked.
+    """
+    service = lrclib(("album_name=", (429, b"", [("Retry-After", "600")])))
+    window = shown(make_window())
+    play(window, spotify)
+    assert window._view_model.display().mode is Mode.ERROR
+    asked = len(service.asked)
+
+    window._why_button.click()
+    APP.processEvents()
+    assert window._upcoming.text() == "LRCLIB asked this app to slow down · album match"
+
+    window._retry_button.click()
+    settled(window)
+
+    assert len(service.asked) == asked, "a request went out during the pause"
+    assert window._upcoming.text() == "waiting, as LRCLIB asked"
+    # And the refusal is not counted against the service: it never reached
+    # it. What holds the retries off is the pause itself.
+    assert window._view_model.failures == 0
+    # What holds the retries off instead is the pause itself, carried back
+    # as what is LEFT of it rather than what it started as: the refusal
+    # happened a moment after the 429, and the window waits from now.
+    assert 590.0 < window._view_model.retry_interval() <= 600.0
+
+
+# -- the rest of the album, before anyone asks for it ----------------------
+
+
+@pytest.fixture
+def warming(monkeypatch):
+    """Give ``WarmTask`` its body back, and make its two waits short.
+
+    The delay before it starts and the gap between its requests are both
+    real time on real threads. That they are honoured at all is asserted in
+    test_lyrics_provider.py against a recorded sleep; what is under test
+    here is the wiring — the timer, the worker, the provider and the
+    requests actually reaching the wire — so the waits are shortened rather
+    than sat through.
+    """
+    monkeypatch.setattr(w.WarmTask, "run", REAL_WARM_RUN)
+    monkeypatch.setattr(w, "_WARM_DELAY_MS", 1)
+    monkeypatch.setattr(lp, "WARM_REQUEST_GAP_SECONDS", 0.01)
+
+
+def album_search(*names):
+    return (200, json.dumps([{"trackName": name} for name in names]).encode())
+
+
+def track(title, duration=214.0):
+    return (200, json.dumps({
+        "trackName": title,
+        "artistName": SONG["artist"],
+        "albumName": SONG["album"],
+        "duration": duration,
+        "syncedLyrics": SYNCED_LRC,
+        "plainLyrics": None,
+    }).encode())
+
+
+def warmed(window, seconds=5.0):
+    """Pump the loop until the album warm has finished its work."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        APP.processEvents()
+        if window._provider.album_is_warm(window._current_snapshot):
+            APP.processEvents()
+            return
+        time.sleep(0.005)
+    raise AssertionError("the album was never warmed")
+
+
+def test_a_song_starting_quietly_fetches_the_rest_of_its_album(
+    make_window, lrclib, spotify, fetching, warming
+):
+    """The whole point of warming, driven from the only place it can start:
+    a song began, its own lookup landed, and some seconds later the app
+    asks LRCLIB about the tracks it has not been asked for yet.
+
+    One search for the names and one request per name, which is the shape
+    LRCLIB's own guidance for batch work asks for.
+    """
+    # Track routes first, because first match wins and every warm request
+    # carries album_name= too: the album match is the LEAST specific of
+    # these, not the most.
+    service = lrclib(
+        ("track_name=Second+Song", track("Second Song")),
+        ("track_name=Third+Song", track("Third Song")),
+        ("api/search", album_search("Blue Hour", "Second Song", "Third Song")),
+        ("album_name=", (200, SYNCED_BODY)),
+    )
+    window = make_window()
+    play(window, spotify)
+    assert window._view_model.display().mode is Mode.SYNCED
+
+    warmed(window)
+
+    assert len(service.asked_for("api/search")) == 1, "the names were not asked for"
+    # The song that is playing is not asked about again: its own lookup has
+    # just run, and warming is for the tracks nobody has asked for. One
+    # request for it, and that one is its own — the warm's requests carry
+    # no duration, because the duration of a track nobody has played is
+    # exactly what this app does not know.
+    assert len(service.asked_for("track_name=Blue+Hour&")) == 1
+    assert len(service.asked_for("track_name=Second+Song")) == 1
+    assert len(service.asked_for("track_name=Third+Song")) == 1
+
+
+def test_a_warmed_track_plays_with_nothing_on_the_wire(
+    make_window, lrclib, spotify, fetching, warming
+):
+    """What an outage would look like afterwards. The second track's lyrics
+    are already on disk, so the window fills without a request at all.
+    """
+    service = lrclib(
+        ("track_name=Second+Song&artist_name=Someone&album_name=",
+         track("Second Song")),
+        ("api/search", album_search("Blue Hour", "Second Song")),
+        ("album_name=", (200, SYNCED_BODY)),
+    )
+    window = make_window()
+    play(window, spotify)
+    warmed(window)
+    asked = len(service.asked)
+
+    second = make_window()
+    spotify.song = {**SONG, "uri": "spotify:track:9Zz", "title": "Second Song"}
+    play(second, spotify, position=2.0)
+
+    assert second._view_model.display().mode is Mode.SYNCED
+    assert second._current.text() == "first line"
+    assert len(service.asked) == asked, "a warmed track went to the network"
+
+
+def test_nothing_is_warmed_while_the_service_is_failing(
+    make_window, lrclib, spotify, fetching, warming
+):
+    """Speculative requests are the last thing to send at a service that
+    cannot answer the ones somebody is waiting for."""
+    service = lrclib(("album_name=", (503, b"")))
+    window = make_window()
+    play(window, spotify)
+    assert window._view_model.display().mode is Mode.ERROR
+    failed = len(service.asked)
+
+    for _ in range(40):  # well past the warm delay
+        APP.processEvents()
+        time.sleep(0.005)
+
+    assert len(service.asked) == failed, "the app warmed during an outage"
+    assert service.asked_for("api/search") == []

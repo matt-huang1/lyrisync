@@ -8,6 +8,7 @@ it — and no documented cleanup step may point at it.
 
 TIER = "unit"  # Qt-free logic, called directly
 
+import ast
 import re
 from pathlib import Path
 
@@ -179,7 +180,37 @@ def test_only_save_user_sync_ever_writes_to_the_directory():
         if "write_text" in path.read_text(encoding="utf-8")
     }
     assert writes == {"lyrics_provider.py", "artwork.py"}
-    assert source.count("write_text") == 2  # the cache entry, and this one
+
+    # Which functions write, rather than how many writes there are. A count
+    # was what this asserted first, and a count is a number somebody
+    # updates: the album warm added two writers and the honest question was
+    # never "are there still two" but "is either of them this one".
+    tree = ast.parse(source)
+    writers = {
+        function.name
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "write_text"
+    }
+    assert writers == {
+        "save_user_sync",  # the user's own work, and the only one that is
+        "_write_cache",    # the cache entry for a track that played
+        "_write_warm",     # one track of an album fetched ahead of time
+        "warm_album",      # the note that says an album has been warmed
+    }
+    # And the sharper half: exactly one of those four knows the path that
+    # leads into .user_syncs/.
+    reaches = {
+        function.name
+        for function in ast.walk(tree)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute) and node.attr == "user_sync_path"
+    }
+    assert reaches == {"save_user_sync", "has_user_sync", "read_user_sync"}
 
 
 def test_the_artwork_cache_cannot_reach_the_user_sync_directory():

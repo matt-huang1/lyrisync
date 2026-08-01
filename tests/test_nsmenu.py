@@ -88,6 +88,37 @@ def test_the_status_item_is_created_through_the_same_door():
     assert callers == {"_appkit"}
 
 
+def test_the_tick_has_exactly_one_writer():
+    """"Nothing checks or unchecks an entry from a click" is a claim about
+    where ``setState_`` is called, and this is the only test that can make
+    it true rather than describe it.
+
+    Both call sites are inside ``apply`` — one for a toggle, one through
+    ``_tick_option`` for a choice — and both read what to write off the
+    model. The click path (``fire_`` → ``_fired`` → ``Menu.trigger``) never
+    appears here, which is the property: a tick moves because the app's
+    state moved and said so, never because somebody clicked it.
+
+    Structural for the reason the door above is: a third writer added later
+    would pass every behavioural test in this file, because a tick that
+    sets itself agrees with the refresh in every case EXCEPT the one where
+    the handler refused to do the thing.
+    """
+    tree = ast.parse(Path(nsmenu.__file__).read_text(encoding="utf-8"))
+    writers = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "setState_"
+            ):
+                writers.add(function.name)
+    assert writers == {"apply", "_tick_option"}
+
+
 # -- no door at all --------------------------------------------------------
 
 

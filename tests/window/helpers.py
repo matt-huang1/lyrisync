@@ -74,9 +74,15 @@ def snapshot(
     )
 
 
-def load(window, lyrics, track_id="t1"):
+def load(window, lyrics, track_id="t1", ok=True, failure=None):
+    """A song, and the answer its lookup came back with.
+
+    ``ok=False`` is the failing answer, and it takes a reason for the same
+    purpose the real path does: the window offers the ⓘ only when there is
+    something behind it, so a test about the reveal has to hand one over.
+    """
     window._on_track_change(snapshot(track_id=track_id))
-    window._on_fetch_finished(track_id, lyrics, True)
+    window._on_fetch_finished(track_id, lyrics, ok, failure)
     window._title_card_until = 0.0  # skip the 2s "song announces itself" card
     window._render()
     APP.processEvents()
@@ -303,6 +309,91 @@ def shown(window):
     window.show()
     APP.processEvents()
     return window
+
+
+# -- a press Qt routes -----------------------------------------------------
+#
+# Moved here when a second file needed it: test_window_press.py asks which
+# control a press at a point reaches, and test_window_fetch.py needs the
+# same machinery to press the two controls beside a failed lookup. Sending
+# to a widget names the receiver, which is the one thing a hit-testing bug
+# gets wrong, so both of them send to the top-level QWindow and let Qt
+# choose.
+
+
+def press_through(window, point):
+    """Press and release at a window-local point, hit-tested by Qt.
+
+    Delivered to ``windowHandle()``, never to a widget: sending to the
+    widget names the receiver, which is the whole of what needs proving
+    wrong. This is also why the window is shown first, since a widget with
+    no window handle has nothing to route through.
+    """
+    handle = window.windowHandle()
+    assert handle is not None, "the window must be shown to be pressed on"
+    globally = QPointF(window.mapToGlobal(point))
+    for kind, buttons in (
+        (QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+    ):
+        APP.sendEvent(
+            handle,
+            QMouseEvent(
+                kind,
+                QPointF(point),
+                globally,
+                Qt.MouseButton.LeftButton,
+                buttons,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+    APP.processEvents()
+
+
+class PressRecord:
+    """What a press at a point did: whether the control acted, and whether
+    the window took it for a drag instead.
+
+    Both halves matter and neither implies the other. A control that acted
+    is not proof the window kept its hands off, and a window that started
+    no drag is not proof anything was pressed.
+    """
+
+    def __init__(self, window, button):
+        self._window = window
+        self._button = button
+        self.acted = 0
+        self.dragged = 0
+        self._original = type(window).mousePressEvent
+
+    def __enter__(self):
+        record = self
+
+        def spy(window, event):
+            record.dragged += 1
+            return record._original(window, event)
+
+        # On the type, not the instance: a QWidget's event handlers are
+        # looked up on the class, so an instance attribute would never be
+        # called and the drag would go unrecorded.
+        type(self._window).mousePressEvent = spy
+        self._connection = self._button.clicked.connect(self._acted)
+        return self
+
+    def _acted(self, *_):
+        self.acted += 1
+
+    def __exit__(self, *_):
+        type(self._window).mousePressEvent = self._original
+        self._button.clicked.disconnect(self._connection)
+        return False
+
+
+def pressing(window, button):
+    """Press at the centre of a control and say what happened."""
+    with PressRecord(window, button) as record:
+        press_through(window, button.geometry().center())
+    return record
 
 
 def finish_fit(window):

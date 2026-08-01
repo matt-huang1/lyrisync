@@ -39,6 +39,11 @@ def no_real_world(monkeypatch):
     when the test tore the window down. Tests that want lyrics call
     ``load()``, which hands them over as if the fetch had returned.
 
+    WarmTask is on the list for a sharper version of the same reason: it
+    makes a request PER TRACK on the album, sleeping between them, so left
+    alone one window test would leave a worker asking LRCLIB questions for
+    the next several seconds of the run.
+
     detect_voice is stubbed for a second reason on top of the `say`
     subprocess: unstubbed it answers True on a Mac and False on the Linux
     runner, so the speech paths would be covered locally and skipped in CI
@@ -64,7 +69,7 @@ def no_real_world(monkeypatch):
 
     monkeypatch.setattr(w.MonitorThread, "run", fake_run)
     for task in (w.PlayerCommandTask, w.SeekTask, w.SpeakTask, w.FetchTask,
-                 w.ArtworkTask):
+                 w.ArtworkTask, w.WarmTask):
         monkeypatch.setattr(task, "run", lambda self: None)
     monkeypatch.setattr(w, "detect_voice", lambda: True)
     monkeypatch.setattr(w.hotkey, "_carbon", lambda: None)

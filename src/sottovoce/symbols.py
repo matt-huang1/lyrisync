@@ -51,6 +51,18 @@ WHY_SYMBOL = "info.circle"
 # already documents.
 WHY_FALLBACK_GLYPH = "ⓘ"
 
+# The system's glyph for "ask again", used beside the reason a lookup
+# failed. Available since macOS 11, like every symbol here.
+RETRY_SYMBOL = "arrow.clockwise"
+
+# Its text fallback. U+27F3 is a gapped circular arrow and renders
+# monochrome from the system font. Deliberately not the loop button's
+# U+21BB, which means something else on this window: the two never appear
+# together — looping needs synced timestamps and this needs a failed
+# lookup — but a control that borrowed another control's glyph would be
+# wrong the first time those two facts stopped being exclusive.
+RETRY_FALLBACK_GLYPH = "⟳"
+
 # NSFont weights, as used by NSImageSymbolConfiguration.
 _WEIGHT_REGULAR = 5.0
 

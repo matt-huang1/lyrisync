@@ -10,6 +10,7 @@ from sottovoce.sync_session import (
     interpolated_position,
     sync_targets,
     sync_targets_from_lines,
+    targets_from_paste,
 )
 
 
@@ -42,6 +43,49 @@ def test_sync_targets_from_lines_drops_the_same_blanks():
     assert sync_targets_from_lines(["one", "", " ", "two"]) == ["one", "two"]
     assert sync_targets_from_lines(iter([" padded "])) == ["padded"]
     assert sync_targets_from_lines([]) == []
+
+
+# -- lyrics somebody pasted in ---------------------------------------------
+
+
+def test_pasted_lyrics_are_tap_targets_like_any_others():
+    """The ordinary case, and it must stay ordinary: what a person pastes
+    is words, and words become targets by the same rule plain lyrics do."""
+    assert targets_from_paste(PLAIN) == ["First line", "Second line", "Third line"]
+    assert targets_from_paste("") == []
+
+
+def test_a_pasted_lrc_file_loses_its_timestamps_and_keeps_its_words():
+    """What people have to hand is frequently a .lrc from somewhere. Left
+    alone, every line of the pass would read "[00:12.34] words" and the
+    sync saved afterwards would carry two timestamps in front of one line.
+    """
+    assert targets_from_paste(
+        "[00:12.34] first line\n[01:05.00]second line\n"
+    ) == ["first line", "second line"]
+
+
+def test_several_stamps_on_one_line_all_go():
+    """A chorus in an LRC file carries a stamp per repeat."""
+    assert targets_from_paste("[00:12.00][00:55.30] chorus\n") == ["chorus"]
+
+
+def test_metadata_tags_are_not_lines_anybody_sings():
+    """A pass that made the user tap through four of these before the
+    first lyric is one they would abandon."""
+    pasted = "[ar:Someone]\n[ti:A Song]\n[by:whoever]\n[00:01.00] the words\n"
+    assert targets_from_paste(pasted) == ["the words"]
+
+
+def test_a_bracket_inside_a_line_is_left_alone():
+    """Only a stamp at the START of a line is structure. A bracket in the
+    middle of a lyric is somebody's punctuation, and guessing further
+    about a person's own words is how a sync loses the line they were
+    waiting for."""
+    assert targets_from_paste("she said [pause] nothing\n") == [
+        "she said [pause] nothing"
+    ]
+    assert targets_from_paste("(chorus) again\n") == ["(chorus) again"]
 
 
 # -- stamp / undo / complete ------------------------------------------------

@@ -187,10 +187,95 @@ Only **definitive** answers are cached:
   a negative result, so the app stops asking.
 - A network error, a timeout, a 5xx — **never** cached. It is not an
   answer about the song; it is an answer about the network. These surface
-  as a retry state in the window and re-attempt every 30 seconds.
+  as a retry state in the window and are re-attempted on the schedule
+  below.
 
 Conflating those two is how an app ends up permanently convinced a song
 has no lyrics because of one bad minute of Wi-Fi.
+
+## How often "will retry" retries
+
+The first retry is 30 seconds, which is what it has always been: most
+failures are a blip and the promise on screen should be answered at that
+speed. After that the interval **doubles** and stops at five minutes:
+
+| consecutive failures | 1 | 2 | 3 | 4 | 5+ |
+|---|---|---|---|---|---|
+| wait | 30s | 60s | 2m | 4m | 5m |
+
+The reason is what a stuck song used to cost. At a flat 30 seconds a
+window left on a failing track through a three hour outage made **360**
+requests of a free, donation-funded service that was already having a bad
+day, every one of them asking the same question and getting the same
+answer. On this schedule it makes **38**. The saving holds at other
+lengths — 14 against 120 over an hour, 98 against 960 over eight.
+
+The **ceiling is five minutes** because of how long songs are, not because
+it is a round number. A track change re-attempts immediately whatever the
+schedule says, so the ceiling only ever governs a song left on screen: of
+69 tracks across 5 real albums the median is 232 seconds and 88% run under
+300, so for seven songs in eight the next track gets there first.
+
+**Only an answer from LRCLIB resets the count.** A cache hit, one of your
+own syncs and a warmed track are all successes, and none of them is
+evidence that the service is back — during an outage every song you have
+played before still answers instantly, and a counter that reset on those
+would be back to 30 seconds on every uncached track.
+
+The count is also not reset by changing track or stopping playback. An
+outage is not a property of the song on screen.
+
+### When LRCLIB asks for a pause
+
+LRCLIB's API documentation asks callers to honour `Retry-After` on a 429
+and says that ignoring it may result in a temporary ban. So a 429 starts a
+**hold**, and while it runs *nothing* leaves the app: not a retry, not a
+new track's first lookup, not the album warm, and not the retry control
+below. It is checked at the single point every request goes through.
+
+Only the seconds form of the header is read. The date form would mean
+trusting your clock to agree with theirs, and a skew turns "wait 30
+seconds" into a pause of hours or none at all; a header the app cannot
+read is treated as no header, and it still backs off on its own schedule.
+
+A lookup the app refuses this way is shown as a failure — there are still
+no lyrics — but it is **not** counted as one of theirs. It never reached
+them, and counting it would grow the backoff on the strength of the
+backoff.
+
+## The rest of the album, before you get to it
+
+When a track starts and its own lookup has landed, the app quietly fetches
+lyrics for the other tracks on the same album, so that a later outage has
+less to be noticeable about. It never blocks anything: it runs on a worker
+five seconds later, and nothing waits for the result.
+
+Spotify's scripting dictionary describes the *current* track and nothing
+else, so the track list has to come from LRCLIB too. One `search` for the
+album gives the names; one `get` per name gives the lyrics.
+
+Measured against four real albums (47 tracks, with the track listings
+taken from the iTunes catalogue): about **40% of an album** ends up warm
+and usable, for one search and roughly nineteen small requests, paid once
+per album ever. Serving the search's own records instead would cost one
+request and cover 19%, because the durations in a search hit are
+frequently a different recording's.
+
+A warmed track is only used if its duration matches the track that
+actually plays, to within the two seconds LRCLIB's own exact endpoint
+matches on — it is standing in for the album match, so it has to be as
+precise as one. Three of twenty warmed tracks failed that check in the
+measurement, and those fall through to the normal chain.
+
+The store can say *yes* and it can say *nothing*. It can never say "this
+track has no lyrics": it is a guess made without the track in hand, and a
+guess may not stop the real question being asked. It lives inside
+`.lyrics_cache/`, so clearing the cache clears it too.
+
+Warming is polite by construction. Requests go out one at a time with
+350ms between them, which is the middle of the band LRCLIB's documentation
+asks for; one album at a time; once per album ever; a single failure ends
+that album; and none of it runs at all while the service is failing.
 
 ## Your syncs are not cache
 
@@ -272,6 +357,13 @@ already.
 | nothing came back in time | `LRCLIB did not answer in time · search` |
 | the socket never got there | `could not reach lrclib.net · title and artist` |
 | an answer arrived and was not JSON | `LRCLIB's answer could not be read · search` |
+| they asked us to slow down | `LRCLIB asked this app to slow down · album match` |
+| we are obeying that request | `waiting, as LRCLIB asked` |
+
+429 gets a sentence of its own because it is the one status the app *does*
+something about rather than only reports. The last row has no attempt on
+it, and that is deliberate: a request the app declined to make belongs to
+no link of the chain, and would have been declined at every one equally.
 
 The attempt is stamped **on the way past**: `_fetch_json` makes a request
 and does not know which link of the chain it is, `_fetch` does, and
@@ -304,11 +396,28 @@ message at one width and stranded at every other.
 — where the laid-out width *is* the row and the control goes to the button
 gutter.
 
-The reveal survives the 30-second retry (which takes the mode ERROR →
-FETCHING → ERROR) and not a track change. Hiding the reason under somebody
+The reveal survives a retry (which takes the mode ERROR → FETCHING →
+ERROR) and not a track change. Hiding the reason under somebody
 who had just asked for it would make the control feel broken; a new song is
 a different failure or none at all.
 
 **A track that genuinely has no lyrics offers nothing to click.** It says
 "no lyrics found", plainly, and that difference is the point of the whole
 thing.
+
+### Asking again, now
+
+Beside the *reason* — not beside the message — there is a retry control.
+The placement is the argument: the message already says "will retry" and
+means it, so a button next to that sentence would be inviting you to do
+the thing the app has just promised to do for you. Beside the reason it is
+for somebody who opened the explanation, read it, and knows something the
+schedule does not: the Wi-Fi is back, the VPN is off.
+
+Pressing it asks immediately and takes the interval back to 30 seconds. If
+you were wrong, the next failure starts where it would have started
+anyway.
+
+It cannot waive a pause LRCLIB asked for. That is a condition of being
+allowed to ask at all rather than a politeness of ours, so the press goes
+out, is refused before a socket is opened, and the reason says so.

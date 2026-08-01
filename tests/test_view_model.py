@@ -1,7 +1,9 @@
 TIER = "unit"  # Qt-free logic, called directly
 
+from sottovoce.failure import HELD, FetchFailure
 from sottovoce.lyrics_provider import TrackLyrics
 from sottovoce.player_monitor import PlaybackState, PlayerSnapshot
+from sottovoce import backoff
 from sottovoce.view_model import RETRY_INTERVAL_SECONDS, LyricsViewModel, Mode
 
 
@@ -377,15 +379,20 @@ def test_error_retries_after_interval():
     assert vm.display().mode is Mode.FETCHING  # retry in flight
     assert vm.retry_due(100.0 + RETRY_INTERVAL_SECONDS + 1) is False  # no double-fire
 
-    # Second failure re-arms the clock from the new failure time.
+    # Second failure re-arms the clock from the new failure time, and at
+    # the interval the SECOND failure earns rather than the first one's.
+    # backoff.py holds the schedule and the measurement behind it.
+    second = backoff.delay(2)
     vm.fetch_completed("trackA", None, ok=False, now=140.0)
-    assert vm.retry_due(140.0 + RETRY_INTERVAL_SECONDS - 1) is False
-    assert vm.retry_due(140.0 + RETRY_INTERVAL_SECONDS) is True
+    assert vm.retry_due(140.0 + RETRY_INTERVAL_SECONDS) is False, "still the 30s one"
+    assert vm.retry_due(140.0 + second - 1) is False
+    assert vm.retry_due(140.0 + second) is True
 
-    # Success ends the retry loop.
+    # Success ends the retry loop, and takes the schedule back to the start.
     vm.fetch_completed("trackA", SYNCED)
     assert vm.display().mode is Mode.SYNCED
     assert vm.retry_due(1000.0) is False
+    assert vm.failures == 0
 
 
 def test_retry_not_due_in_other_modes():
@@ -820,3 +827,192 @@ def test_a_song_with_no_lyrics_says_so_rather_than_waiting_out_the_card():
     vm.fetch_completed("trackA", None)
 
     assert card_yields(vm.display()) is True
+
+
+# -- what the retry schedule counts ----------------------------------------
+
+
+def test_only_an_answer_from_lrclib_resets_the_schedule():
+    """The distinction the backoff stands on. During an outage every song
+    the user has played before still answers instantly from the cache, and
+    a counter that reset on those would put the interval back to 30
+    seconds on every uncached track: a backoff that stops backing off
+    exactly when somebody is listening to music.
+    """
+    vm = LyricsViewModel()
+    for track in ("t1", "t2", "t3"):
+        vm.track_changed(snapshot(track_id=track))
+        vm.fetch_completed(track, None, ok=False, now=0.0)
+    assert vm.failures == 3
+
+    # A cached hit. It succeeded, and it says nothing about the service.
+    vm.track_changed(snapshot(track_id="t4"))
+    vm.fetch_completed("t4", SYNCED, from_service=False)
+    assert vm.failures == 3
+
+    # And one LRCLIB actually answered.
+    vm.track_changed(snapshot(track_id="t5"))
+    vm.fetch_completed("t5", SYNCED, from_service=True)
+    assert vm.failures == 0
+
+
+def test_a_lookup_refused_by_our_own_pause_is_not_a_failure_of_theirs():
+    """A HELD failure never opened a socket. Counting it would grow the
+    backoff on the strength of the backoff, and the interval would run away
+    from the user while LRCLIB sat there healthy."""
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed(
+        "trackA", None, ok=False, now=0.0,
+        failure=FetchFailure(kind=HELD, retry_after=45.0),
+    )
+
+    assert vm.display().mode is Mode.ERROR
+    assert vm.failures == 0
+    # But the pause itself is still honoured: it floors the interval even
+    # though the failure behind it earned nothing.
+    assert vm.retry_interval() == 45.0
+    assert vm.retry_due(30.0) is False
+    assert vm.retry_due(45.0) is True
+
+
+def test_the_failure_count_survives_the_player_being_stopped():
+    """An outage is not a fact about the song on screen, so putting the
+    song away does not end it. _reset clears the display and leaves this."""
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None, ok=False, now=0.0)
+    vm.fetch_completed("trackA", None, ok=False, now=60.0)
+    assert vm.failures == 2
+
+    vm.track_changed(
+        PlayerSnapshot(state=PlaybackState.STOPPED, track_id=None, title="")
+    )
+
+    assert vm.display().mode is Mode.IDLE
+    assert vm.failures == 2
+
+
+# -- asking again by hand --------------------------------------------------
+
+
+def test_retry_now_asks_at_once_and_puts_the_schedule_back():
+    """Somebody pressing it knows something the schedule does not. If they
+    are wrong the next failure starts at 30 seconds, which is where it
+    would have started anyway."""
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    for at in (0.0, 60.0, 180.0, 420.0):
+        vm.fetch_completed("trackA", None, ok=False, now=at)
+    assert vm.failures == 4
+    assert vm.retry_interval() == 240.0
+
+    assert vm.retry_now() is True
+
+    assert vm.display().mode is Mode.FETCHING
+    assert vm.failures == 0
+    vm.fetch_completed("trackA", None, ok=False, now=500.0)
+    assert vm.retry_interval() == RETRY_INTERVAL_SECONDS
+
+
+def test_retry_now_does_nothing_where_there_is_nothing_to_retry():
+    """It is only reachable from beside a failure's reason, and a mode that
+    is not ERROR has none. A retry that dispatched a fetch anyway would be
+    a second lookup for a song that already has its lyrics."""
+    vm = LyricsViewModel()
+    assert vm.retry_now() is False  # idle
+    vm.track_changed(snapshot())
+    assert vm.retry_now() is False  # fetching
+    vm.fetch_completed("trackA", SYNCED)
+    assert vm.retry_now() is False  # synced
+    vm.fetch_completed("trackA", None)
+    assert vm.retry_now() is False  # genuinely no lyrics
+
+
+# -- syncing lyrics the user brought ---------------------------------------
+
+
+def test_pasting_is_offered_exactly_where_there_are_no_lines_to_stamp():
+    """The two ways into a pass are mutually exclusive by construction, and
+    this is where that is decided. Both visible at once would be two
+    entries answering one question about the same song."""
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    assert vm.paste_sync_offered is False  # fetching
+    assert vm.sync_menu_entry(False) is None
+
+    vm.fetch_completed("trackA", None, ok=False, now=0.0)
+    assert vm.paste_sync_offered is True
+    assert vm.sync_menu_entry(False) is None
+
+    vm.fetch_completed("trackA", None)
+    assert vm.paste_sync_offered is True, "no lyrics is the other half of the gap"
+
+    vm.fetch_completed("trackA", PLAIN)
+    assert vm.paste_sync_offered is False
+    assert vm.sync_menu_entry(False) == "Sync this song"
+
+
+def test_a_pass_from_pasted_lines_runs_like_any_other():
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None, ok=False, now=0.0)
+
+    assert vm.begin_sync_from(["one", "two"]) is True
+
+    assert vm.display().mode is Mode.SYNCING
+    assert vm.sync_session.lines == ["one", "two"]
+    assert vm.display().progress == "0 / 2 lines"
+
+
+def test_cancelling_a_pasted_pass_goes_back_to_saying_why_there_are_none():
+    """Where cancelling lands is the mode it started from, which for this
+    one is the failure that made it necessary. Dropping to PLAIN would be
+    claiming lyrics the app does not have."""
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None, ok=False, now=0.0)
+    vm.begin_sync_from(["one"])
+
+    assert vm.end_sync() is True
+
+    assert vm.display().mode is Mode.ERROR
+    assert vm.display().current == "lyrics unavailable, will retry"
+
+
+def test_pasted_lines_cannot_overwrite_lyrics_that_are_already_there():
+    """The gate is paste_sync_offered and it is asked here rather than
+    trusted to the menu: a song with lyrics has its own way into a pass,
+    and this one must not become a second way to replace them."""
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", SYNCED)
+
+    assert vm.begin_sync_from(["something else"]) is False
+
+    assert vm.display().mode is Mode.SYNCED
+    assert vm.sync_session is None
+
+
+def test_a_pass_over_nothing_is_refused():
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None, ok=False, now=0.0)
+    assert vm.begin_sync_from([]) is False
+    assert vm.display().mode is Mode.ERROR
+
+
+def test_a_retry_landing_under_a_pasted_pass_does_not_tear_it_down():
+    """The retry timer is still running while somebody taps: a pass that
+    vanished when the network came back would lose the work they were
+    halfway through."""
+    vm = LyricsViewModel()
+    vm.track_changed(snapshot())
+    vm.fetch_completed("trackA", None, ok=False, now=0.0)
+    vm.begin_sync_from(["one", "two"])
+    vm.sync_session.stamp(5.0)
+
+    assert vm.fetch_completed("trackA", PLAIN) is False
+
+    assert vm.display().mode is Mode.SYNCING
+    assert vm.sync_session.index == 1

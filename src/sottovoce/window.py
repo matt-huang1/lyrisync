@@ -15,6 +15,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -104,6 +105,7 @@ from sottovoce.geometry import (
     text_gutter,
 )
 from sottovoce.failure import UNKNOWN, FetchFailure
+from sottovoce.paste_window import PasteWindow
 from sottovoce.gestures import opacity_step, scroll_step, wheel_action
 from sottovoce import flight
 from sottovoce import frontmost
@@ -132,6 +134,7 @@ from sottovoce.menu import (
     FORGET_POSITIONS,
     Menu,
     OPEN_AT_LOGIN,
+    PASTE_SYNC,
     POSITION_LIST,
     POSITION_STATUS,
     PROXIMITY,
@@ -174,6 +177,8 @@ from sottovoce.speech import (
 from sottovoce.sync_session import interpolated_position
 from sottovoce import symbols
 from sottovoce.symbols import (
+    RETRY_FALLBACK_GLYPH,
+    RETRY_SYMBOL,
     SPEAK_FALLBACK_GLYPH,
     SPEAK_SYMBOL,
     WHY_FALLBACK_GLYPH,
@@ -409,6 +414,15 @@ _EXIT_CONFIRM_MS = 4000
 _EXIT_CONFIRM_TEXT = "discard this sync? tap ✕ again"
 _DOTS_FRAMES = ["·", "· ·", "· · ·"]
 _RETRY_TICK_MS = 1000
+# How long after a song's own lookup lands before the rest of its album is
+# fetched. SET BY EYE and nothing is measured against it, which is worth
+# saying rather than dressing up: it exists to put the quiet requests
+# clear of the ones somebody is waiting on, and everything it has to clear
+# is already over by then — the title card is 2s, the artwork fetch is
+# started at the same moment as the lyrics and is not waited on by
+# anything either. Longer would only mean warming less of an album the
+# user is halfway through.
+_WARM_DELAY_MS = 5000
 
 
 def _widget_name(widget) -> str:
@@ -475,12 +489,13 @@ QScrollArea#plainScroll QScrollBar::add-line:vertical,
 QScrollArea#plainScroll QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollArea#plainScroll QScrollBar::add-page:vertical,
 QScrollArea#plainScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
-QPushButton#loop, QPushButton#speak, QPushButton#why {{
+QPushButton#loop, QPushButton#speak, QPushButton#why, QPushButton#retry {{
     color: {rgba(palette.control_idle)}; background: transparent; border: none;
     border-radius: {round(6 * scale)}px;
     font-size: {round(15 * scale)}px;
 }}
-QPushButton#loop:hover, QPushButton#speak:hover, QPushButton#why:hover {{
+QPushButton#loop:hover, QPushButton#speak:hover, QPushButton#why:hover,
+QPushButton#retry:hover {{
     color: {rgba(palette.control_hover)}; background: {rgba(palette.control_wash)};
 }}
 QPushButton#why:checked {{ color: {rgba(palette.control_engaged)}; }}
@@ -809,14 +824,20 @@ class ArtworkTask(QRunnable):
 
 
 class _FetchSignals(QObject):
-    # track_id, TrackLyrics | None, ok, FetchFailure | None
-    finished = Signal(str, object, bool, object)
+    # track_id, TrackLyrics | None, ok, FetchFailure | None, from_service
+    finished = Signal(str, object, bool, object, bool)
 
 
 class FetchTask(QRunnable):
     """Runs one lyrics lookup off the UI thread. Failures are logged and
     reported as ok=False — never silently converted to "no lyrics" — and
-    carry what went wrong, so the window can answer "why" if asked."""
+    carry what went wrong, so the window can answer "why" if asked.
+
+    A success also reports whether LRCLIB is what answered. The retry
+    schedule is the only thing that reads it and view_model.fetch_completed
+    says why it has to: a cache hit is not evidence that the service is
+    back.
+    """
 
     def __init__(self, provider: LyricsProvider, snapshot: PlayerSnapshot) -> None:
         super().__init__()
@@ -826,9 +847,10 @@ class FetchTask(QRunnable):
 
     def run(self) -> None:
         track_id = self._snapshot.track_id
-        lyrics, ok, why = None, False, None
+        lyrics, ok, why, from_service = None, False, None, False
         try:
-            lyrics = self._provider.get_lyrics(self._snapshot)
+            answer = self._provider.look_up(self._snapshot)
+            lyrics, from_service = answer.lyrics, answer.from_service
             ok = True
         except LyricsError as exc:
             logger.exception("lyrics fetch failed for %s", track_id)
@@ -841,9 +863,49 @@ class FetchTask(QRunnable):
             # interesting of the two failures.
             why = FetchFailure(kind=UNKNOWN, detail=str(exc))
         try:
-            self.signals.finished.emit(track_id, lyrics, ok, why)
+            self.signals.finished.emit(track_id, lyrics, ok, why, from_service)
         except RuntimeError:
             pass  # app tore down the signal object while we were fetching
+
+
+class WarmTask(QRunnable):
+    """Fetches the rest of the album into the cache, off the UI thread and
+    off everybody's critical path.
+
+    Nothing waits on this and nothing is told when it finishes: a warmed
+    track is only ever noticed by a lookup that finds it there later. That
+    is what lets it sleep between requests, which it must — LRCLIB asks
+    that batch work go out sequentially with a gap, and a gap is real time
+    on a real thread.
+
+    ``stop`` is how shutdown gets its thread back. The album takes several
+    seconds by design, and ``_shutdown`` waits three; without a way to end
+    the sleep this would be the one worker that is always still running.
+    """
+
+    def __init__(
+        self,
+        provider: LyricsProvider,
+        snapshot: PlayerSnapshot,
+        stop: threading.Event,
+    ) -> None:
+        super().__init__()
+        self._provider = provider
+        self._snapshot = snapshot
+        self._stop = stop
+
+    def run(self) -> None:
+        try:
+            self._provider.warm_album(
+                self._snapshot,
+                # Waited on rather than slept through, for the monitor's
+                # reason: a stop set during the gap ends it now instead of
+                # after it.
+                sleep=self._stop.wait,
+                should_stop=self._stop.is_set,
+            )
+        except Exception:  # noqa: BLE001 - nothing is waiting on this
+            logger.exception("album warm failed")
 
 
 class LyricsWindow(QWidget):
@@ -1253,10 +1315,25 @@ class LyricsWindow(QWidget):
         self._why_shown = False
         self._why_track: Optional[str] = None
 
+        # And the one thing to DO about the reason, which is the only
+        # reason the reason is worth reading twice: ask again now. It lives
+        # beside the failure rather than beside the message, so it appears
+        # only for somebody who has already opened the explanation — the
+        # message itself says "will retry" and means it, and a button next
+        # to that sentence would be inviting people to do the thing the app
+        # has just promised to do for them.
+        self._retry_button = self._make_overlay_button(
+            "retry", RETRY_FALLBACK_GLYPH, "Try again now"
+        )
+        self._retry_button.clicked.connect(self._on_retry_clicked)
+
         # Tap-to-sync. The track key is captured on entry: a same-track
         # re-announcement (metadata settling) must not cancel the pass,
         # only a genuinely different song.
         self._sync_track_key: Optional[tuple] = None
+        # The one window this app has that takes a keyboard, and it exists
+        # only while it is being used. None whenever there is not one.
+        self._paste_window: Optional[PasteWindow] = None
         self._tap_button = self._make_overlay_button(
             "tap", "TAP", "Tap as each line begins"
         )
@@ -1329,6 +1406,18 @@ class LyricsWindow(QWidget):
         self._retry_timer.timeout.connect(self._tick_retry)
         self._retry_timer.start(_RETRY_TICK_MS)
 
+        # Fetching the rest of the album, quietly, so a later outage has
+        # less to be noticeable about. Which album has been asked for, the
+        # snapshot the next warm will run from, and the flag that ends one
+        # early: warming sleeps between its requests, and shutdown has to
+        # be able to interrupt that rather than wait out an album.
+        self._warmed_album: Optional[tuple] = None
+        self._warm_pending: Optional[PlayerSnapshot] = None
+        self._warm_stop = threading.Event()
+        self._warm_timer = QTimer(self)
+        self._warm_timer.setSingleShot(True)
+        self._warm_timer.timeout.connect(self._start_warm)
+
         self._render()
 
     @staticmethod
@@ -1375,12 +1464,22 @@ class LyricsWindow(QWidget):
         self._render()
 
     def _on_fetch_finished(
-        self, track_id: str, lyrics: object, ok: bool, failure: object = None
+        self,
+        track_id: str,
+        lyrics: object,
+        ok: bool,
+        failure: object = None,
+        from_service: bool = True,
     ) -> None:
         # Stale results (track changed while the fetch was in flight) are
         # rejected by the view model; the provider already cached them.
         if self._view_model.fetch_completed(
-            track_id, lyrics, ok, now=time.monotonic(), failure=failure
+            track_id,
+            lyrics,
+            ok,
+            now=time.monotonic(),
+            failure=failure,
+            from_service=from_service,
         ):
             self._release_loop()  # lyrics changed under the loop
             self._render()
@@ -1388,6 +1487,12 @@ class LyricsWindow(QWidget):
             # so how wide it has to be is known. Every other path here is
             # a line change, which deliberately does not.
             self._fit_width()
+        # Asked on every outcome, including a result the view model
+        # rejected as stale: what to warm is decided from the song that is
+        # playing NOW rather than from the answer that just landed, and a
+        # stale answer means a track change has already put a new one
+        # there. Every reason not to warm is inside.
+        self._consider_warming()
 
     def _on_position_update(self, snapshot: PlayerSnapshot) -> None:
         self._last_state = snapshot.state
@@ -1540,11 +1645,57 @@ class LyricsWindow(QWidget):
         return self._view_model.sync_session is not None
 
     def _begin_sync(self) -> None:
-        """Start a sync pass: every pass is a complete run from line one,
-        so the track goes back to 0 and playback is made sure to be
-        running before the first line arrives."""
-        if not self._view_model.begin_sync():
+        """Start a sync pass over the lyrics in hand."""
+        if self._view_model.begin_sync():
+            self._enter_sync()
+
+    def _open_paste_window(self) -> None:
+        """Ask for lyrics the app could not find, in a window that can take
+        a keyboard.
+
+        One at a time: a second press while it is open raises the one that
+        is already there rather than making another, because two boxes both
+        offering to sync the same song is two answers to what the lyrics
+        are. See paste_window.py for why it is a window at all.
+        """
+        # Before either branch, and it is not decoration: an accessory app
+        # is not the active app, and a window shown by one that is not
+        # takes no keyboard at all. See bring_to_front, which measured it.
+        bring_to_front()
+        if self._paste_window is not None:
+            self._paste_window.present()
             return
+        display = self._view_model.display()
+        window = PasteWindow(song=display.header)
+        window.lines_ready.connect(self._on_pasted_lines)
+        window.destroyed.connect(self._on_paste_window_gone)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._paste_window = window
+        window.present()
+
+    def _on_paste_window_gone(self) -> None:
+        self._paste_window = None
+
+    def _close_paste_window(self) -> None:
+        window, self._paste_window = self._paste_window, None
+        if window is not None:
+            window.close()
+
+    def _on_pasted_lines(self, lines) -> None:
+        """The user handed over the words. From here it is an ordinary
+        pass: the same session, the same tap row, the same save into
+        ``.user_syncs/``, and the same reload afterwards — which is what
+        makes this work with no network at all."""
+        if not self._view_model.begin_sync_from(list(lines)):
+            return
+        logger.info("sync pass starting from %d pasted lines", len(lines))
+        self._enter_sync()
+
+    def _enter_sync(self) -> None:
+        """Everything a pass needs once its lines are settled: every pass
+        is a complete run from line one, so the track goes back to 0 and
+        playback is made sure to be running before the first line
+        arrives."""
         self._release_loop()
         self._disarm_sync_exit()
         snapshot = self._current_snapshot
@@ -1698,6 +1849,44 @@ class LyricsWindow(QWidget):
         task = FetchTask(self._provider, snapshot)
         task.signals.finished.connect(self._on_fetch_finished)
         self._pool.start(task)
+
+    # -- the rest of the album, before it is needed -------------------------
+
+    def _consider_warming(self) -> None:
+        """Whether to fetch the rest of this album, and every reason not to.
+
+        Arming a timer rather than starting the work: the point of warming
+        is that nobody is waiting for it, and the moment a lookup lands is
+        the moment somebody just was. See _WARM_DELAY_MS.
+        """
+        snapshot = self._current_snapshot
+        if snapshot is None or not snapshot.album or not snapshot.artist:
+            return
+        album = (snapshot.artist, snapshot.album)
+        if album == self._warmed_album:
+            return  # asked for already, this run
+        if self._view_model.failures:
+            # The service is failing. Speculative requests are the last
+            # thing to send at a service that cannot answer the ones
+            # somebody is waiting for, and the first thing to stop sending
+            # at one that has asked for a pause.
+            return
+        if self._view_model.display().mode in (Mode.ERROR, Mode.FETCHING):
+            return
+        self._warmed_album = album
+        self._warm_pending = snapshot
+        self._warm_timer.start(_WARM_DELAY_MS)
+
+    def _start_warm(self) -> None:
+        """Put the album warm on a worker. One at a time, for ever: this
+        sleeps between requests by design, and two of them would be two
+        albums interleaving their gaps into a stream of requests neither of
+        them agreed to."""
+        snapshot, self._warm_pending = self._warm_pending, None
+        if snapshot is None or self._warm_stop.is_set():
+            return
+        logger.info("warming the rest of %r", snapshot.album)
+        self._pool.start(WarmTask(self._provider, snapshot, self._warm_stop))
 
     def _tick_retry(self) -> None:
         """Honour "will retry": while in ERROR, re-attempt the fetch for
@@ -1975,8 +2164,11 @@ class LyricsWindow(QWidget):
             self._offer_control(self._speak_button, False)
         # Hidden for every mode by default and offered back at the very
         # bottom of this method, which is the only path that can reach
-        # ERROR: every branch between here and there returns.
+        # ERROR: every branch between here and there returns. The retry
+        # goes with it — it belongs to the reason, and the reason belongs
+        # to the failure.
         self._why_button.setVisible(False)
+        self._retry_button.setVisible(False)
         if self._view_model.track_id != self._why_track:
             # A new song asks its own question. The reveal survives the 30s
             # retries (which pass through FETCHING and back) but not a
@@ -2054,6 +2246,11 @@ class LyricsWindow(QWidget):
         offered = display.mode is Mode.ERROR and bool(display.detail)
         self._why_button.setVisible(offered)
         self._why_button.setChecked(self._why_shown)
+        # The retry follows the REASON, not the failure: it is on screen
+        # exactly while the explanation it belongs to is. Set here rather
+        # than only in the branch below, so putting the reason away takes
+        # it with it.
+        self._retry_button.setVisible(offered and self._why_shown)
         if not offered:
             return
         if self._why_shown:
@@ -2062,12 +2259,31 @@ class LyricsWindow(QWidget):
             else:
                 self._upcoming.setText(display.detail)
         self._place_why_button()
+        if self._why_shown:
+            self._place_retry_button()
 
     def _toggle_why(self, shown: bool) -> None:
         """Show the reason, or put it away again. Reversible on purpose:
         this is a thing to glance at, not a state to get stuck in."""
         self._why_shown = shown
         logger.debug("lyrics failure reason %s", "revealed" if shown else "hidden")
+        self._render()
+
+    def _on_retry_clicked(self) -> None:
+        """Ask again now, rather than waiting out the schedule.
+
+        Somebody pressing this knows something the schedule does not — the
+        wifi is back, the VPN is off — so it takes the interval back to the
+        start as well as asking. What it cannot take back is a pause LRCLIB
+        asked for: that request goes out, is refused at the provider's
+        door, and comes back as the reason saying so. See
+        LyricsViewModel.retry_now.
+        """
+        if not self._view_model.retry_now():
+            return
+        logger.info("retry asked for by hand")
+        if self._current_snapshot is not None:
+            self._start_fetch(self._current_snapshot)
         self._render()
 
     def _place_why_button(self) -> None:
@@ -2099,6 +2315,33 @@ class LyricsWindow(QWidget):
             top_left.y() + (self._current.height() - side) // 2,
         )
         self._why_button.raise_()
+
+    def _place_retry_button(self) -> None:
+        """Beside the reason, by the same rule the ⓘ is placed beside the
+        message: measured from the text rather than pinned to a corner.
+
+        The row it follows is whichever row the reason went into, which is
+        the one thing the compact layout changes here — the same fork
+        _render_why takes, for the same reason it takes it.
+        """
+        side = button_side(self._scale)
+        self._retry_button.setFixedSize(side, side)
+        row = self._pron if self._compact_applied else self._upcoming
+        row.ensurePolished()
+        top_left = row.mapTo(self, QPoint(0, 0))
+        advance = QFontMetricsF(row.font()).horizontalAdvance(row.text())
+        self._retry_button.move(
+            beside_centred_text(
+                top_left.x(),
+                row.width(),
+                advance,
+                side,
+                self._scale,
+                self.width(),
+            ),
+            top_left.y() + (row.height() - side) // 2,
+        )
+        self._retry_button.raise_()
 
     def _render_sync_controls(self, display) -> None:
         """The tap row and its status line. The tap bar goes inert while
@@ -2548,6 +2791,7 @@ class LyricsWindow(QWidget):
                 button.setFixedSize(side, side)
             self._apply_speak_icon(side)
             self._apply_why_icon(side)
+            self._apply_retry_icon(side)
             self._place_buttons()
 
     def _apply_motion(self) -> None:
@@ -2638,6 +2882,26 @@ class LyricsWindow(QWidget):
         self._why_button.setIcon(icon)
         self._why_button.setIconSize(icon_size(side))
 
+    def _apply_retry_icon(self, side: int) -> None:
+        """And the same for the one control beside the reason that acts.
+
+        Two states rather than the ⓘ's three: it is not checkable, because
+        there is nothing for it to be in the middle of — a press dispatches
+        a lookup and the window is already in FETCHING before the button
+        could have drawn itself engaged.
+        """
+        icon = symbol_icon(
+            RETRY_SYMBOL,
+            float(icon_size(side).width()),
+            _qcolor(self._palette.control_idle),
+            active=_qcolor(self._palette.control_hover),
+        )
+        if icon is None:
+            return
+        self._retry_button.setText("")
+        self._retry_button.setIcon(icon)
+        self._retry_button.setIconSize(icon_size(side))
+
     def _apply_layout_margins(self) -> None:
         """Side margins reserve the button gutters (geometry.py owns the
         shared math) so wrapped text can never run under a button; during a
@@ -2692,6 +2956,8 @@ class LyricsWindow(QWidget):
             # Placed from the message rather than from a corner, so it has
             # to be re-placed whenever the window's shape changes.
             self._place_why_button()
+        if self._retry_button.isVisibleTo(self):
+            self._place_retry_button()
         for button in (
             self._loop_button,
             self._speak_button,
@@ -2700,6 +2966,7 @@ class LyricsWindow(QWidget):
             self._undo_button,
             self._sync_exit_button,
             self._why_button,
+            self._retry_button,
         ):
             button.raise_()
 
@@ -3748,6 +4015,7 @@ class LyricsWindow(QWidget):
             ("undo", self._undo_button),
             ("sync_exit", self._sync_exit_button),
             ("why", self._why_button),
+            ("retry", self._retry_button),
         )
         rects = []
         for name, button in named:
@@ -4478,10 +4746,11 @@ class LyricsWindow(QWidget):
 
         Nothing here checks or unchecks an entry, and that rule survived
         the move: the handler changes the app's state and the refresh that
-        follows says what the state now is. It is why the QMenu entries
-        were connected to ``triggered`` rather than ``toggled``, and why
-        ``Menu.trigger`` calls the handler with the state the entry is
-        moving to rather than trusting a tick that moved itself.
+        follows says what the state now is. What holds it up is that the
+        tick has exactly ONE writer — ``NativeMenu.apply``, reading the
+        model — and the click path is not it, so ``Menu.trigger`` calls the
+        handler with the state the entry is moving to rather than trusting
+        a tick that moved itself.
         """
         self._menu = Menu()
         self._menu.on(SHOW_LYRICS, self._set_lyrics_visible)
@@ -4505,6 +4774,7 @@ class LyricsWindow(QWidget):
         self._menu.on(FORGET_POSITIONS, self._forget_positions)
         self._menu.on(OPEN_AT_LOGIN, self._set_open_at_login)
         self._menu.on(SYNC, self._begin_sync)
+        self._menu.on(PASTE_SYNC, self._open_paste_window)
         # Straight to the app's quit, so the existing aboutToQuit shutdown
         # (settings saved, monitor joined) runs however quit is reached.
         self._menu.on(QUIT, QApplication.instance().quit)
@@ -4574,6 +4844,7 @@ class LyricsWindow(QWidget):
                 speech_available=self._speech_available,
                 synced=self._view_model.display().mode is Mode.SYNCED,
                 sync_offered=sync_label is not None,
+                paste_sync_offered=self._view_model.paste_sync_offered,
                 login_item_offered=login_item.offered(
                     bundled=self._bundled, status=self._login_status
                 ),
@@ -5329,6 +5600,7 @@ class LyricsWindow(QWidget):
         self._apply_material_appearance()
         self._apply_speak_icon(button_side(self._scale))
         self._apply_why_icon(button_side(self._scale))
+        self._apply_retry_icon(button_side(self._scale))
         # The cover colour survives the switch; what it derives from does
         # not. Re-derived against the new palette, without a fade.
         self._resnap_tint()
@@ -5956,8 +6228,20 @@ class LyricsWindow(QWidget):
         if self._tray is not None:
             self._tray.release()
             self._tray = None
+        # The fifth thing that can still call in, and the only one that is
+        # a window: the paste window holds a connection into this one and
+        # would outlive it, since it is a top-level of its own with no
+        # parent to take it down. Closed here beside the rest.
+        self._close_paste_window()
         self._settle_timer.stop()
         self._pointer_timer.stop()
+        # Before the pool is drained below: the album warm sleeps between
+        # its requests by design, so a worker that was not told to stop
+        # would sit out the whole album inside the three second wait. The
+        # timer goes too, or a warm armed a moment ago starts one during
+        # the teardown.
+        self._warm_timer.stop()
+        self._warm_stop.set()
         self._stop_reveal()
         # Landed rather than stopped, before the save below: a resize
         # abandoned mid-travel would persist a waypoint as the window's
@@ -6000,6 +6284,25 @@ class LyricsWindow(QWidget):
         close_connections()
 
 
+def _nsapp():
+    """The one door onto NSApplication, or None where there is none.
+
+    Two things in this app ask it something — the activation policy at
+    startup, and bringing the app forward for the paste window — and they
+    are the same capability, so they go through one function. Off cocoa or
+    without pyobjc it answers None and both callers do nothing, which is
+    also what keeps the suite from ever activating the developer's app.
+    """
+    if QApplication.platformName() != "cocoa":
+        return None
+    try:
+        from AppKit import NSApplication
+    except ImportError:
+        logger.warning("pyobjc unavailable: NSApplication cannot be reached")
+        return None
+    return NSApplication.sharedApplication()
+
+
 def apply_accessory_policy() -> None:
     """Run as a menu bar accessory: no Dock icon, no Cmd-Tab entry.
 
@@ -6010,15 +6313,10 @@ def apply_accessory_policy() -> None:
     may still treat that show as a regular-app activation. With no Dock
     icon, Quit lives in the menu bar item (and SIGINT).
     """
-    if QApplication.platformName() != "cocoa":
+    shared = _nsapp()
+    if shared is None:
         return
     try:
-        from AppKit import NSApplication
-    except ImportError:
-        logger.warning("pyobjc unavailable: activation policy unchanged")
-        return
-    try:
-        shared = NSApplication.sharedApplication()
         shared.setActivationPolicy_(ACTIVATION_POLICY_ACCESSORY)
         logger.debug(
             "activation policy -> accessory (readback=%d)",
@@ -6026,6 +6324,33 @@ def apply_accessory_policy() -> None:
         )
     except Exception:
         logger.exception("failed to set activation policy")
+
+
+def bring_to_front() -> None:
+    """Make this app the active one, so a window of ours can take the
+    keyboard.
+
+    MEASURED, and it is the reason this function exists at all: under the
+    accessory activation policy, ``show()`` + ``raise_()`` +
+    ``activateWindow()`` leaves the window inactive and the focus widget
+    None. A window nobody can type into is the one thing the paste window
+    may not be, and no headless test can catch it — the offscreen platform
+    reports whatever it likes about focus. Verified by running the real
+    thing under the real policy: False and None before this call, True and
+    the text box after it.
+
+    ``activateIgnoringOtherApps_`` rather than anything gentler because an
+    accessory app has no Dock icon to be activated THROUGH; it is the same
+    thing macOS does for an app whose icon you click, and it is asked for
+    only by an explicit menu command, never on its own.
+    """
+    shared = _nsapp()
+    if shared is None:
+        return
+    try:
+        shared.activateIgnoringOtherApps_(True)
+    except Exception:
+        logger.exception("could not bring the app forward")
 
 
 def main() -> int:

@@ -34,6 +34,20 @@ TIMEOUT = "timeout"        # nothing came back in time
 CONNECTION = "connection"  # the socket never got there
 PAYLOAD = "payload"        # an answer arrived and was not JSON
 UNKNOWN = "unknown"        # anything else, reported rather than guessed at
+# And a fifth, which is the odd one out on purpose: nothing went wrong out
+# there at all. LRCLIB answered a 429 earlier and asked for a pause, and
+# this lookup was refused by this app before a socket was opened. It is a
+# failure from the window's point of view — there are still no lyrics — and
+# it is not a failure of the service, which is a distinction the retry
+# schedule is built on. See ``reached_lrclib``.
+HELD = "held"
+
+# The status that carries an instruction rather than just a complaint.
+# LRCLIB's API documentation asks callers to honour Retry-After on this one
+# and says that ignoring it may result in a temporary ban, which is why it
+# gets a line of its own below rather than falling into the generic HTTP
+# sentence.
+RATE_LIMITED_STATUS = 429
 
 # Where in the fallback chain it happened. The chain's own vocabulary,
 # spelled the way a person would say it rather than as a URL — "album
@@ -51,12 +65,35 @@ class FetchFailure:
     ``attempt`` is empty for a failure that belongs to no single attempt —
     which is a real case, not a defensive one: an error raised before the
     chain is built has nowhere in the chain to point at.
+
+    ``retry_after`` is seconds, and it is LRCLIB's number rather than ours:
+    it is set from the header on a 429, and from what is left of the
+    resulting pause on a lookup this app refused. Everything else leaves it
+    None, which means "our own schedule decides".
     """
 
     kind: str = UNKNOWN
     attempt: str = ""
     status: Optional[int] = None
     detail: str = ""
+    retry_after: Optional[float] = None
+
+
+def reached_lrclib(failure: Optional[FetchFailure]) -> bool:
+    """Whether this failure is evidence about the SERVICE.
+
+    Only ``HELD`` is not. A lookup refused by our own pause never opened a
+    socket, so counting it as a consecutive failure would grow the backoff
+    on the strength of the backoff — the interval would run away from the
+    user while LRCLIB sat there perfectly healthy, waiting out a pause it
+    asked for once.
+
+    The one place this is asked is the retry schedule, and it is a function
+    rather than a field for the reason gates here always give: the boolean
+    is derived from the reason, never recorded beside it, so the two cannot
+    come to disagree about the same failure.
+    """
+    return failure is None or failure.kind != HELD
 
 
 def describe(failure: Optional[FetchFailure]) -> str:
@@ -82,6 +119,14 @@ def describe(failure: Optional[FetchFailure]) -> str:
 
 
 def _what_happened(failure: FetchFailure) -> str:
+    if failure.kind == HELD:
+        return "waiting, as LRCLIB asked"
+    if failure.status == RATE_LIMITED_STATUS:
+        # Named rather than numbered, because this is the one status the
+        # app does something about: a person reading "HTTP 429" learns that
+        # something is wrong, and "asked this app to slow down" tells them
+        # the same thing plus the fact that it is being obeyed.
+        return "LRCLIB asked this app to slow down"
     if failure.kind == HTTP and failure.status is not None:
         return f"LRCLIB answered HTTP {failure.status}"
     if failure.kind == TIMEOUT:

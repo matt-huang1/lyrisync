@@ -1,6 +1,6 @@
 # Testing, and the guards that make it safe
 
-1622 tests, run on every push. The interesting part is not the count — it
+1694 tests, run on every push. The interesting part is not the count — it
 is that the suite is allowed nowhere near anything real.
 
 ## The rule
@@ -128,9 +128,9 @@ tray, shutdown — is tested against a real Qt object tree on the
 
 | tier | what it is | what a failure means | count |
 |---|---|---|---|
-| `unit` | one Qt-free module's own logic, its collaborators stubbed | that module is wrong | 1147 |
-| `integration` | this app's real parts wired to each other, only the outside world faked, entered where a user's actions arrive | the parts disagree | 53 |
-| `qt` | needs a Qt object to answer: the widget tree, a `QSettings` round trip, a painted image | the window is wrong | 422 |
+| `unit` | one Qt-free module's own logic, its collaborators stubbed | that module is wrong | 1198 |
+| `integration` | this app's real parts wired to each other, only the outside world faked, entered where a user's actions arrive | the parts disagree | 60 |
+| `qt` | needs a Qt object to answer: the widget tree, a `QSettings` round trip, a painted image | the window is wrong | 435 |
 
 ```
 pytest -m unit           # 6.8s, no display needed
@@ -181,6 +181,7 @@ otherwise:
 | `test_window_notifications.py` | the yield, and the poll rate |
 | `test_window_compact.py` | the strip's rows and its reveal |
 | `test_window_press.py` | presses Qt routes, rather than presses aimed by hand — `integration` |
+| `test_window_paste.py` | the one window that takes a keyboard |
 | `test_window_drag.py` | dragging and resizing, with Qt deciding which — `integration` |
 | `test_window_fetch.py` | lyrics from the wire to the line on screen — `integration` |
 | `test_window_menu_clicks.py` | a click on a native item, and the state it produces — `integration` |
@@ -206,7 +207,7 @@ Worth knowing rather than worth fixing all at once. A `qt` test that calls
 question the test wrote down; only an `integration` test asks the question
 the app is actually asked.
 
-**Driven all the way in** (the fifty-three):
+**Driven all the way in** (the sixty):
 
 - **The loop's wrap seek, echo practice, and the position a seek lands
   at** — a fake Spotify and a fake clock under the real `PlayerMonitor`,
@@ -221,19 +222,31 @@ the app is actually asked.
   written down as nothing. The user's own sync outranking the network, the
   retry going back out, the second play served from the cache, and
   narration leaving the song it announced alone.
-- **Every menu entry a click can reach** — all nineteen, delivered to the
+- **Every menu entry a click can reach** — all twenty, delivered to the
   selector Cocoa delivers to, with a tag off the table `_arm` built, and
   the tick read back off the item afterwards. Quit included, through a
-  real event loop.
+  real event loop, and pasting lyrics to sync — the one entry that opens a
+  second window — through the pass it really starts.
+- **Asking again after a failure** — the ⓘ and the retry beside it,
+  pressed at their live centres with the press delivered to the top-level
+  `QWindow`, over the same real provider and fake connection: a second
+  request lands on the wire and the window changes its mind. And the
+  refusal case, where a 429 has asked for a pause and the user's own press
+  never opens a socket.
+- **The album warm** — a song starts, the timer fires, and the search and
+  the per-track requests arrive on the same fake connection; then a second
+  window plays one of the warmed tracks and asks nothing at all. Skipped
+  entirely while the service is failing.
 - **Dragging and resizing** — a press, a move and a release routed by Qt,
   so which of the two a press means is Qt's answer and not the test's:
   learning at the end of a drag, learning nothing after a press that moved
   nothing, fitting turned off at the start of an edge drag, and a window
   that is docked, dragged away, and dragged back onto the pixel.
-- **Six of the seven controls on the window** — loop, spoken reference,
-  echo done, tap, undo, discard — pressed at their live centres with the
-  press delivered to the top-level `QWindow`, in both layouts, so Qt picks
-  the receiver.
+- **Every control on the window** — loop, spoken reference, echo done,
+  tap, undo, discard, and now the ⓘ and the retry — pressed at their live
+  centres with the press delivered to the top-level `QWindow`, in both
+  layouts, so Qt picks the receiver. `press_through`, `PressRecord` and
+  `pressing` moved into `helpers.py` when the second file needed them.
 - **The global hotkey** — the callback Carbon was handed is the one that
   hides the lyrics.
 
@@ -242,7 +255,6 @@ the app is actually asked.
 | feature | how it is driven today | what is not exercised |
 |---|---|---|
 | the title card, the line change, the sung line, the romanisation and spoken rows, the glyph following play/pause | `_on_track_change` / `_on_position_update` with a hand-built snapshot | the monitor deciding there was a change at all — which the lyrics tests now do, but only for the fetch |
-| the `why` button | `click()`, which names the receiver | the only one of the seven controls never pressed through Qt |
 | AppKit itself, under the menu | a stand-in with the same selectors | that a real `NSMenuItem` accepts a tag and a target, which only a Mac can answer and is asserted structurally instead |
 | the pointer yield and the strip's reveal | `_check_pointer()` with only `_pointer_position` faked | the `QTimer` that calls it. One call short of driven |
 | the notification yield | `_check_notifications()` with only `occupied_rects` faked | the same |
@@ -267,7 +279,7 @@ wrong about: that a 503 is never written down, and that narration's three
 would have been the two halves again, wearing an `integration` marker.
 
 **The list of what is covered is asked of the app.** The menu file drives
-nineteen entries and then asks `Menu.has_handler` which entries there are,
+twenty entries and then asks `Menu.has_handler` which entries there are,
 so an entry wired up later fails that test rather than quietly going
 uncovered. A written-down list is a list that was true once.
 

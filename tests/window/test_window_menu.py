@@ -286,8 +286,9 @@ def test_toggling_from_the_menu_updates_state_and_settings(make_window):
 
 
 def test_a_refresh_does_not_feed_check_marks_back_into_the_setters(make_window):
-    """Check marks are set programmatically on every render; wiring them to
-    toggled instead of triggered would invert settings behind the user."""
+    """Check marks are set programmatically on every render, and the refresh
+    is the ONE writer of them. A refresh that reached the setters back would
+    invert settings behind the user, three times over here."""
     window = make_window()
     window._view_model.romanisation_enabled = True
     window._spoken_enabled = False

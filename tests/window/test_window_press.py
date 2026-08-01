@@ -9,8 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QPoint, Qt
 
 from sottovoce import proximity
 from sottovoce import window as w
@@ -19,9 +18,12 @@ from sottovoce.player_monitor import PlaybackState
 from helpers import (
     APP,
     KOREAN_SYNCED,
+    PressRecord,
     go_compact,
     hover,
     load,
+    press_through,
+    pressing,
     shown,
     snapshot,
 )
@@ -37,87 +39,15 @@ from helpers import (
 # started a drag". That failure looks like every control on the window
 # being dead, and none of the rest would have gone red for it.
 #
-# So these send the press to the top-level QWindow rather than to a
-# widget. That is the one path that runs Qt's own hit testing: the widget
-# under the point is found there, and a press that finds nothing lands on
-# the window and starts a drag. Sent at each control's ACTUAL position,
-# taken from its geometry rather than named, so a control that moves
-# without its test moving is still being pressed where it is.
-
-
-def press_through(window, point):
-    """Press and release at a window-local point, hit-tested by Qt.
-
-    Delivered to ``windowHandle()``, never to a widget: sending to the
-    widget names the receiver, which is the whole of what needs proving
-    wrong. This is also why the window is shown first, since a widget with
-    no window handle has nothing to route through.
-    """
-    handle = window.windowHandle()
-    assert handle is not None, "the window must be shown to be pressed on"
-    globally = QPointF(window.mapToGlobal(point))
-    for kind, buttons in (
-        (QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
-        (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
-    ):
-        APP.sendEvent(
-            handle,
-            QMouseEvent(
-                kind,
-                QPointF(point),
-                globally,
-                Qt.MouseButton.LeftButton,
-                buttons,
-                Qt.KeyboardModifier.NoModifier,
-            ),
-        )
-    APP.processEvents()
-
-
-class PressRecord:
-    """What a press at a point did: whether the control acted, and whether
-    the window took it for a drag instead.
-
-    Both halves matter and neither implies the other. A control that acted
-    is not proof the window kept its hands off, and a window that started
-    no drag is not proof anything was pressed.
-    """
-
-    def __init__(self, window, button):
-        self._window = window
-        self._button = button
-        self.acted = 0
-        self.dragged = 0
-        self._original = type(window).mousePressEvent
-
-    def __enter__(self):
-        record = self
-
-        def spy(window, event):
-            record.dragged += 1
-            return record._original(window, event)
-
-        # On the type, not the instance: a QWidget's event handlers are
-        # looked up on the class, so an instance attribute would never be
-        # called and the drag would go unrecorded.
-        type(self._window).mousePressEvent = spy
-        self._connection = self._button.clicked.connect(self._acted)
-        return self
-
-    def _acted(self, *_):
-        self.acted += 1
-
-    def __exit__(self, *_):
-        type(self._window).mousePressEvent = self._original
-        self._button.clicked.disconnect(self._connection)
-        return False
-
-
-def pressing(window, button):
-    """Press at the centre of a control and say what happened."""
-    with PressRecord(window, button) as record:
-        press_through(window, button.geometry().center())
-    return record
+# ``press_through``, ``PressRecord`` and ``pressing`` live in helpers.py
+# because test_window_fetch.py needs them too, for the two controls that
+# only exist beside a failed lookup. They send the press to the top-level
+# QWindow rather than to a widget, which is the one path that runs Qt's
+# own hit testing: the widget under the point is found there, and a press
+# that finds nothing lands on the window and starts a drag. Sent at each
+# control's ACTUAL position, taken from its geometry rather than named, so
+# a control that moves without its test moving is still being pressed
+# where it is.
 
 
 def test_the_harness_can_tell_a_control_from_the_window(make_window):

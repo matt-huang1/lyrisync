@@ -134,8 +134,14 @@ def test_each_kind_of_failure_says_which_it_was(make_window):
     """The four the provider can tell apart, end to end."""
     window = make_window()
     for why, expected in (
+        (FetchFailure(kind="http", status=503, attempt="search"),
+         "LRCLIB answered HTTP 503 · search"),
+        # 429 is the one status with a line of its own, because it is the
+        # one this app does something about rather than only reports.
         (FetchFailure(kind="http", status=429, attempt="search"),
-         "LRCLIB answered HTTP 429 · search"),
+         "LRCLIB asked this app to slow down · search"),
+        (FetchFailure(kind="held", retry_after=12.0),
+         "waiting, as LRCLIB asked"),
         (FetchFailure(kind="timeout", attempt="title and artist"),
          "LRCLIB did not answer in time · title and artist"),
         (FetchFailure(kind="connection", attempt="album match"),
@@ -217,3 +223,95 @@ def test_the_control_never_leaves_the_window_at_its_narrowest(make_window):
     right = window._why_button.pos().x() + window._why_button.width()
     assert 0 < window._why_button.pos().x()
     assert right <= window.width()
+
+
+# -- and the one thing to DO about the reason ------------------------------
+
+
+def test_the_retry_belongs_to_the_reason_rather_than_to_the_message(make_window):
+    """The message already says "will retry" and means it. A button beside
+    that sentence would be inviting people to do the thing the app has just
+    promised to do for them, so this one only exists for somebody who has
+    opened the explanation."""
+    window = make_window()
+    fail(window, HTTP_503)
+    assert window._why_button.isVisibleTo(window) is True
+    assert window._retry_button.isVisibleTo(window) is False
+
+    window._why_button.click()
+    APP.processEvents()
+    assert window._retry_button.isVisibleTo(window) is True
+
+    window._why_button.click()  # put the reason away
+    APP.processEvents()
+    assert window._retry_button.isVisibleTo(window) is False
+
+
+def test_the_retry_goes_with_the_song(make_window):
+    """A new song is a different failure or none at all, and the reveal is
+    cleared with it. Its control may not outlive it."""
+    window = make_window()
+    fail(window, HTTP_503)
+    window._why_button.click()
+    APP.processEvents()
+    assert window._retry_button.isVisibleTo(window) is True
+
+    load(window, SYNCED, track_id="t2")
+
+    assert window._retry_button.isVisibleTo(window) is False
+
+
+def on_the_row_of(window, button, row):
+    """Whether the control is vertically centred on that row, and to the
+    right of where its text ends. Asserted as a relationship rather than as
+    a position: what the row's coordinates are is a font measurement, and
+    those differ by platform."""
+    centre = button.mapTo(window, button.rect().center())
+    top_left = row.mapTo(window, row.rect().topLeft())
+    return top_left.y() <= centre.y() <= top_left.y() + row.height()
+
+
+def test_the_retry_sits_beside_the_reason_in_both_layouts(make_window):
+    """The reason lands in the upcoming row in the full layout and in the
+    pronunciation row in the strip, because the strip has no upcoming row.
+    The control follows the reason to whichever one it is, which is the
+    same fork _render_why takes and the whole of what compact changes here.
+    """
+    window = make_window()
+    fail(window, HTTP_503)
+    window._why_button.click()
+    APP.processEvents()
+
+    reason = "LRCLIB answered HTTP 503 · album match"
+    assert window._upcoming.text() == reason
+    assert on_the_row_of(window, window._retry_button, window._upcoming)
+
+    window._set_compact(True)
+    APP.processEvents()
+    window._render()
+
+    assert window._compact_applied is True
+    assert window._pron.text() == reason
+    assert on_the_row_of(window, window._retry_button, window._pron)
+    assert window._retry_button.isVisibleTo(window) is True
+
+
+def test_pressing_the_retry_asks_again_at_once(make_window):
+    """The window's half of it: a fetch is dispatched and the mode leaves
+    ERROR without waiting out the schedule. That a request really goes out
+    on the wire is asserted through the real provider in
+    test_window_fetch.py."""
+    window = make_window()
+    fail(window, HTTP_503)
+    for _ in range(3):
+        window._view_model.fetch_completed(
+            "t1", None, ok=False, now=window._view_model._error_at
+        )
+    assert window._view_model.retry_interval() > 30.0
+
+    window._why_button.click()
+    window._retry_button.click()
+    APP.processEvents()
+
+    assert window._view_model.display().mode is Mode.FETCHING
+    assert window._view_model.failures == 0

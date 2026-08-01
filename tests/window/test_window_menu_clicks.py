@@ -584,6 +584,43 @@ def test_sync_this_song_begins_a_pass_and_the_label_says_which(drawn, make_windo
     assert item_for(window, m.SYNC).title_text == "Re-sync this song"
 
 
+def test_paste_lyrics_to_sync_opens_the_one_window_that_takes_a_keyboard(
+    drawn, make_window
+):
+    """The other way into a pass, and the only entry point in the app that
+    puts a second window on screen.
+
+    It appears exactly where "Sync this song" cannot: a song whose lyrics
+    could not be had. The two are never offered together, which is what
+    keeps this a row rather than a column.
+    """
+    window = make_window()
+    load(window, None, track_id="t9", ok=False)
+    assert item_for(window, m.PASTE_SYNC).hidden is False
+    assert item_for(window, m.SYNC).hidden is True
+
+    click(window, m.PASTE_SYNC)
+
+    paste = window._paste_window
+    assert paste is not None, "the click opened nothing"
+    # And the pass really does start from what was typed into it, with no
+    # lyrics on disk, no cache entry and nothing on the wire. Nothing
+    # closes it here on purpose: handing the lines over is what closes it,
+    # and a test that tidied up afterwards would not have noticed if it
+    # did not.
+    paste.set_text("[ar:Someone]\n[00:04.00] a line they typed\n\nand another\n")
+    paste._on_start()
+    APP.processEvents()
+
+    assert window._syncing is True
+    assert window._view_model.sync_session.lines == [
+        "a line they typed",
+        "and another",
+    ]
+    assert window._paste_window is None, "the window outlived the pass it started"
+    window._cancel_sync()
+
+
 def test_quit_from_a_native_click_runs_the_clean_shutdown(drawn, make_window):
     """Straight to the app's own quit, so the aboutToQuit shutdown runs
     however quit is reached. Driven through a real event loop because that
@@ -653,6 +690,7 @@ COVERED = (
         m.FORGET_POSITIONS,
         m.OPEN_AT_LOGIN,
         m.SYNC,
+        m.PASTE_SYNC,
         m.QUIT,
     }
 )

@@ -38,8 +38,29 @@ DEFAULT_TIMEOUT = 10.0
 
 
 class Response(NamedTuple):
+    """What came back: the status, the body, and the headers beside them.
+
+    The headers are carried as the pairs the connection gave, rather than a
+    dict, because that is what ``getheaders()`` answers and because a
+    response may legitimately repeat a field. Exactly one of them is ever
+    read — ``Retry-After``, which LRCLIB's documentation asks callers to
+    honour — and ``header`` is how.
+    """
+
     status: int
     body: bytes
+    headers: tuple = ()
+
+    def header(self, name: str) -> Optional[str]:
+        """One header, matched without regard to case. HTTP field names are
+        case-insensitive and a server is entitled to spell one however it
+        likes; a lookup that only knew ``Retry-After`` would quietly miss
+        ``retry-after`` and read as "they did not ask us to wait"."""
+        wanted = name.lower()
+        for key, value in self.headers:
+            if str(key).lower() == wanted:
+                return value
+        return None
 
 
 class ConnectionPool:
@@ -92,6 +113,10 @@ class ConnectionPool:
         connection.request("GET", path, headers=headers or {})
         response = connection.getresponse()
         body = response.read()
+        # Read before the connection is given back or closed, like the body
+        # above: what is being handed to the caller has to be values rather
+        # than a live handle onto a socket this method is about to let go of.
+        received = tuple(response.getheaders())
         # will_close is the server's answer to whether this socket can be
         # asked another question. Reading the body first is what makes it
         # meaningful — and what leaves the connection usable at all.
@@ -99,7 +124,7 @@ class ConnectionPool:
             _close_quietly(connection)
         else:
             self._give_back(connection)
-        return Response(response.status, body)
+        return Response(response.status, body, received)
 
     def _take(self):
         with self._lock:

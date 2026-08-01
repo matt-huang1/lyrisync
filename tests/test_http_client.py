@@ -16,13 +16,17 @@ from sottovoce.http_client import ConnectionPool, Response
 
 
 class FakeResponse:
-    def __init__(self, status=200, body=b"{}", will_close=False):
+    def __init__(self, status=200, body=b"{}", will_close=False, headers=()):
         self.status = status
         self._body = body
         self.will_close = will_close
+        self._headers = list(headers)
 
     def read(self):
         return self._body
+
+    def getheaders(self):
+        return list(self._headers)
 
 
 class FakeConnection:
@@ -30,12 +34,13 @@ class FakeConnection:
     can be told to fail on its next request, which is what a connection
     the server dropped while idle looks like from here."""
 
-    def __init__(self, *, fail_next=False, will_close=False, status=200):
+    def __init__(self, *, fail_next=False, will_close=False, status=200, headers=()):
         self.requests = []
         self.closed = False
         self.fail_next = fail_next
         self.will_close = will_close
         self.status = status
+        self.headers = list(headers)
 
     def request(self, method, path, headers=None):
         self.requests.append((method, path, headers or {}))
@@ -44,7 +49,9 @@ class FakeConnection:
             raise http.client.RemoteDisconnected("closed by server")
 
     def getresponse(self):
-        return FakeResponse(status=self.status, will_close=self.will_close)
+        return FakeResponse(
+            status=self.status, will_close=self.will_close, headers=self.headers
+        )
 
     def close(self):
         self.closed = True

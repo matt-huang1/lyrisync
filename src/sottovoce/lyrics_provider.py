@@ -11,10 +11,21 @@ Lookups consult ``.user_syncs/`` first: LRC files the user built by hand
 with tap-to-sync. That directory is the user's own work, not a cache — it
 is written only on an explicit save, is never invalidated or expired, and
 nothing in this app deletes from it.
+
+Below the cache and above the network sits the album warm: lyrics fetched
+while an earlier track was playing, for tracks that have not played yet.
+It can answer yes and it can answer nothing; it can never answer "this
+track has no lyrics", because it is a guess made without the track in hand.
+
+One thing here is not per-provider and cannot be: the pause LRCLIB asks
+for with ``Retry-After`` on a 429. It is a fact about the host, it is
+checked at the single point every request goes through, and while it
+stands nothing leaves this app.
 """
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
@@ -31,14 +42,17 @@ from typing import Iterator, Optional
 # have always read it from this module; what it must never be again is a
 # second copy of the version, written by hand and right for one release.
 from sottovoce import USER_AGENT
+from sottovoce.backoff import Hold
 from sottovoce.failure import (
     ATTEMPT_ALBUM,
     ATTEMPT_EXACT,
     ATTEMPT_SEARCH,
     CONNECTION,
     FetchFailure,
+    HELD,
     HTTP,
     PAYLOAD,
+    RATE_LIMITED_STATUS,
     TIMEOUT,
     UNKNOWN,
 )
@@ -55,6 +69,11 @@ DEFAULT_CACHE_DIR = Path(".lyrics_cache")
 # cache is a documented reset, and it must never cost the user a sync they
 # tapped out themselves.
 DEFAULT_USER_SYNC_DIR = Path(".user_syncs")
+# Lyrics fetched ahead of being needed, for tracks that have not played.
+# INSIDE the cache directory, deliberately and for the mirror of the reason
+# above: this is the one thing here nobody made, so clearing the cache must
+# take it with everything else.
+_WARM_SUBDIR = "album"
 
 _REQUEST_TIMEOUT = 10.0
 # One second of slack over the socket's own timeout: the socket is what
@@ -89,6 +108,29 @@ _CHAIN_WIDTH = 3
 # /api/get only matches durations within ~2s, so search results this far
 # from Spotify's duration are considered a different recording.
 _SEARCH_DURATION_TOLERANCE = 10.0
+# What a warmed track has to agree about before it is used, and it is the
+# TIGHT number rather than the loose one above. A warm entry is served
+# instead of walking the chain, so it has to be as precise as the attempt
+# it stands in for — the album match — or warming would quietly demote
+# every track it touched from an exact answer to a search-shaped one.
+#
+# MEASURED, and it earns its keep: of 20 tracks warmed across 4 real albums
+# the answer disagreed with the real recording's duration 3 times. Those
+# three fall through to the ordinary chain, which is exactly what this
+# number is for.
+_WARM_DURATION_TOLERANCE = 2.0
+# Between the requests of an album warm. LRCLIB's API documentation asks
+# that batch work — it names library scanning — be sent sequentially, one
+# at a time, with 200 to 500ms between requests. This is the middle of the
+# band they give, and it is what the coverage measurement above was taken
+# at: 4 searches and 20 gets, no 429.
+WARM_REQUEST_GAP_SECONDS = 0.35
+# The most requests one album's warm may spend. LRCLIB's search answers
+# with 20 records, so today this binds nothing at all — it is a ceiling on
+# a number that comes from somebody else's service, and the alternative is
+# an app whose quiet background traffic is however long a response they
+# decide to send.
+_WARM_MAX_REQUESTS = 20
 
 # [mm:ss.xx] — also tolerates [m:ss] and multiple stamps per line.
 # Metadata tags like [ar:...] contain no m:ss pair and never match.
@@ -126,7 +168,15 @@ class LyricsError(Exception):
         down. A new exception rather than a mutated one: an exception that
         rewrites itself as it propagates is a poor thing to read a
         traceback from.
+
+        A refusal by this app's own pause is left unstamped, because it
+        belongs to no link of the chain: it happens before a request is
+        made and it would have happened at every attempt equally. "Waiting,
+        as LRCLIB asked · album match" reads as though the album match were
+        what was waiting.
         """
+        if self.failure.kind == HELD:
+            return self
         return LyricsError(
             self.args[0] if self.args else str(self),
             replace(self.failure, attempt=attempt),
@@ -168,6 +218,18 @@ def parse_lrc(text: str) -> list[tuple[float, str]]:
 _pool: Optional[ConnectionPool] = None
 _pool_lock = threading.Lock()
 
+# A pause LRCLIB asked for. Module level for the pool's reason and a
+# sharper version of it: this is a fact about the HOST, not about a
+# provider instance, and a hold that only covered the lookups made through
+# one object would be no hold at all the moment a second one existed.
+#
+# It sits in front of _fetch_json rather than in front of the retry timer
+# because the retry timer is one of several ways a request leaves this app:
+# a track change asks straight away, and so does the album warm. LRCLIB's
+# documentation says ignoring Retry-After may earn a temporary ban, and a
+# ban is not something a user skipping tracks should be able to walk into.
+_hold = Hold()
+
 
 def _lrclib_pool() -> ConnectionPool:
     """The one door onto LRCLIB, and the connections kept alive to it.
@@ -197,10 +259,44 @@ def close_connections() -> None:
         pool.close()
 
 
+def _retry_after_seconds(response) -> Optional[float]:
+    """The pause LRCLIB asked for, in seconds, or None.
+
+    Only the delta-seconds form is read. RFC 7231 also allows an HTTP date,
+    and reading one would mean trusting this machine's clock to agree with
+    theirs about the current time — a skewed clock would turn "wait 30
+    seconds" into a pause of hours or none at all. A header this app cannot
+    read is treated as no number rather than as a guess, and the caller
+    still holds for its own schedule.
+    """
+    raw = response.header("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        logger.info("Retry-After was not a number of seconds: %r", raw)
+        return None
+
+
 def _fetch_json(url: str):
     """GET a JSON document. Returns the parsed body, or None on 404 (a
     definitive "not found"). Raises LyricsError for anything whose outcome
-    is unknown: network trouble, other HTTP errors, unparseable payload."""
+    is unknown: network trouble, other HTTP errors, unparseable payload —
+    and for a request this app declined to make at all, while a pause
+    LRCLIB asked for is still running."""
+    waiting = _hold.remaining(time.monotonic())
+    if waiting > 0:
+        # Refused here rather than at any of the three places a lookup is
+        # started from, so a caller added later cannot miss it. It is a
+        # failure the window can show and explain, and the one kind of
+        # failure that is not evidence about LRCLIB: see failure.HELD.
+        logger.info("not asking for %s: %.1fs left of the pause", url, waiting)
+        raise LyricsError(
+            "waiting as LRCLIB asked",
+            FetchFailure(kind=HELD, retry_after=waiting),
+        )
+
     split = urllib.parse.urlsplit(url)
     path = split.path + (f"?{split.query}" if split.query else "")
     try:
@@ -217,6 +313,21 @@ def _fetch_json(url: str):
     logger.info("GET %s -> %d", url, response.status)
     if response.status == 404:
         return None
+    if response.status == RATE_LIMITED_STATUS:
+        # The one status that carries an instruction. The pause starts here,
+        # at the point the answer arrives, so every other request in flight
+        # or about to be made obeys it too — the fallback chain runs its
+        # attempts concurrently, and two of them being told to slow down
+        # while the third goes out anyway is the case this must not have.
+        asked = _retry_after_seconds(response)
+        _hold.asked_to_wait(asked or 0.0, time.monotonic())
+        logger.warning("LRCLIB asked for a pause of %ss", asked)
+        raise LyricsError(
+            f"LRCLIB returned HTTP {response.status}",
+            FetchFailure(
+                kind=HTTP, status=response.status, retry_after=asked
+            ),
+        )
     if response.status != 200:
         raise LyricsError(
             f"LRCLIB returned HTTP {response.status}",
@@ -378,6 +489,38 @@ def attempt_urls(snapshot: PlayerSnapshot) -> list[str]:
     return [url for _, url in attempts(snapshot)]
 
 
+# Where an answer came from. Only one distinction is acted on — whether
+# LRCLIB itself answered — but naming all four is what makes that one
+# readable at the other end, and a log line that says which of them it was
+# is worth more than a boolean.
+FROM_USER_SYNC = "user sync"
+FROM_CACHE = "cache"
+FROM_WARM = "warmed"
+FROM_SERVICE = "lrclib"
+FROM_NOWHERE = "nothing to ask"
+
+
+@dataclass(frozen=True)
+class Lookup:
+    """One answer, and where it came from.
+
+    The source exists for the retry schedule. "The lookup succeeded" and
+    "LRCLIB is answering" are two different facts, and treating them as one
+    is how a backoff resets itself in the middle of an outage: during one,
+    every song the user has played before still answers instantly from the
+    cache, and a counter that reset on those would be back to a 30 second
+    retry on every uncached track. Only ``FROM_SERVICE`` is evidence about
+    the service.
+    """
+
+    lyrics: Optional[TrackLyrics]
+    source: str
+
+    @property
+    def from_service(self) -> bool:
+        return self.source == FROM_SERVICE
+
+
 class LyricsProvider:
     def __init__(
         self,
@@ -386,12 +529,23 @@ class LyricsProvider:
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.user_sync_dir = Path(user_sync_dir)
+        # Derived rather than injected: it is cache, so it belongs under
+        # the cache directory, and one argument fewer is one fewer way for
+        # a caller to put it somewhere clearing the cache would not reach.
+        self.warm_dir = self.cache_dir / _WARM_SUBDIR
 
     def get_lyrics(self, snapshot: PlayerSnapshot) -> Optional[TrackLyrics]:
-        """Lyrics for the snapshot's track: user sync, then cache, then
-        LRCLIB.
+        """Lyrics for the snapshot's track, and nothing about where they
+        came from. What the terminal tools use, and what every caller used
+        before the retry schedule needed to tell a cache hit from an
+        answer."""
+        return self.look_up(snapshot).lyrics
 
-        Returns None when the track definitively has no lyrics or the
+    def look_up(self, snapshot: PlayerSnapshot) -> Lookup:
+        """Lyrics for the snapshot's track: user sync, cache, the album
+        warm, then LRCLIB — with the source they came from.
+
+        ``lyrics`` is None when the track definitively has no lyrics or the
         snapshot has no usable track metadata. Raises LyricsError when
         LRCLIB can't be reached or errors — that outcome is never cached,
         so the track is retried next time.
@@ -401,25 +555,39 @@ class LyricsProvider:
         # READ here would show the song's lyrics during the narration —
         # and a write would poison the song's entry with narration metadata.
         if not snapshot.is_music_track:
-            return None
+            return Lookup(None, FROM_NOWHERE)
 
         # The user's own sync outranks everything: they made it because the
         # remote answer was plain (or wrong), so neither the cached copy of
         # that answer nor a fresh fetch may override it.
         user_sync = self.read_user_sync(snapshot.track_id)
         if user_sync is not None:
-            return user_sync
+            return Lookup(user_sync, FROM_USER_SYNC)
 
         cached = self._read_cache(snapshot.track_id)
         if cached is not None:
-            return self._decode_cache_entry(cached)
+            return Lookup(self._decode_cache_entry(cached), FROM_CACHE)
 
         if not snapshot.title or not snapshot.artist:
-            return None
+            return Lookup(None, FROM_NOWHERE)
+
+        # Fetched ahead of time, while this album's first track was
+        # playing. Below the cache and above the network, and it can only
+        # answer YES: a track the warm never reached, or reached and got a
+        # different recording of, falls through to the chain exactly as if
+        # warming had never run. Nothing here is ever written down as a
+        # miss — see read_warm.
+        warmed = self.read_warm(snapshot)
+        if warmed is not None:
+            # Promoted to an ordinary cache entry on the way past, so the
+            # second play of this track takes the fast path above and the
+            # duration is never checked twice.
+            self._write_cache(snapshot.track_id, warmed)
+            return Lookup(warmed, FROM_WARM)
 
         lyrics = self._fetch(snapshot)
         self._write_cache(snapshot.track_id, lyrics)
-        return lyrics
+        return Lookup(lyrics, FROM_SERVICE)
 
     def _fetch(self, snapshot: PlayerSnapshot) -> Optional[TrackLyrics]:
         """Fallback chain against LRCLIB's exact-match /get endpoint, which
@@ -498,6 +666,241 @@ class LyricsProvider:
         if synced or plain:
             return TrackLyrics(synced=synced or None, plain=plain)
         return None
+
+    # -- the album, fetched before it is needed ----------------------------
+    #
+    # An outage is only invisible for songs that were already answered, so
+    # the one useful thing to do while the network is up is to answer more
+    # of them. The rest of the album is the obvious guess: people play
+    # albums in order, and the app is holding the album's name already.
+    #
+    # ## Why it takes two rounds
+    #
+    # Spotify's scripting dictionary describes the CURRENT track and
+    # nothing else — there is no way to ask it what else is on the album.
+    # So the track list has to come from LRCLIB too, and that is round one:
+    # one /api/search for the album, whose records name tracks.
+    #
+    # Round two asks /api/get per name, and it is not an optimisation to
+    # skip it. MEASURED over 4 real albums (47 tracks, ground truth from
+    # the iTunes catalogue): the search's own records would serve 19% of
+    # the album under a duration check tight enough to be trustworthy,
+    # because the durations in a search hit are frequently a different
+    # recording's. Asking /get per name instead reaches 47% of the album,
+    # and 17 of 20 answers agreed with the real duration within 2s — so
+    # roughly 40% of an album ends up warm and usable.
+    #
+    # It costs one search and about 19 gets per album, of which the
+    # measurement found 29% useful; the other names in the response are
+    # karaoke versions, medleys and mislabelled uploads, and nothing about
+    # them says so up front. That is the whole price of the feature, it is
+    # paid once per album ever, and it is spread at LRCLIB's own asking:
+    # sequentially, one at a time, WARM_REQUEST_GAP_SECONDS apart.
+    #
+    # Filtering the names by album was measured too, and it is why there is
+    # no filter: keeping only records whose albumName matches the one
+    # playing costs 24 requests and reaches ZERO of the 47 tracks. LRCLIB's
+    # album names are user-supplied and rarely spelled the way Spotify
+    # spells them.
+
+    def warm_path(self, artist: str, album: str, title: str) -> Path:
+        """Where one warmed track lives.
+
+        Keyed by what will be KNOWN when it plays — artist, album, title —
+        because a Spotify track ID is exactly what this app does not have
+        for a song it has never seen. The readable stem is for whoever
+        looks in the directory; the digest after it is what makes the name
+        safe and short whatever the song is called.
+        """
+        key = "\n".join(part.strip().lower() for part in (artist, album, title))
+        stem = _SAFE_FILENAME_RE.sub("_", title.strip().lower())[:48]
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+        return self.warm_dir / f"{stem}-{digest}.json"
+
+    def album_marker_path(self, artist: str, album: str) -> Path:
+        """The note that says this album has been warmed once.
+
+        Written on completion only. An album whose warm was cut short by a
+        failure or by shutdown is left unmarked, so a later track from it
+        may try again; an album that finished is never asked about twice,
+        however many of its tracks the user plays.
+        """
+        key = "\n".join(part.strip().lower() for part in (artist, album))
+        stem = _SAFE_FILENAME_RE.sub("_", album.strip().lower())[:48]
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+        return self.warm_dir / f"{stem}-{digest}.album"
+
+    def album_is_warm(self, snapshot: PlayerSnapshot) -> bool:
+        if not snapshot.artist or not snapshot.album:
+            return False
+        return self.album_marker_path(snapshot.artist, snapshot.album).is_file()
+
+    def read_warm(self, snapshot: PlayerSnapshot) -> Optional[TrackLyrics]:
+        """The warmed answer for this track, if there is one and it is
+        about this recording.
+
+        Two ways to answer None and they mean the same thing to the caller
+        — ask LRCLIB — which is the whole design of this store: it can say
+        yes and it can say nothing, and it can never say "this track has no
+        lyrics". Warming is a guess made without the track in hand, and a
+        guess is not allowed to write anything down that would stop the
+        real question being asked.
+
+        The duration is what makes a yes trustworthy. It is checked against
+        the tolerance /api/get itself matches on, not the looser one search
+        results get, because this answer is standing in for the album match
+        rather than for the search.
+        """
+        if not snapshot.artist or not snapshot.album or not snapshot.title:
+            return None
+        if snapshot.duration_ms is None:
+            # Nothing to check the record against. "Prefer no lyrics to
+            # mismatched-duration lyrics" is the rule, and an unverifiable
+            # warm entry is exactly the case it was written for.
+            return None
+        try:
+            entry = json.loads(
+                self.warm_path(
+                    snapshot.artist, snapshot.album, snapshot.title
+                ).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        stored = entry.get("duration")
+        if stored is None:
+            return None
+        if abs(float(stored) - snapshot.duration_ms / 1000) > _WARM_DURATION_TOLERANCE:
+            logger.info(
+                "warmed %r is a different recording (%.0fs against %.0fs)",
+                snapshot.title,
+                float(stored),
+                snapshot.duration_ms / 1000,
+            )
+            return None
+        return self._decode_cache_entry(entry)
+
+    def _write_warm(self, artist: str, album: str, title: str, record: dict) -> bool:
+        """Keep one warmed track. False when the record is not worth
+        keeping, which is a record with no lyrics in it or no duration to
+        recognise it by later."""
+        lyrics = self._decode_record(record)
+        duration = record.get("duration")
+        if lyrics is None or duration is None:
+            return False
+        entry = {
+            "found": True,
+            "duration": float(duration),
+            "synced": lyrics.synced,
+            "plain": lyrics.plain,
+        }
+        try:
+            self.warm_dir.mkdir(parents=True, exist_ok=True)
+            self.warm_path(artist, album, title).write_text(
+                json.dumps(entry, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError:
+            return False  # cache is best-effort, and this most of all
+        return True
+
+    def album_track_names(self, snapshot: PlayerSnapshot) -> list[str]:
+        """Round one: the names LRCLIB has under this album, in the order
+        it gave them, without the one that is playing.
+
+        Deliberately unfiltered beyond de-duplication. See the note above:
+        filtering by album name reached none of 47 real tracks.
+        """
+        query = urllib.parse.urlencode({"q": f"{snapshot.album} {snapshot.artist}"})
+        records = _fetch_json(f"{LRCLIB_SEARCH_URL}?{query}") or []
+        playing = snapshot.title.strip().lower()
+        names: list[str] = []
+        seen = {playing}
+        for record in records:
+            name = str(record.get("trackName", "")).strip()
+            if not name or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            names.append(name)
+        return names
+
+    def warm_album(
+        self,
+        snapshot: PlayerSnapshot,
+        sleep=time.sleep,
+        should_stop=None,
+    ) -> int:
+        """Fetch the rest of this album into the warm store. Returns how
+        many tracks were stored.
+
+        Raises nothing: every failure here is a failure of something
+        nobody is waiting for, so it is logged and abandoned. What it does
+        NOT do is swallow the pause — a 429 anywhere in here sets the same
+        module-level hold every other request obeys, and the next call to
+        _fetch_json refuses on its own.
+
+        ``sleep`` and ``should_stop`` are the caller's: the gap between
+        requests is real time on a worker thread, and shutdown has to be
+        able to end it without waiting out the album.
+        """
+        if not snapshot.is_music_track or not snapshot.album or not snapshot.artist:
+            return 0
+        if self.album_is_warm(snapshot):
+            return 0
+        artist, album = snapshot.artist, snapshot.album
+        try:
+            names = self.album_track_names(snapshot)
+        except LyricsError as exc:
+            logger.info("album warm gave up before it started: %s", exc)
+            return 0
+        stored = 0
+        asked = 0
+        for name in names:
+            if should_stop is not None and should_stop():
+                logger.info("album warm stopped after %d of %d", asked, len(names))
+                return stored
+            if asked >= _WARM_MAX_REQUESTS:
+                logger.info("album warm capped at %d requests", _WARM_MAX_REQUESTS)
+                break
+            if self.warm_path(artist, album, name).is_file():
+                continue
+            # Sequential and spaced, which is LRCLIB's own instruction for
+            # work like this. Before the request rather than after it, so
+            # the first one is spaced from whatever the playing track's own
+            # lookup was doing a moment ago.
+            sleep(WARM_REQUEST_GAP_SECONDS)
+            asked += 1
+            try:
+                record = _fetch_json(
+                    LRCLIB_GET_URL
+                    + "?"
+                    + urllib.parse.urlencode(
+                        {
+                            "track_name": name,
+                            "artist_name": artist,
+                            "album_name": album,
+                        }
+                    )
+                )
+            except LyricsError as exc:
+                # One failure ends the album. Nothing is waiting on this,
+                # and a service that just refused one request is not one to
+                # keep asking nineteen more times.
+                logger.info("album warm stopped: %s", exc)
+                return stored
+            if record and self._write_warm(artist, album, name, record):
+                stored += 1
+        try:
+            self.warm_dir.mkdir(parents=True, exist_ok=True)
+            self.album_marker_path(artist, album).write_text("", encoding="utf-8")
+        except OSError:
+            pass  # it will simply be warmed again another day
+        logger.info(
+            "album warm for %r: %d of %d names stored, %d requests",
+            album,
+            stored,
+            len(names),
+            asked + 1,
+        )
+        return stored
 
     # -- user syncs --------------------------------------------------------
 

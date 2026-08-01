@@ -1,6 +1,7 @@
 # Tap-to-sync
 
-Timing a song by hand, when LRCLIB only has plain lyrics for it.
+Timing a song by hand: when LRCLIB only has plain lyrics for it, or when
+it has nothing at all and you bring the words yourself.
 
 ## The pass
 
@@ -71,6 +72,38 @@ assuming it lands on plain lyrics.
 Its lines come from the sync being replaced, not from a new fetch, so a
 re-sync works offline and after `.lyrics_cache/` has been cleared. See
 [lyrics and caching](lyrics-and-caching.md).
+
+## When there are no lyrics to stamp
+
+Tap-to-sync used to need LRCLIB to have answered, which made it useless in
+the one situation it is best at: a song nobody has written down, or a
+service that is down. When there are no lines to stamp and the song could
+still have some — the lookup failed, or LRCLIB genuinely has nothing — the
+menu offers **Paste lyrics to sync…** instead.
+
+That opens a small window with a text box: paste the words, one line per
+lyric, and press *Start tap-to-sync*. From there it is an ordinary pass —
+the same stamping surface, the same save into `.user_syncs/`, the same
+reload afterwards — and no part of it touches the network.
+
+The two entries are never offered together. A song with lyrics has "Sync
+this song"; a song without has the way to bring some.
+
+**Why a second window.** The lyrics window is frameless, refuses focus and
+shows without activating, because it is an overlay that must never take
+the keyboard away from what you are actually doing. A text field is the
+one thing none of that can support. So the box is an ordinary window
+drawn by the system, with a title bar and a close button, and it is gone
+the moment the pass begins. It borrows exactly one thing from the overlay
+— staying on top — because otherwise it would be the one window you could
+lose behind the one you opened it for.
+
+**Pasting an `.lrc` file works.** What people have to hand is frequently
+one, so leading timestamps are stripped and the words kept, and metadata
+tags like `[ar:...]` are dropped rather than made into lines you have to
+tap through. A bracket in the middle of a line is left alone: that is your
+punctuation, and guessing further about your own words is how a sync loses
+the line you were waiting for.
 
 ## What a pass survives
 

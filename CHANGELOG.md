@@ -6,6 +6,50 @@ reasoning behind each is in [docs/](docs/).
 Entries before the rename below call the app **LyriSync**, because that is
 what it was called when they happened.
 
+## Resilience — a growing backoff, a retry you can press, lyrics you can paste, an album fetched ahead
+
+**"Will retry" meant every 30 seconds, for ever.** A song left on screen
+through a three hour outage made **360** requests of a free service that
+was already struggling, all asking the same question. The interval now
+doubles from 30 seconds to a five minute ceiling, which makes **38** over
+the same outage; the first retry is unchanged, because most failures are a
+blip and that is the case it answers. The ceiling is five minutes because
+a track change re-attempts at once and 88% of songs are shorter than that,
+so for seven songs in eight the next track gets there first.
+
+**Only an answer from LRCLIB resets the schedule.** During an outage every
+song you have played before still answers instantly from the cache, and a
+counter that reset on those would be back to 30 seconds on every uncached
+track.
+
+**A 429 is now obeyed rather than counted.** LRCLIB's documentation asks
+callers to honour `Retry-After` and warns that ignoring it may earn a
+temporary ban, so a 429 starts a pause during which nothing at all leaves
+the app — not a retry, not a new track's lookup, not the background warm.
+
+**You can ask again without waiting.** Beside the *reason* a lookup
+failed, not beside the message: "lyrics unavailable, will retry" already
+promises the thing, so the control is there for somebody who opened the
+explanation and knows the service is back. It resets the schedule; it
+cannot waive a pause LRCLIB asked for.
+
+**Tap-to-sync no longer needs the network.** It could only start from
+plain lyrics LRCLIB had answered with, which made it useless in the one
+situation it is best at. When a song has no lyrics to stamp, the menu
+offers **Paste lyrics to sync…**, which opens a small window with a text
+box — the lyrics window is unfocusable by design and a text field is the
+one thing that cannot live in it. Pasting an `.lrc` works: timestamps and
+metadata tags are stripped, your punctuation is not.
+
+**And the rest of the album is fetched before you get to it.** When a
+track starts, the app quietly looks up the other tracks on the same album,
+so a later outage has less to be noticeable about. Measured over four real
+albums: about **40%** of an album ends up cached and usable, for one
+search and roughly nineteen small requests, paid once per album ever.
+Requests go out one at a time with 350ms between them, which is what
+LRCLIB asks for; none of it runs while the service is failing, and nothing
+ever waits for it.
+
 ## Fix 22.3 — a measured lead, a traced press, two shapes
 
 **The wrap fired early most of the time and late occasionally**, which is

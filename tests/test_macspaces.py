@@ -33,3 +33,34 @@ def test_activation_policy_is_accessory_only():
     assert ms.ACTIVATION_POLICY_ACCESSORY == 1
     assert not hasattr(ms, "activation_policy_for")
     assert not hasattr(ms, "ACTIVATION_POLICY_REGULAR")
+
+
+def test_nsapplication_is_reached_through_exactly_one_door():
+    """Two things in this app ask NSApplication something — the accessory
+    policy at startup, and bringing the app forward so the paste window can
+    take the keyboard — and they are one capability.
+
+    Structural, like every other door here: a second import site would pass
+    every behavioural test while giving the suite a way to activate the
+    developer's app, which is precisely what ``_nsapp`` answering None off
+    cocoa is there to prevent.
+    """
+    import ast
+    from pathlib import Path
+
+    from sottovoce import window as w
+
+    tree = ast.parse(Path(w.__file__).read_text(encoding="utf-8"))
+    importers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and any(alias.name == "NSApplication" for alias in node.names)
+    ]
+    assert len(importers) == 1, "NSApplication is imported in more than one place"
+    door = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_nsapp"
+    )
+    assert importers[0] in list(ast.walk(door)), "the import is outside _nsapp"
