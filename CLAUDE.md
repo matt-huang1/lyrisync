@@ -87,7 +87,7 @@ the fixtures are in `conftest.py`, so nothing imports a conftest by name.
 
 ## The testing guards
 
-`tests/conftest.py` shuts thirteen doors for the whole session. They are the
+`tests/conftest.py` shuts fourteen doors for the whole session. They are the
 alarm, not the fix — the seams are the fix.
 
 | guard | catches |
@@ -155,6 +155,20 @@ Rules that come with them:
   so the window between a seek being sent and it landing never contains a
   poll, and the first version of the harness passed against the unfixed
   loop.
+- **A fake goes as far down as the seam allows.** An `integration` test
+  fakes the OUTSIDE and nothing of this app's own: the lyrics path is
+  faked at the **connection** (`http_client`'s connect factory), so the
+  pool, the hedge, the priority order and the cache are all real, and the
+  menu is faked at **AppKit's own classes**, so the tag table, the one
+  selector every click arrives through and the refresh that writes the
+  tick are all real. A stub one layer higher — `_fetch_json`,
+  `Menu.trigger` — is the two halves again, wearing an `integration`
+  marker.
+- **The list of what is covered is asked of the app.** Every menu entry a
+  click can reach is driven, and the set is read off `Menu.has_handler`
+  rather than written down, so an entry wired up later fails the
+  completeness test instead of quietly going uncovered. A written-down
+  list is a list that was true once.
 - **A control is proved by a press, and the press goes to the WINDOW.**
   Calling a slot, calling `click()`, and asking `isVisibleTo` all name the
   receiver, which is the one thing a hit-testing bug gets wrong: 1483
@@ -517,7 +531,11 @@ Rules that come with them:
   those ends a "drag" of zero pixels, and every one of those recorded a
   position and lit the glow that says so — so the app answered a press
   meant for a control by announcing it had learned something.
-  `learn_refusal` names it (`the window was not moved`).
+  `learn_refusal` names it (`the window was not moved`), and the proof is
+  a press, a move and a release that **Qt routed**: a test that builds its
+  own press and calls `move()` for the drag has supplied the geometry the
+  release compares against, and a drag of zero pixels is exactly what it
+  cannot produce.
 - **A press ON this window IS a pointer on this window**, and the event
   brings the answer with it: no region test, no second reading. The
   strip's controls come out when the POLL notices the pointer, up to
