@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sottovoce"
-version = "1.1.0"
+version = "1.2.0"
 description = "Synced lyrics for the Spotify desktop app on macOS"
 requires-python = ">=3.12"
 # PySide6 is only imported by the window; monitor, provider, and sync
