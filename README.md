@@ -57,11 +57,11 @@ This is also the route that requires trusting nobody: you can read what you are 
 
 ### Or download the release
 
-[**SottoVoce-1.1.0.zip**](https://github.com/matt-huang1/sottovoce/releases/download/v1.1.0/SottoVoce-1.1.0.zip) (36 MB) — built from the `v1.1.0` tag. Check it before opening it:
+[**SottoVoce-1.2.0.zip**](https://github.com/matt-huang1/sottovoce/releases/download/v1.2.0/SottoVoce-1.2.0.zip) (36 MB) — built from the `v1.2.0` tag. Check it before opening it:
 
 ```sh
-shasum -a 256 ~/Downloads/SottoVoce-1.1.0.zip
-# 30a22e07cbe628e022f4944c755b10192e89bf9b766e3b564e1de0fee1f8483e
+shasum -a 256 ~/Downloads/SottoVoce-1.2.0.zip
+# 36924a77a42564ce461429166b5c62d67547fd6477f99721f7ee5c9869da9131
 ```
 
 1.0.0 was published before this app was renamed, so the zip and the app
